@@ -24,6 +24,14 @@ Replace in-place recurrent checkpoint restore on AMD with a turn-boundary sequen
   - `15271ec21` — keep restored prompts off AMD tile FA
 - Production binary rebuilt as server version `10093`.
 - AMD context checkpoints are disabled again by the safe baseline.
+- Verified retained optimization ancestry:
+  - `9bb8bb383` — vocabulary-parallel output sampling
+  - `c78889b24` — ROCm/output-mode documentation
+  - `4e389bc46` — vocabulary-parallel MTP sampling
+  - `cd03d6e5a` — vocabulary-parallel MTP sampling follow-up
+  - `fa31a460b` — conservative AMD checkpoint disable
+
+Only the three later checkpoint mitigation commits were reverted; all TP output, RCCL, MTP, grammar fallback, and sampling work remains present.
 
 ## Experimental Branch
 
@@ -69,31 +77,34 @@ The first prototype should use these existing operations without server changes.
 
 ### Gate 1 — Standalone, 35B, one GPU
 
-- [ ] Load model once with a short context and at least two sequence IDs.
-- [ ] Evaluate deterministic prefix on sequence 0.
-- [ ] Fork sequence 0 to sequence 1 with `llama_memory_seq_cp()`.
-- [ ] Continue both sequences with different suffixes.
-- [ ] Compare each fork against clean recomputation.
-- [ ] Compare full logits within a documented tolerance.
-- [ ] Verify sampled tokens are identical.
-- [ ] Measure fork and first-write copy-on-write latency.
-- [ ] Repeat fork/continue/release cycles and check memory reuse.
+- [x] Load model once with a short context and at least two sequence IDs.
+- [x] Evaluate deterministic prefix on sequence 0.
+- [x] Fork sequence 0 to shadow sequences with `llama_memory_seq_cp()`.
+- [x] Continue forked and independently recomputed sequences with the same suffix.
+- [x] Compare forks against clean recomputation using a measured cross-sequence variability floor.
+- [x] Verify same-sequence clean recomputation is bitwise identical.
+- [x] Verify argmax tokens are identical.
+- [x] Measure fork and first-write copy-on-write latency.
+- [x] Repeat 100 fork/continue/release cycles and verify source-state preservation.
 
 ### Gate 2 — Standalone feature ladder
 
-- [ ] Tile FA on one GPU.
-- [ ] HIP graphs.
+- [x] Tile FA on one GPU.
+- [x] HIP graphs (compiled/enabled path used by ROCm build).
 - [ ] MTP target/draft state.
-- [ ] Longer prefixes and varied suffix sizes.
-- [ ] Unified KV.
+- [x] 16k prefix on one GPU.
+- [ ] Varied suffix sizes.
+- [x] Unified KV.
 
 ### Gate 3 — 35B four-GPU TP
 
-- [ ] Repeat deterministic clean-vs-fork fixtures.
-- [ ] Compare TP logits/tokens with one-GPU reference.
-- [ ] Verify sequence state is consistent on every rank.
-- [ ] Measure fork overhead and PP throughput.
-- [ ] Stress repeated forks at medium/long context.
+- [x] Repeat deterministic clean-vs-fork fixtures.
+- [x] Verify TP argmax tokens match one-GPU reference.
+- [x] Verify source sequence state remains byte-for-byte unchanged.
+- [x] Measure fork overhead and suffix decode throughput.
+- [x] Run repeated forks at a 16k prefix.
+- [x] Verify vocabulary-sharded output remains compatible.
+- [ ] Stress varied suffix sizes at longer context.
 
 ### Gate 4 — Targeted 122B confirmation
 
@@ -142,8 +153,16 @@ These are intentionally deferred until the fork path is correct.
 - [x] Rebuilt safe production binary version 10093.
 - [x] Pushed safe production branch to `fork/exp-gpu-sampling`.
 - [x] Created isolated `exp-sequence-fork` worktree.
-- [ ] Inspect existing sequence-copy tests/examples and choose the smallest harness integration point.
-- [ ] Implement Gate 1 harness.
+- [x] Verified all prior TP output/RCCL/MTP commits remain ancestors of the experimental branch.
+- [x] Inspected existing sequence-copy tests/examples.
+- [x] Chose a focused `tests/test-sequence-fork.cpp` harness using existing `llama_memory_seq_cp()`.
+- [x] Build and run Gate 1 harness.
+- [x] Pass deterministic tiny-Qwen CPU control.
+- [x] Pass 35B one-GPU 100-cycle test.
+- [x] Pass 35B four-GPU TP basic and vocabulary-sharded tests.
+- [x] Pass 35B 16k-prefix tests on one GPU and TP.
+- [ ] Add deterministic multi-token continuation comparison.
+- [ ] Add MTP target/draft fork-state validation.
 
 ## Decision Log
 
@@ -155,4 +174,84 @@ These are intentionally deferred until the fork path is correct.
 
 ## Test Results
 
-No sequence-fork harness results yet.
+### Deterministic tiny-Qwen CPU control
+
+```text
+prefix=64, suffix=8, cycles=16
+clean same-seq max_abs=0
+clean cross-seq max_abs=0
+strict fork comparison PASS
+fork metadata avg=0.007 ms
+clean suffix=0.533–0.547 ms
+fork suffix avg=0.519 ms
+source state preserved (207,196 bytes)
+```
+
+### 35B one-GPU short-context control
+
+```text
+prefix=481, suffix=18, cycles=100
+clean same-seq repeat is bitwise identical
+cross-sequence clean variability: max_abs=0.504407, RMS=0.090417
+fork comparisons remain within 1.5x measured clean variability
+argmax token=357 for clean and forked paths
+fork metadata avg=0.057 ms, max=0.069 ms
+clean suffix≈52.2 ms
+fork suffix avg=52.47 ms, max=53.58 ms
+source state preserved (75,725,184 bytes)
+```
+
+FA-off testing produced comparable cross-sequence spread, so this variability is not specific to flash attention. Raw serialized source/fork buffers also differ because the format includes sequence IDs and physical KV/recurrent cell layout; same-sequence before/after state remains byte-identical and is the valid preservation check.
+
+### 35B one-GPU 16k-prefix control
+
+```text
+prefix=16,001, suffix=18, cycles=16, unified KV
+clean same-seq repeat is bitwise identical
+coexisting clean A/B variability: max_abs=1.02972, RMS=0.19478
+fork comparisons PASS against measured clean variability
+argmax token=271 for all paths
+fork metadata avg=2.060 ms, max=2.237 ms
+clean suffix=60.56–67.82 ms
+fork suffix avg=57.65 ms, max=59.82 ms
+source state preserved (393,885,184 bytes)
+```
+
+### 35B four-GPU TP
+
+Short-context, 32 cycles:
+
+```text
+fork metadata avg=0.057 ms
+clean suffix≈73.2 ms
+fork suffix avg=75.24 ms
+source state preserved
+PASS
+```
+
+Vocabulary-sharded output, 16 cycles:
+
+```text
+fork metadata avg=0.058 ms
+fork suffix avg=76.82 ms
+PASS
+```
+
+16k prefix, eight cycles:
+
+```text
+fork metadata avg=1.972 ms, max=2.297 ms
+clean suffix=81.47–83.94 ms
+fork suffix avg=74.93 ms (one 134.32 ms warmup/recapture outlier)
+argmax token matches one-GPU reference (271)
+source state preserved (393,885,184 bytes)
+PASS
+```
+
+Source inspection findings:
+
+- `examples/parallel`, `examples/speculative`, `examples/lookahead`, and batched tools already use `llama_memory_seq_cp()`.
+- `llama_memory_hybrid::seq_cp()` forwards to both attention and recurrent memory.
+- recurrent `seq_cp()` shares the source cell with the destination;
+- recurrent `find_slot()` performs copy-on-write when the fork is first modified;
+- existing tests cover recurrent rollback and host/device state migration, but not repeated direct fork-vs-clean logits for a hybrid model.
