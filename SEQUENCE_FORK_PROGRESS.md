@@ -162,6 +162,7 @@ These are intentionally deferred until the fork path is correct.
 - [x] Pass 35B four-GPU TP basic and vocabulary-sharded tests.
 - [x] Pass 35B 16k-prefix tests on one GPU and TP.
 - [x] Add deterministic/statistical multi-token continuation comparison.
+- [x] Validate direct source-vs-fork continuation against clean cross-sequence variability.
 - [ ] Add MTP target/draft fork-state validation.
 
 ## Decision Log
@@ -253,15 +254,25 @@ PASS
 
 ### Multi-token correctness interpretation
 
-The tiny CPU model is bitwise exact over 16 continuation tokens. The quantized 35B GPU model is not sequence-layout deterministic: independently clean coexisting sequences can select different greedy tokens under the same token history. Forked and direct-source continuations show comparable mismatch counts and logit spread, bounded against measured clean-layout variability. Same-sequence recomputation remains bitwise identical.
+The tiny CPU model is bitwise exact over 16 continuation tokens for clean, fork-vs-clean, and direct source-vs-fork paths. The quantized 35B GPU model is not sequence-layout deterministic: independently clean coexisting sequences can select different greedy tokens under the same token history. Forked and direct-source continuations show comparable mismatch counts and logit spread, bounded against measured clean-layout variability. Same-sequence recomputation remains bitwise identical.
 
 At 16k on one GPU:
 
 ```text
-clean mismatches=1/16
-fork-vs-canonical-clean mismatches=0/16
-direct source/fork mismatches=1/16
-fork/direct spread below clean-layout bound
+clean spread max_abs=1.35186, RMS=0.232532, mismatches=1/16
+fork spread max_abs=1.19464, RMS=0.230882, mismatches=0/16
+direct source/fork max_abs=1.10825, RMS=0.230374, mismatches=1/16
+fork/direct spread below 1.5x clean-layout bound
+PASS
+```
+
+At 16k on four-GPU TP:
+
+```text
+clean spread max_abs=0.99656, RMS=0.200011, mismatches=1/16
+fork spread max_abs=1.08603, RMS=0.203496, mismatches=1/16
+direct source/fork max_abs=1.33537, RMS=0.210420, mismatches=1/16
+fork/direct spread below 1.5x clean-layout bound
 PASS
 ```
 
