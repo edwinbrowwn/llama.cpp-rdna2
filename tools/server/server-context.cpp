@@ -3506,8 +3506,7 @@ private:
                                     decision = "active-bounded-rollback";
                                     sequence_fork_plan_rollback++;
                                 } else if (slot.fork_boundary_valid && shadow_len > 0 && shadow_lcp > 0 &&
-                                           ((!sequence_fork_enabled && shadow_rollback <= n_rs) ||
-                                            ( sequence_fork_enabled && shadow_rollback == 0))) {
+                                           shadow_rollback <= n_rs) {
                                     decision = shadow_rollback == 0 ? "shadow-exact" : "shadow-bounded-rollback";
                                     restore_shadow = true;
                                     sequence_fork_plan_shadow++;

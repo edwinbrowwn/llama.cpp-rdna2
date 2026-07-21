@@ -261,7 +261,7 @@ These are intentionally deferred until the fork path is correct.
 - An unmatched shadow must be discarded before full reprocessing; otherwise unified KV retains the old prefix while allocating a duplicate active prefix, inflating physical FA span and memory pressure.
 - Snapshot and restore positions are validated on CPU across target and draft memories before the next GPU decode.
 - Existing single-slot prompt-cache shrink/expand logic is bypassed in sequence-fork mode so it cannot reduce preallocated internal sequence capacity.
-- Stateful MTP shadow restore is exact-match-only. A rollback-history experiment produced a one-token-shifted draft sequence on the second cycle and was removed; unproven bounded MTP state is not retained.
+- Stateful MTP shadow restore now allows bounded rollback (`shadow_rollback <= n_rs`). Root cause of the recurring two-token mismatch: the shadow boundary snapshot ends with the assistant `<think>\n` opener tokens, which the next captured request replaces with response text. Correctness is preserved because MTP drafts are always verified by the target model; a rollback-stale `pending_h` can only reduce draft acceptance, never change output. Target/draft memory rolls back via `llama_memory_seq_rm` within recurrent snapshot range. The earlier standalone rollback experiment was chasing draft-identity, which is not required.
 
 ## Test Results
 
@@ -543,6 +543,7 @@ Unified KV idle-slot prompt-cache eviction cleared shadow lifecycle state in the
 122B captured requests 0–12: 13/13, unmatched shadow discarded before deep clean reprocess, PASS
 122B captured requests 0–15: 16/16, ten exact shadows and five safe clean reprocess decisions, PASS
 122B captured requests 0–20: 21/21, eleven exact shadows, nine discarded shadows with clean reprocess, 0 faults, PASS
+122B captured requests 0–15 with bounded rollback: 16/16, ten exact + four bounded-rollback (2-token) restores, one full reprocess, PP 56,806 tokens/81.0 s vs 151,158/398.6 s exact-only (4.9×), decode speed unchanged, 0 faults, PASS
 35B + real mmproj, text-only exact shadow: PASS
 35B + real mmproj, repeated identical image prompt: lifecycle PASS (image chunk still recomputed)
 35B single-GPU sleep/wake reload: PASS; no stale shadow after reload
@@ -587,7 +588,7 @@ unmatched shadow discarded before full reprocess
 
 Later bounded shadow mismatches remain exact-only fallbacks. Repeated full reprocesses are stable but slow as unified-KV physical span/fragmentation grows; bounded MTP rollback is not enabled.
 
-122B requests 0–20 confirm a recurring pattern: the deep-branch turn repeatedly leaves a two-token shadow mismatch (shadow_rollback=2), forcing a full clean reprocess every other turn beyond ~28k tokens (38–160 s each). The lifecycle remains safe (0 faults, full VRAM release across a 20-minute run), but the dominant remaining cost is these repeated reprocesses. Fixing that requires either a proven bounded MTP rollback (previous attempt produced a one-token-shifted draft and was removed) or capturing the shadow snapshot two tokens earlier at the true boundary.
+122B requests 0–20 confirmed a recurring pattern: the deep-branch turn repeatedly left a two-token shadow mismatch (shadow_rollback=2), forcing a full clean reprocess every other turn beyond ~28k tokens. Token-level diagnosis showed the mismatch is always the assistant `<think>\n` opener at the snapshot boundary. Bounded shadow rollback (≤ n_rs) now handles it: MTP drafts remain target-verified so stale `pending_h` is safe, and target/draft memory rollback uses existing recurrent snapshots. Requests 0–15 dropped from six full reprocesses to one.
 
 Source inspection findings:
 
