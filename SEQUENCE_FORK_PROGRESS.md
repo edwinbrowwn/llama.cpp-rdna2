@@ -179,6 +179,7 @@ The first prototype should use these existing operations without server changes.
 - [x] Unified-KV basic contention.
 - [x] First 16 captured Pi requests on 35B.
 - [ ] Full captured sessions and long-context server stress.
+- [ ] 122B full-replay fault isolated to vocabulary-sharded TOP_K comm (`ggml_backend_cuda_comm_vocab_top_k`, hipMemcpyAsync D2H of gathered candidates) at ~62k context. Not caused by the fork lifecycle: fault followed a shadow-exact restore and 30 prior restores succeeded. Next reproducer: vocab top-k at ≥59k context without sequence forks.
   - 35B full 34-request replay passes with graph replay disabled.
   - 122B first 16 requests pass, including one deep-branch clean reprocess.
   - 122B full replay stalled after a two-token shadow rollback; stateful mode is being restricted to exact shadow matches because MTP `pending_h` has no rollback snapshots.
@@ -545,6 +546,7 @@ Unified KV idle-slot prompt-cache eviction cleared shadow lifecycle state in the
 122B captured requests 0–20: 21/21, eleven exact shadows, nine discarded shadows with clean reprocess, 0 faults, PASS
 122B captured requests 0–15 with bounded rollback: 16/16, ten exact + four bounded-rollback (2-token) restores, one full reprocess, PP 56,806 tokens/81.0 s vs 151,158/398.6 s exact-only (4.9×), decode speed unchanged, 0 faults, PASS
 122B captured requests 0–20 with bounded rollback: 21/21, eleven exact + eight bounded-rollback restores, one full reprocess (vs nine exact-only), PP 65,056 tokens/118.4 s vs 290,811/842.4 s (7.1×), wall 8:50 vs 20:23, 0 faults, VRAM fully released, PASS
+122B full replay (0–33) with bounded rollback: 33/34 completed, 30 shadow restores (22 exact + 8 bounded), 3 safe full reprocesses, then illegal memory access in ggml_backend_cuda_comm_vocab_top_k at ~62k tokens on the final request. Host exited cleanly: no wedge, no KFD process, VRAM released, SMI responsive.
 35B + real mmproj, text-only exact shadow: PASS
 35B + real mmproj, repeated identical image prompt: lifecycle PASS (image chunk still recomputed)
 35B single-GPU sleep/wake reload: PASS; no stale shadow after reload
