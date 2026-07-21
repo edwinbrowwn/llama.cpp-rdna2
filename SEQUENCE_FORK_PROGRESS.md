@@ -6,7 +6,7 @@ Last updated: 2026-07-20
 
 ```text
 Production branch: exp-gpu-sampling @ 1a3578dd6 (safe AMD checkpoint disable)
-Experimental branch: exp-sequence-fork @ 4bcdc5f85
+Experimental branch: exp-sequence-fork @ 69fee080c
 Experimental worktree: ~/llama-cpp-sequence-fork
 Progress file: ~/llama-cpp-sequence-fork/SEQUENCE_FORK_PROGRESS.md
 ```
