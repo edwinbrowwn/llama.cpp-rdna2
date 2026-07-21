@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cinttypes>
+#include <cstring>
 #include <exception>
 #include <memory>
 #include <filesystem>
@@ -215,6 +216,12 @@ struct server_slot {
 
     server_prompt prompt;
 
+    // Dry-run sequence-fork planner state. This stores tokens only; no model
+    // memory is copied or restored until the planner policy is validated.
+    server_tokens fork_boundary_tokens;
+    bool fork_boundary_valid = false;
+    llama_seq_id fork_shadow_id = -1;
+
     bool prompt_save(server_prompt_cache & prompt_cache) const {
         if (prompt.tokens.size() == 0) {
             return false;
@@ -247,6 +254,9 @@ struct server_slot {
             SLT_WRN(*this, "%s", "failed to load prompt from cache\n");
         }
 
+        // Keep the token-only dry-run boundary across prompt-cache movement so
+        // planner coverage can be measured. A stateful implementation must save
+        // and load the matching shadow state explicitly.
         return res;
     }
 
@@ -259,6 +269,14 @@ struct server_slot {
         }
 
         prompt.clear();
+        if (fork_shadow_id >= 0) {
+            common_context_seq_rm(ctx_tgt, fork_shadow_id, -1, -1);
+            if (ctx_dft) {
+                common_context_seq_rm(ctx_dft, fork_shadow_id, -1, -1);
+            }
+        }
+        fork_boundary_tokens.clear();
+        fork_boundary_valid = false;
     }
 
     std::vector<common_adapter_lora_info> lora;
@@ -934,6 +952,14 @@ private:
     int slots_debug = 0;
     int n_empty_consecutive = 0;
 
+    bool sequence_fork_dry_run = false;
+    bool sequence_fork_enabled = false;
+    uint32_t sequence_fork_n_seq = 0;
+    uint64_t sequence_fork_plan_append = 0;
+    uint64_t sequence_fork_plan_rollback = 0;
+    uint64_t sequence_fork_plan_shadow = 0;
+    uint64_t sequence_fork_plan_reset = 0;
+
     std::unique_ptr<server_prompt_cache> prompt_cache;
 
     server_metrics metrics;
@@ -1180,6 +1206,35 @@ private:
         needs_reeval = llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt);
         n_parallel_user = params_base.n_parallel;
 
+        sequence_fork_n_seq = params_base.n_parallel;
+        {
+            const char * env = getenv("GGML_SERVER_SEQUENCE_FORK");
+            const bool requested = env != nullptr && strcmp(env, "1") == 0;
+            if (requested && !needs_reeval) {
+                SRV_WRN("%s", "sequence fork requested for a non-recurrent model; disabling\n");
+            } else if (requested && !spec_mtp) {
+                SRV_WRN("%s", "sequence fork state mutation currently requires --spec-type draft-mtp; disabling\n");
+            } else if (requested && !params_base.kv_unified) {
+                SRV_WRN("%s", "sequence fork currently requires --kv-unified; disabling\n");
+            } else if (requested && 2u*params_base.n_parallel > llama_max_parallel_sequences()) {
+                SRV_WRN("sequence fork needs %u sequence IDs but the maximum is %zu; disabling\n",
+                    2u*params_base.n_parallel, llama_max_parallel_sequences());
+            } else if (requested) {
+                sequence_fork_enabled = true;
+                sequence_fork_n_seq = 2u*params_base.n_parallel;
+                if (params_base.cache_idle_slots) {
+                    params_base.cache_idle_slots = false;
+                    SRV_WRN("%s", "sequence fork disables idle-slot prompt-cache eviction so GPU shadows remain resident\n");
+                }
+                if (!llama_context_recurrent_expand(ctx_tgt, sequence_fork_n_seq)) {
+                    SRV_ERR("failed to expand target recurrent memory to %u sequence IDs\n", sequence_fork_n_seq);
+                    return false;
+                }
+                SRV_WRN("sequence fork enabled: %u user slots, %u internal sequence IDs\n",
+                    params_base.n_parallel, sequence_fork_n_seq);
+            }
+        }
+
         n_ctx = llama_n_ctx(ctx_tgt);
 
         add_bos_token = llama_vocab_get_add_bos(vocab);
@@ -1207,6 +1262,11 @@ private:
 
                 if (ctx_dft == nullptr) {
                     SRV_ERR("%s", "failed to create MTP context\n");
+                    return false;
+                }
+
+                if (sequence_fork_enabled && !llama_context_recurrent_expand(ctx_dft, sequence_fork_n_seq)) {
+                    SRV_ERR("failed to expand draft recurrent memory to %u sequence IDs\n", sequence_fork_n_seq);
                     return false;
                 }
 
@@ -1299,7 +1359,7 @@ private:
         // try speculative decoding
         if (ctx_tgt_seq_rm_type != COMMON_CONTEXT_SEQ_RM_TYPE_NO) {
             try {
-                spec.reset(common_speculative_init(params_base.speculative, params_base.n_parallel));
+                spec.reset(common_speculative_init(params_base.speculative, sequence_fork_n_seq));
             } catch (const std::exception & e) {
                 SRV_ERR("failed to initialize speculative decoding context: %s\n", e.what());
             }
@@ -1321,6 +1381,7 @@ private:
             server_slot & slot = slots[i];
 
             slot.id      = i;
+            slot.fork_shadow_id = sequence_fork_enabled ? i + n_parallel_user : -1;
             slot.ctx_tgt = ctx_tgt;
             slot.ctx_dft = ctx_dft;
             slot.spec    = spec.get();
@@ -1353,6 +1414,14 @@ private:
 
             if (slots_debug) {
                 SRV_WRN("LLAMA_SERVER_SLOTS_DEBUG = %d\n", slots_debug);
+            }
+        }
+
+        {
+            const char * env = getenv("GGML_SERVER_SEQUENCE_FORK_DRY_RUN");
+            sequence_fork_dry_run = env != nullptr && strcmp(env, "1") == 0;
+            if (sequence_fork_dry_run) {
+                SRV_WRN("%s", "sequence-fork dry-run planner enabled; no sequence state will be copied\n");
             }
         }
 
@@ -3327,6 +3396,79 @@ private:
                                 n_past = 0;
                             }
 
+                            if (sequence_fork_dry_run || sequence_fork_enabled) {
+                                const size_t active_len = slot.prompt.tokens.size();
+                                const size_t active_lcp = std::max(0, n_past);
+                                const size_t rollback = active_len > active_lcp ? active_len - active_lcp : 0;
+                                const uint32_t n_rs = llama_n_rs_seq(ctx_tgt);
+                                const size_t shadow_len = slot.fork_boundary_valid ? slot.fork_boundary_tokens.size() : 0;
+                                const size_t shadow_lcp = slot.fork_boundary_valid
+                                    ? slot.fork_boundary_tokens.get_common_prefix(input_tokens)
+                                    : 0;
+                                const size_t shadow_rollback = shadow_len > shadow_lcp ? shadow_len - shadow_lcp : 0;
+
+                                const char * decision = "full-reprocess";
+                                bool restore_shadow = false;
+                                if (active_len == 0) {
+                                    decision = "initial";
+                                    sequence_fork_plan_reset++;
+                                } else if (active_lcp == active_len) {
+                                    decision = "active-append";
+                                    sequence_fork_plan_append++;
+                                } else if (rollback > 0 && rollback <= n_rs) {
+                                    decision = "active-bounded-rollback";
+                                    sequence_fork_plan_rollback++;
+                                } else if (slot.fork_boundary_valid && shadow_len > 0 && shadow_lcp > 0 && shadow_rollback <= n_rs) {
+                                    decision = shadow_rollback == 0 ? "shadow-exact" : "shadow-bounded-rollback";
+                                    restore_shadow = true;
+                                    sequence_fork_plan_shadow++;
+                                } else {
+                                    sequence_fork_plan_reset++;
+                                }
+
+                                if (restore_shadow && sequence_fork_enabled) {
+                                    common_context_seq_rm(ctx_tgt, slot.id, -1, -1);
+                                    common_context_seq_rm(ctx_dft, slot.id, -1, -1);
+                                    llama_memory_seq_cp(llama_get_memory(ctx_tgt), slot.fork_shadow_id, slot.id, -1, -1);
+                                    llama_memory_seq_cp(llama_get_memory(ctx_dft), slot.fork_shadow_id, slot.id, -1, -1);
+
+                                    std::vector<uint8_t> spec_state;
+                                    bool restored = common_speculative_get_state(spec.get(), slot.fork_shadow_id, spec_state);
+                                    if (restored) {
+                                        common_speculative_set_state(spec.get(), slot.id, spec_state);
+                                    }
+                                    if (restored && shadow_rollback > 0) {
+                                        restored = llama_memory_seq_rm(
+                                            llama_get_memory(ctx_tgt), slot.id, (llama_pos) shadow_lcp, -1);
+                                        restored = llama_memory_seq_rm(
+                                            llama_get_memory(ctx_dft), slot.id, (llama_pos) shadow_lcp, -1) && restored;
+                                    }
+
+                                    if (restored) {
+                                        slot.prompt.tokens = slot.fork_boundary_tokens.clone();
+                                        slot.prompt.tokens.keep_first(shadow_lcp);
+                                        n_past = (int) shadow_lcp;
+                                        n_past_common = n_past;
+                                        SLT_WRN(slot, "sequence-fork restored shadow seq=%d -> active seq=%d at %zu tokens (rollback=%zu)\n",
+                                            slot.fork_shadow_id, slot.id, shadow_lcp, shadow_rollback);
+                                    } else {
+                                        common_context_seq_rm(ctx_tgt, slot.id, -1, -1);
+                                        common_context_seq_rm(ctx_dft, slot.id, -1, -1);
+                                        n_past = 0;
+                                        n_past_common = 0;
+                                        decision = "shadow-restore-failed";
+                                        SLT_WRN(slot, "%s", "sequence-fork shadow rollback failed; using full reprocess\n");
+                                    }
+                                }
+
+                                SLT_WRN(slot,
+                                    "sequence-fork plan: decision=%s input=%zu active_len=%zu active_lcp=%zu rollback=%zu rs=%u shadow_valid=%d shadow_len=%zu shadow_lcp=%zu shadow_rollback=%zu totals=[append=%" PRIu64 ",rollback=%" PRIu64 ",shadow=%" PRIu64 ",reset=%" PRIu64 "]\n",
+                                    decision, input_tokens.size(), active_len, active_lcp, rollback, n_rs,
+                                    (int) slot.fork_boundary_valid, shadow_len, shadow_lcp, shadow_rollback,
+                                    sequence_fork_plan_append, sequence_fork_plan_rollback,
+                                    sequence_fork_plan_shadow, sequence_fork_plan_reset);
+                            }
+
                             llama_pos pos_next = slot.prompt.tokens.pos_next(n_past);
 
                             // ref: https://github.com/ggml-org/llama.cpp/pull/24110
@@ -3835,6 +3977,33 @@ private:
                 }
 
                 GGML_ASSERT(slot.task->need_sampling());
+
+                if (sequence_fork_dry_run || sequence_fork_enabled) {
+                    bool snapshot_ok = true;
+                    if (sequence_fork_enabled) {
+                        common_context_seq_rm(ctx_tgt, slot.fork_shadow_id, -1, -1);
+                        common_context_seq_rm(ctx_dft, slot.fork_shadow_id, -1, -1);
+                        llama_memory_seq_cp(
+                            llama_get_memory(ctx_tgt), slot.id, slot.fork_shadow_id, -1, -1);
+                        llama_memory_seq_cp(
+                            llama_get_memory(ctx_dft), slot.id, slot.fork_shadow_id, -1, -1);
+
+                        std::vector<uint8_t> spec_state;
+                        snapshot_ok = common_speculative_get_state(spec.get(), slot.id, spec_state);
+                        if (snapshot_ok) {
+                            common_speculative_set_state(spec.get(), slot.fork_shadow_id, spec_state);
+                        }
+                    }
+
+                    slot.fork_boundary_tokens = slot.prompt.tokens.clone();
+                    slot.fork_boundary_valid = snapshot_ok && !slot.fork_boundary_tokens.empty();
+                    SLT_WRN(slot, "sequence-fork %s snapshot: shadow_seq=%d boundary_tokens=%zu pos=[%d,%d]\n",
+                        sequence_fork_enabled ? "stateful" : "dry-run",
+                        slot.fork_shadow_id,
+                        slot.fork_boundary_tokens.size(),
+                        llama_memory_seq_pos_min(llama_get_memory(ctx_tgt), slot.id),
+                        llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), slot.id));
+                }
 
                 // prompt evaluated for next-token prediction
                 slot.state = SLOT_STATE_GENERATING;

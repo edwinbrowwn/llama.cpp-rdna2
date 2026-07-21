@@ -117,15 +117,17 @@ The first prototype should use these existing operations without server changes.
 
 ### Gate 5 — Server integration
 
-Only after Gates 1–4 pass:
-
-- [ ] Internal sequence-ID pool / shadow sequence mapping.
-- [ ] Turn-boundary snapshot, continuation fork, commit, and discard.
+- [x] Internal sequence-ID pool / shadow sequence mapping (IDs 0–3 active, 4–7 shadow).
+- [x] Turn-boundary target/draft/MTP snapshot.
+- [x] Shadow-to-active switch-back with bounded recurrent rollback.
 - [ ] Cancellation and error cleanup.
 - [x] Pi token-transition audit (offline usage/LCP proxy analysis).
-- [ ] Four parallel slots.
-- [ ] Unified-KV contention.
-- [ ] Exact captured Pi sessions.
+- [x] Token-only dry-run planner.
+- [x] Four parallel slots.
+- [x] Unified-KV basic contention.
+- [x] First 16 captured Pi requests on 35B.
+- [ ] Full captured sessions and long-context server stress.
+- [ ] Multimodal text/image lifecycle.
 
 ## Acceptance Criteria
 
@@ -169,7 +171,15 @@ These are intentionally deferred until the fork path is correct.
 - [x] Validate shadow switch-back at 481, 16k, 32k, and 64k boundaries.
 - [x] Pass targeted 122B basic, 16k, and MTP gates.
 - [x] Complete offline Pi transition audit.
-- [ ] Design minimal server shadow-sequence lifecycle and exact boundary-selection policy.
+- [x] Design minimal server shadow-sequence lifecycle and exact boundary-selection policy.
+- [x] Implement feature-gated token-only dry-run planner (`GGML_SERVER_SEQUENCE_FORK_DRY_RUN=1`) with no sequence-state mutation.
+- [x] Replay focused request sequences and measure append/rollback/shadow/reset coverage.
+  - Synthetic dry run: initial, shadow-bounded-rollback, active-append.
+  - Captured requests 0–15: 15/15 follow-ups shadow-exact.
+- [x] Implement opt-in stateful server prototype (`GGML_SERVER_SEQUENCE_FORK=1`).
+- [x] Validate MTP + vocabulary sharding + TP shadow restore.
+- [x] Validate four concurrent active/shadow pairs.
+- [ ] Add cancellation/error cleanup tests and full captured-session replay.
 
 ## Decision Log
 
@@ -178,6 +188,8 @@ These are intentionally deferred until the fork path is correct.
 - Start on one GPU without TP, MTP, graphs, or unified KV.
 - Add one feature at a time; do not use a combinatorial test matrix.
 - Keep production and experimental builds isolated.
+- Validate the server boundary policy in token-only dry-run mode before allocating internal shadow sequence IDs. Completed: one latest boundary covered all 15 captured follow-ups.
+- Initial stateful mode requires unified KV and MTP, reserves one shadow ID per user slot, and disables idle-slot prompt-cache eviction so GPU shadows remain resident.
 
 ## Test Results
 
@@ -352,6 +364,48 @@ MTP state=12,296 bytes; copied draft matches source; negative control differs
 ### Offline Pi transition audit
 
 Two captured sessions show median prompt-prefix reuse of 96–98%. Approximately 36% of turns add at most 256 uncached tokens; many larger turns still retain nearly the entire prior prefix. This validates turn-boundary forks as the correct optimization target.
+
+### Server dry-run and stateful prototype
+
+Synthetic three-request planner:
+
+```text
+request 1: initial
+request 2: shadow-bounded-rollback (one assistant-marker token)
+request 3: active-append
+```
+
+Captured Pi requests 0–15 dry run:
+
+```text
+initial=1
+shadow-exact=15
+full reprocess after initialization=0
+```
+
+Captured Pi requests 0–15 stateful run:
+
+```text
+shadow restores=15
+snapshots=16
+faults/errors=0
+safe baseline: 320,496 prompt tokens, 248.8 s PP
+stateful fork: 31,481 prompt tokens, 24.5 s PP
+reduction: 10.2x in evaluated prompt tokens and prompt time
+```
+
+Four-slot concurrent stateful run:
+
+```text
+4 initial active/shadow snapshots
+4/4 shadow-bounded restores
+4/4 subsequent active appends
+12/12 requests
+8,272 total evaluated prompt tokens
+faults/errors=0
+```
+
+Unified KV idle-slot prompt-cache eviction cleared shadow lifecycle state in the first parallel attempt. Experimental stateful mode now disables idle-slot eviction so shadows remain GPU-resident. Attention prefix cells remain shared; recurrent state uses copy-on-write.
 
 Source inspection findings:
 
