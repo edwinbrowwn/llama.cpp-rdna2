@@ -567,6 +567,15 @@ four concurrent exact sequence-fork shadows + vocab sharding + grammar: 8/8 PASS
 
 Dense concurrent generation is intentionally slower because it is serialized and does not use MTP drafting. Compact-compatible vocabulary-sharded slots retain parallel/MTP fast paths.
 
+Compact-path regression after the dense fix:
+
+```text
+four parallel compact-compatible vocab-sharded lanes: PASS
+batched decode preserved; MTP drafting active
+draft acceptance 0.78–0.81, mean draft length ~3.4
+0 faults/errors; VRAM fully released
+```
+
 Deep-branch safety result on 122B:
 
 ```text
