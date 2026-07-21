@@ -105,6 +105,7 @@ The first prototype should use these existing operations without server changes.
 - [x] Run repeated forks at a 16k prefix.
 - [x] Verify vocabulary-sharded output remains compatible.
 - [ ] Stress varied suffix sizes at longer context.
+- [ ] Re-run TP 16k switch-back after GPU reset; one rerun page-faulted during ordinary pre-fork tile FA before any `seq_cp`.
 
 ### Gate 4 — Targeted 122B confirmation
 
@@ -300,6 +301,10 @@ A sequence fork must therefore copy all three components:
 3. MTP `pending_h` via speculative state get/set.
 
 Existing recurrent rollback regression test remains clean after the MTP state-hook change.
+
+### Independent long-prefill fault observation
+
+A later 35B TP 16k switch-back run page-faulted in `flash_attn_tile<256,256,4,8,false>` before the harness reached its first clean-reference or `seq_cp` log. The same TP 16k fixture had passed multiple times earlier. This failure therefore cannot be attributed to sequence forking; it is either residual GPU state after the prior driver timeout or an independent nondeterministic TP tile-FA problem. Phase markers were added for the post-reset rerun. No more GPU tests should run before reset.
 
 Source inspection findings:
 

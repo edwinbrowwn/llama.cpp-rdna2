@@ -169,9 +169,12 @@ int main(int argc, char ** argv) {
     }
     const std::string suffix_text =
         "A different branch now studies the river, verifies the instruments, and records a deterministic result.";
+    const std::string alternate_suffix_text =
+        "The abandoned branch instead studies the mountain, changes every instrument, and records unrelated observations.";
 
     llama_tokens prefix;
     llama_tokens suffix;
+    llama_tokens alternate_suffix;
     const llama_vocab * vocab = llama_model_get_vocab(model);
     if (llama_vocab_type(vocab) == LLAMA_VOCAB_TYPE_NONE) {
         const int n_vocab = llama_vocab_n_tokens(vocab);
@@ -180,12 +183,14 @@ int main(int argc, char ** argv) {
         }
         for (int i = 0; i < 8; ++i) {
             suffix.push_back(1 + (i + 67) % std::max(1, n_vocab - 1));
+            alternate_suffix.push_back(1 + (i + 83) % std::max(1, n_vocab - 1));
         }
     } else {
         prefix = common_tokenize(ctx.get(), prefix_text, true);
         suffix = common_tokenize(ctx.get(), suffix_text, false);
+        alternate_suffix = common_tokenize(ctx.get(), alternate_suffix_text, false);
     }
-    if (prefix.empty() || suffix.empty()) {
+    if (prefix.empty() || suffix.empty() || alternate_suffix.empty()) {
         LOG_ERR("%s: tokenization produced an empty prefix or suffix\n", __func__);
         return 1;
     }
@@ -206,6 +211,7 @@ int main(int argc, char ** argv) {
     constexpr llama_seq_id seq_clean_b = 4;
 
     // Build the canonical source boundary.
+    LOG_INF("%s: phase=source-prefix\n", __func__);
     if (!decode_tokens(ctx.get(), prefix, 0, seq_source, nullptr)) {
         return 1;
     }
@@ -217,6 +223,7 @@ int main(int argc, char ** argv) {
 
     // Build two clean, independently evaluated reference sequences. Their spread
     // establishes the backend/layout reproducibility floor before seq_cp is used.
+    LOG_INF("%s: phase=clean-references\n", __func__);
     std::vector<float> logits_clean_a;
     std::vector<float> logits_clean_a_repeat;
     std::vector<float> logits_clean_b;
@@ -255,6 +262,7 @@ int main(int argc, char ** argv) {
     fork_decode_us.reserve(cycles);
 
     constexpr double eps = 1e-4;
+    LOG_INF("%s: phase=repeated-forks\n", __func__);
     const double allowed_max_abs = std::max(eps, 1.5*diff_clean.max_abs);
     const double allowed_rms     = std::max(eps, 1.5*diff_clean.rms);
     for (int cycle = 0; cycle < cycles; ++cycle) {
@@ -325,6 +333,7 @@ int main(int argc, char ** argv) {
         }
     }
 
+    LOG_INF("%s: phase=clean-fork-continuation\n", __func__);
     // Validate that numerical layout variation does not change a deterministic
     // multi-token continuation. The clean sequence is recomputed independently;
     // the fork sequence starts from the preserved boundary.
@@ -393,9 +402,13 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    // The final oracle compares a direct continuation of the preserved source
-    // against a fork from that exact source. This removes independently allocated
-    // clean-sequence layout from the correctness decision.
+    LOG_INF("%s: phase=direct-continuation-and-switch-back\n", __func__);
+    // Preserve an additional shadow boundary for the switch-back test below.
+    llama_memory_seq_cp(llama_get_memory(ctx.get()), seq_source, seq_fork_b, -1, -1);
+
+    // The direct oracle compares a continuation of the preserved source against
+    // a fork from that exact source. This removes independently allocated clean
+    // sequence layout from the correctness decision.
     llama_memory_seq_cp(llama_get_memory(ctx.get()), seq_source, seq_fork_a, -1, -1);
     std::vector<float> logits_direct;
     std::vector<float> logits_direct_fork;
@@ -425,6 +438,40 @@ int main(int argc, char ** argv) {
     }
     LOG_INF("%s: direct source/fork continuation %d tokens (max_abs=%g max_rms=%g mismatches=%d)\n",
         __func__, continuation_steps, direct_max_abs, direct_max_rms, direct_token_mismatches);
+
+    // Discard the active continuation, restore the same slot ID from the shadow
+    // sequence using seq_cp, take an unrelated branch, then restore once more and
+    // verify the canonical suffix. This models server turn-boundary switching.
+    if (!llama_memory_seq_rm(llama_get_memory(ctx.get()), seq_source, -1, -1) ||
+        !llama_memory_seq_rm(llama_get_memory(ctx.get()), seq_fork_a, -1, -1)) {
+        LOG_ERR("%s: failed to clear direct continuation sequences\n", __func__);
+        return 1;
+    }
+    llama_memory_seq_cp(llama_get_memory(ctx.get()), seq_fork_b, seq_source, -1, -1);
+    if (!decode_tokens(ctx.get(), alternate_suffix, (llama_pos) prefix.size(), seq_source, nullptr)) {
+        return 1;
+    }
+    if (!llama_memory_seq_rm(llama_get_memory(ctx.get()), seq_source, -1, -1)) {
+        LOG_ERR("%s: failed to clear abandoned branch\n", __func__);
+        return 1;
+    }
+    llama_memory_seq_cp(llama_get_memory(ctx.get()), seq_fork_b, seq_source, -1, -1);
+    llama_memory_seq_rm(llama_get_memory(ctx.get()), seq_fork_b, -1, -1);
+
+    std::vector<float> logits_switch_back;
+    if (!decode_tokens(ctx.get(), suffix, (llama_pos) prefix.size(), seq_source, &logits_switch_back)) {
+        return 1;
+    }
+    const logit_diff diff_switch_back = compare_logits(logits_reference, logits_switch_back);
+    if (diff_switch_back.argmax_a != diff_switch_back.argmax_b ||
+        diff_switch_back.max_abs > allowed_max_abs || diff_switch_back.rms > allowed_rms) {
+        LOG_ERR("%s: switch-back branch differs: max_abs=%g rms=%g argmax=%d/%d\n",
+            __func__, diff_switch_back.max_abs, diff_switch_back.rms,
+            diff_switch_back.argmax_a, diff_switch_back.argmax_b);
+        return 1;
+    }
+    LOG_INF("%s: shadow switch-back PASS (max_abs=%g rms=%g argmax=%d)\n",
+        __func__, diff_switch_back.max_abs, diff_switch_back.rms, diff_switch_back.argmax_a);
 
     const double continuation_allowed_abs = std::max(eps, 1.5*continuation_clean_max_abs);
     const double continuation_allowed_rms = std::max(eps, 1.5*continuation_clean_max_rms);
