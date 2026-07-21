@@ -91,7 +91,7 @@ The first prototype should use these existing operations without server changes.
 
 - [x] Tile FA on one GPU.
 - [x] HIP graphs (compiled/enabled path used by ROCm build).
-- [ ] MTP target/draft state.
+- [x] MTP target/draft state, including copied per-sequence `pending_h`.
 - [x] 16k prefix on one GPU.
 - [ ] Varied suffix sizes.
 - [x] Unified KV.
@@ -163,7 +163,7 @@ These are intentionally deferred until the fork path is correct.
 - [x] Pass 35B 16k-prefix tests on one GPU and TP.
 - [x] Add deterministic/statistical multi-token continuation comparison.
 - [x] Validate direct source-vs-fork continuation against clean cross-sequence variability.
-- [ ] Add MTP target/draft fork-state validation (source inspection shows MTP `pending_h` is per-sequence and currently lacks a `get_state`/`set_state` override).
+- [x] Add MTP target/draft fork-state validation and versioned `pending_h` state hooks.
 
 ## Decision Log
 
@@ -276,11 +276,30 @@ fork/direct spread below 1.5x clean-layout bound
 PASS
 ```
 
-MTP source inspection finding:
+### MTP fork-state validation
 
-- Qwen MTP maintains per-sequence `pending_h` carryover in `common_speculative_impl_draft_mtp`.
-- Existing generic speculative `get_state`/`set_state` APIs are called by server checkpoints, but the MTP implementation currently has no override.
-- A sequence fork must copy target memory, draft memory, and MTP `pending_h`; target-memory `seq_cp` alone is insufficient.
+Qwen MTP maintains per-sequence `pending_h` carryover in `common_speculative_impl_draft_mtp`. The generic speculative `get_state`/`set_state` APIs previously had no MTP override. The experimental branch now serializes a versioned per-sequence `pending_h` row.
+
+Results on 35B:
+
+```text
+single GPU, 241-token prompt: PASS
+four-GPU TP, 241-token prompt: PASS
+four-GPU TP + vocabulary sharding: PASS
+single GPU, 16,001-token prompt: PASS
+four-GPU TP, 16,001-token prompt: PASS
+MTP pending state size: 8,200 bytes
+source draft == copied-fork draft (3 tokens)
+uncopied negative-control state/draft differs
+```
+
+A sequence fork must therefore copy all three components:
+
+1. target memory via `llama_memory_seq_cp`;
+2. draft memory via `llama_memory_seq_cp`;
+3. MTP `pending_h` via speculative state get/set.
+
+Existing recurrent rollback regression test remains clean after the MTP state-hook change.
 
 Source inspection findings:
 

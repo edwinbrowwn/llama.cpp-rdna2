@@ -1638,6 +1638,46 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         std::memcpy(pending_h[seq_id].data(), verify_h[seq_id].data() + (size_t) i_h * n_embd, row_bytes);
     }
 
+    bool get_state(llama_seq_id seq_id, std::vector<uint8_t> & data) const override {
+        if (seq_id < 0 || seq_id >= (llama_seq_id) n_seq) {
+            return false;
+        }
+
+        constexpr uint32_t version = 1;
+        const uint32_t width = (uint32_t) n_embd;
+        const size_t header_size = sizeof(version) + sizeof(width);
+        const size_t row_bytes = (size_t) width * sizeof(float);
+        data.resize(header_size + row_bytes);
+        std::memcpy(data.data(), &version, sizeof(version));
+        std::memcpy(data.data() + sizeof(version), &width, sizeof(width));
+        std::memcpy(data.data() + header_size, pending_h[seq_id].data(), row_bytes);
+        return true;
+    }
+
+    void set_state(llama_seq_id seq_id, const std::vector<uint8_t> & data) override {
+        if (seq_id < 0 || seq_id >= (llama_seq_id) n_seq) {
+            return;
+        }
+
+        constexpr uint32_t version_expected = 1;
+        const size_t header_size = 2*sizeof(uint32_t);
+        if (data.size() < header_size) {
+            return;
+        }
+
+        uint32_t version = 0;
+        uint32_t width = 0;
+        std::memcpy(&version, data.data(), sizeof(version));
+        std::memcpy(&width, data.data() + sizeof(version), sizeof(width));
+        if (version != version_expected || width != (uint32_t) n_embd ||
+                data.size() != header_size + (size_t) width * sizeof(float)) {
+            return;
+        }
+
+        std::memcpy(pending_h[seq_id].data(), data.data() + header_size,
+            (size_t) width * sizeof(float));
+    }
+
     bool need_embd() const override {
         return false;
     }
