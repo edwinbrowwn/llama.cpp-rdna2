@@ -121,6 +121,7 @@ The first prototype should use these existing operations without server changes.
 - [x] Turn-boundary target/draft/MTP snapshot.
 - [x] Shadow-to-active switch-back with bounded recurrent rollback.
 - [x] Cancellation during prompt and generation; recovery request completed.
+- [x] Client cancellation during prompt and generation; recovery request completed.
 - [ ] Hard driver-timeout recovery is external; no automatic retry after GPU wedge.
 - [x] Pi token-transition audit (offline usage/LCP proxy analysis).
 - [x] Token-only dry-run planner.
@@ -134,6 +135,7 @@ The first prototype should use these existing operations without server changes.
   - Full 34-request 35B replay reached 12 exact shadow restores, then page-faulted in tile FA on the 13th around 27k.
   - This used no host checkpoint load or rollback; repeated switch-back is now the focused standalone reproducer target.
 - [ ] Multimodal text/image lifecycle.
+- [ ] Concurrent dense grammar with `GGML_TP_VOCAB_OUTPUT` is a separate retained-feature bug; sequence-fork parallel lifecycle is validated with mirrored output, while sequential vocabulary-sharded tool use remains supported.
 
 ## Acceptance Criteria
 
@@ -185,7 +187,10 @@ These are intentionally deferred until the fork path is correct.
 - [x] Implement opt-in stateful server prototype (`GGML_SERVER_SEQUENCE_FORK=1`).
 - [x] Validate MTP + vocabulary sharding + TP shadow restore.
 - [x] Validate four concurrent active/shadow pairs.
-- [ ] Add cancellation/error cleanup tests and full captured-session replay.
+- [x] Add cancellation/error cleanup tests.
+- [x] Full 35B captured-session replay with graph replay disabled.
+- [x] Staged post-audit validation: 35B single GPU, 35B TP exact shadow, captured requests 0–7, four-slot mirrored-output exact shadows, and 122B requests 0–2.
+- [ ] Re-run longer 122B sequence only after additional lifecycle audit; do not jump directly to full replay.
 
 ## Decision Log
 
@@ -200,6 +205,7 @@ These are intentionally deferred until the fork path is correct.
 - Internal sequence capacity must be allocated when target/draft contexts are created. Post-construction recurrent-only expansion was removed from the prototype.
 - An unmatched shadow must be discarded before full reprocessing; otherwise unified KV retains the old prefix while allocating a duplicate active prefix, inflating physical FA span and memory pressure.
 - Snapshot and restore positions are validated on CPU across target and draft memories before the next GPU decode.
+- Existing single-slot prompt-cache shrink/expand logic is bypassed in sequence-fork mode so it cannot reduce preallocated internal sequence capacity.
 - Stateful MTP shadow restore is exact-match-only. Target/draft recurrent state has bounded rollback snapshots, but MTP `pending_h` currently represents only the full boundary and cannot be rolled back 1–3 tokens safely.
 
 ## Test Results
@@ -469,6 +475,19 @@ CPU invariants verify target/draft active and shadow positions before decode
 ```
 
 Unified KV idle-slot prompt-cache eviction cleared shadow lifecycle state in the first parallel attempt. Experimental stateful mode now disables idle-slot eviction so shadows remain GPU-resident. Attention prefix cells remain shared; recurrent state uses copy-on-write.
+
+### Staged post-audit validation
+
+```text
+35B single GPU, one exact shadow: PASS
+35B TP + MTP + vocab, one exact shadow: PASS
+35B captured requests 0–7: 8/8, seven exact shadows, PASS
+35B four concurrent exact shadows, mirrored output: 8/8, PASS
+122B captured requests 0–2: 3/3, one exact shadow, PASS
+all stages returned VRAM to idle and left no KFD process
+```
+
+A four-concurrent tool/grammar workload with vocabulary sharding asserts in dense-logit materialization even when sequence-fork mode is disabled. Diagnosis shows graph output tensor metadata is short-lived and dense rows are context-global across staggered slot decode/sampling. A partial eager-copy fix was intentionally removed because correct repair requires per-slot/per-sequence dense-logit persistence or serialized dense sampling. This is tracked separately from sequence-fork lifecycle work.
 
 Source inspection findings:
 

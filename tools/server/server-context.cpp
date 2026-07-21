@@ -1660,6 +1660,9 @@ private:
     // This frees GPU memory for the cache and ensures a clean recurrent state
     // that matches the loaded KV cache. The subsequent expand restores capacity.
     bool recurrent_shrink_for_prompt_cache() {
+        if (sequence_fork_enabled) {
+            return true;
+        }
         if (!needs_reeval || n_parallel_user > 1) {
             return true;
         }
@@ -1675,6 +1678,9 @@ private:
 
     // Expand recurrent state back after prompt cache save/load completes.
     void recurrent_expand_after_prompt_cache() {
+        if (sequence_fork_enabled) {
+            return;
+        }
         if (!needs_reeval || n_parallel_user > 1) {
             return;
         }
@@ -1776,7 +1782,7 @@ private:
         if (ret) {
             // Force prompt cache update for recurrent models to shrink/restore
             // the recurrent state and avoid forced re-processing (issue #22746).
-            if (needs_reeval && prompt_cache) {
+            if (needs_reeval && prompt_cache && !sequence_fork_enabled) {
                 update_cache = true;
             }
 
