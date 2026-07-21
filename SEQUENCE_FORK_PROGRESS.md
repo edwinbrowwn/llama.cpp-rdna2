@@ -168,7 +168,8 @@ The first prototype should use these existing operations without server changes.
 - [x] Turn-boundary target/draft/MTP snapshot.
 - [x] Shadow-to-active switch-back with bounded recurrent rollback.
 - [x] Cancellation during prompt and generation; recovery request completed.
-- [x] Client cancellation during prompt and generation; recovery request completed.
+- [x] Shadow invalidation guards for LoRA/aLoRA changes, context shift, slot restore/erase, prompt clear, and child state copy.
+- [ ] Sleep/wake reload test and LoRA runtime test remain.
 - [ ] Hard driver-timeout recovery is external; no automatic retry after GPU wedge.
 - [x] Pi token-transition audit (offline usage/LCP proxy analysis).
 - [x] Token-only dry-run planner.
@@ -252,6 +253,7 @@ These are intentionally deferred until the fork path is correct.
 - Keep production and experimental builds isolated.
 - Validate the server boundary policy in token-only dry-run mode before allocating internal shadow sequence IDs. Completed: one latest boundary covered all 15 captured follow-ups.
 - Initial stateful mode requires unified KV and MTP, reserves one shadow ID per user slot, and disables idle-slot prompt-cache eviction so GPU shadows remain resident.
+- Any operation that changes active token/state semantics (LoRA set changes, context shift, slot restore, slot erase, prompt clear) invalidates and clears the shadow first. `n_cmpl` child copies include speculative MTP state and clear old child shadows.
 - Initial stateful mode also requires `GGML_CUDA_DISABLE_GRAPHS=1`. FA remains enabled. Full captured replay passed only when runtime HIP graph replay was disabled; performance was effectively unchanged in the measured workload.
 - Internal sequence capacity must be allocated when target/draft contexts are created. Post-construction recurrent-only expansion was removed from the prototype.
 - An unmatched shadow must be discarded before full reprocessing; otherwise unified KV retains the old prefix while allocating a duplicate active prefix, inflating physical FA span and memory pressure.

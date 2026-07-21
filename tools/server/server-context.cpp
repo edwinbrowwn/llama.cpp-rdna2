@@ -261,15 +261,7 @@ struct server_slot {
         return res;
     }
 
-    void prompt_clear() {
-        SLT_TRC(*this, "clearing prompt with %zu tokens\n", prompt.tokens.size());
-
-        common_context_seq_rm(ctx_tgt, id, -1, -1);
-        if (ctx_dft) {
-            common_context_seq_rm(ctx_dft, id, -1, -1);
-        }
-
-        prompt.clear();
+    void fork_clear_shadow() {
         if (fork_shadow_id >= 0) {
             common_context_seq_rm(ctx_tgt, fork_shadow_id, -1, -1);
             if (ctx_dft) {
@@ -279,6 +271,18 @@ struct server_slot {
         fork_boundary_tokens.clear();
         fork_boundary_valid = false;
         fork_boundary_pos_max = -1;
+    }
+
+    void prompt_clear() {
+        SLT_TRC(*this, "clearing prompt with %zu tokens\n", prompt.tokens.size());
+
+        common_context_seq_rm(ctx_tgt, id, -1, -1);
+        if (ctx_dft) {
+            common_context_seq_rm(ctx_dft, id, -1, -1);
+        }
+
+        prompt.clear();
+        fork_clear_shadow();
     }
 
     std::vector<common_adapter_lora_info> lora;
@@ -706,12 +710,19 @@ struct server_slot {
     void copy_state_to(server_slot & other) const {
         GGML_ASSERT(state == SLOT_STATE_DONE_PROMPT);
 
+        other.fork_clear_shadow();
         common_context_seq_rm(ctx_tgt, other.id,     -1, -1);
         common_context_seq_cp(ctx_tgt, id, other.id, -1, -1);
 
         if (ctx_dft) {
             common_context_seq_rm(ctx_dft, other.id,     -1, -1);
             common_context_seq_cp(ctx_dft, id, other.id, -1, -1);
+        }
+        if (spec) {
+            std::vector<uint8_t> spec_state;
+            if (common_speculative_get_state(spec, id, spec_state)) {
+                common_speculative_set_state(spec, other.id, spec_state);
+            }
         }
 
         other.n_decoded   = n_decoded;
@@ -1866,13 +1877,22 @@ private:
                 // if lora has changed, check to see if the cache should be cleared
                 if (lora_should_clear_cache(slot.lora, task_loras)) {
                     SLT_TRC(slot, "clearing cache for lora change. %zu loras -> %zu loras\n", slot.lora.size(), task.params.lora.size());
-                    slot.prompt.clear();
+                    slot.prompt_clear();
                 } else {
-                    SLT_TRC(slot, "keeping cache for alora. %zu target loras\n", task_loras.size());
+                    SLT_TRC(slot, "keeping active cache for alora but invalidating sequence-fork shadow. %zu target loras\n", task_loras.size());
+                    slot.fork_clear_shadow();
                 }
                 slot.lora = task_loras;
             }
         } else {
+            if (!are_lora_equal(slot.lora, params_base.lora_adapters)) {
+                if (lora_should_clear_cache(slot.lora, params_base.lora_adapters)) {
+                    SLT_TRC(slot, "%s", "clearing cache while returning to default LoRA set\n");
+                    slot.prompt_clear();
+                } else {
+                    slot.fork_clear_shadow();
+                }
+            }
             slot.lora = params_base.lora_adapters;
         }
 
@@ -2750,11 +2770,13 @@ private:
                     size_t nread = llama_state_seq_load_file(ctx_tgt, filepath.c_str(), slot->id, tokens.data(), tokens.size(), &token_count);
                     if (nread == 0) {
                         slot->prompt.clear(); // KV may already been invalidated?
+                        slot->fork_clear_shadow();
                         send_error(task, "Unable to restore slot, no available space in KV cache or invalid slot save file", ERROR_TYPE_INVALID_REQUEST);
                         break;
                     }
                     tokens.resize(token_count);
                     slot->prompt.clear();
+                    slot->fork_clear_shadow();
                     slot->prompt.tokens.insert(tokens);
 
                     const int64_t t_end = ggml_time_us();
@@ -3082,6 +3104,7 @@ private:
                     new_tokens.resize(slot.prompt.tokens.size() - n_discard);
 
                     slot.prompt.clear();
+                    slot.fork_clear_shadow();
                     slot.prompt.tokens.insert(new_tokens);
                 }
 
