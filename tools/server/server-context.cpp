@@ -221,6 +221,7 @@ struct server_slot {
     server_tokens fork_boundary_tokens;
     bool fork_boundary_valid = false;
     llama_seq_id fork_shadow_id = -1;
+    llama_pos fork_boundary_pos_max = -1;
 
     bool prompt_save(server_prompt_cache & prompt_cache) const {
         if (prompt.tokens.size() == 0) {
@@ -277,6 +278,7 @@ struct server_slot {
         }
         fork_boundary_tokens.clear();
         fork_boundary_valid = false;
+        fork_boundary_pos_max = -1;
     }
 
     std::vector<common_adapter_lora_info> lora;
@@ -953,6 +955,7 @@ private:
     int n_empty_consecutive = 0;
 
     bool sequence_fork_dry_run = false;
+    bool sequence_fork_requested = false;
     bool sequence_fork_enabled = false;
     uint32_t sequence_fork_n_seq = 0;
     uint64_t sequence_fork_plan_append = 0;
@@ -1191,6 +1194,31 @@ private:
             params_base.load_progress_callback_user_data = &load_progress_text;
         }
 
+        // Reserve internal shadow sequence IDs when contexts are created. Do not
+        // resize recurrent buffers after scheduler/backend initialization.
+        sequence_fork_n_seq = params_base.n_parallel;
+        {
+            const char * env = getenv("GGML_SERVER_SEQUENCE_FORK");
+            sequence_fork_requested = env != nullptr && strcmp(env, "1") == 0;
+            if (sequence_fork_requested && !spec_mtp) {
+                SRV_WRN("%s", "sequence fork state mutation currently requires --spec-type draft-mtp; disabling\n");
+                sequence_fork_requested = false;
+            } else if (sequence_fork_requested && getenv("GGML_CUDA_DISABLE_GRAPHS") == nullptr) {
+                SRV_WRN("%s", "sequence fork currently requires GGML_CUDA_DISABLE_GRAPHS=1; disabling\n");
+                sequence_fork_requested = false;
+            } else if (sequence_fork_requested && !params_base.kv_unified) {
+                SRV_WRN("%s", "sequence fork currently requires --kv-unified; disabling\n");
+                sequence_fork_requested = false;
+            } else if (sequence_fork_requested && 2u*params_base.n_parallel > llama_max_parallel_sequences()) {
+                SRV_WRN("sequence fork needs %u sequence IDs but the maximum is %zu; disabling\n",
+                    2u*params_base.n_parallel, llama_max_parallel_sequences());
+                sequence_fork_requested = false;
+            } else if (sequence_fork_requested) {
+                sequence_fork_n_seq = 2u*params_base.n_parallel;
+                params_base.n_seq_max_internal = sequence_fork_n_seq;
+            }
+        }
+
         llama_init = common_init_from_params(params_base);
 
         model_tgt = llama_init->model();
@@ -1206,33 +1234,23 @@ private:
         needs_reeval = llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt);
         n_parallel_user = params_base.n_parallel;
 
-        sequence_fork_n_seq = params_base.n_parallel;
-        {
-            const char * env = getenv("GGML_SERVER_SEQUENCE_FORK");
-            const bool requested = env != nullptr && strcmp(env, "1") == 0;
-            if (requested && !needs_reeval) {
-                SRV_WRN("%s", "sequence fork requested for a non-recurrent model; disabling\n");
-            } else if (requested && !spec_mtp) {
-                SRV_WRN("%s", "sequence fork state mutation currently requires --spec-type draft-mtp; disabling\n");
-            } else if (requested && !params_base.kv_unified) {
-                SRV_WRN("%s", "sequence fork currently requires --kv-unified; disabling\n");
-            } else if (requested && 2u*params_base.n_parallel > llama_max_parallel_sequences()) {
-                SRV_WRN("sequence fork needs %u sequence IDs but the maximum is %zu; disabling\n",
-                    2u*params_base.n_parallel, llama_max_parallel_sequences());
-            } else if (requested) {
-                sequence_fork_enabled = true;
-                sequence_fork_n_seq = 2u*params_base.n_parallel;
-                if (params_base.cache_idle_slots) {
-                    params_base.cache_idle_slots = false;
-                    SRV_WRN("%s", "sequence fork disables idle-slot prompt-cache eviction so GPU shadows remain resident\n");
-                }
-                if (!llama_context_recurrent_expand(ctx_tgt, sequence_fork_n_seq)) {
-                    SRV_ERR("failed to expand target recurrent memory to %u sequence IDs\n", sequence_fork_n_seq);
-                    return false;
-                }
-                SRV_WRN("sequence fork enabled: %u user slots, %u internal sequence IDs\n",
-                    params_base.n_parallel, sequence_fork_n_seq);
+        if (sequence_fork_requested && !needs_reeval) {
+            SRV_WRN("%s", "sequence fork requested for a non-recurrent model; disabling\n");
+            sequence_fork_requested = false;
+            sequence_fork_n_seq = params_base.n_parallel;
+        } else if (sequence_fork_requested) {
+            sequence_fork_enabled = true;
+            if (params_base.cache_idle_slots) {
+                params_base.cache_idle_slots = false;
+                SRV_WRN("%s", "sequence fork disables idle-slot prompt-cache eviction so GPU shadows remain resident\n");
             }
+            SRV_WRN("sequence fork enabled: %u user slots, %u internal sequence IDs allocated at context creation\n",
+                params_base.n_parallel, sequence_fork_n_seq);
+        }
+        if (sequence_fork_enabled && llama_n_seq_max(ctx_tgt) != sequence_fork_n_seq) {
+            SRV_ERR("target context has %u sequence IDs, expected %u\n",
+                llama_n_seq_max(ctx_tgt), sequence_fork_n_seq);
+            return false;
         }
 
         n_ctx = llama_n_ctx(ctx_tgt);
@@ -1264,9 +1282,9 @@ private:
                     SRV_ERR("%s", "failed to create MTP context\n");
                     return false;
                 }
-
-                if (sequence_fork_enabled && !llama_context_recurrent_expand(ctx_dft, sequence_fork_n_seq)) {
-                    SRV_ERR("failed to expand draft recurrent memory to %u sequence IDs\n", sequence_fork_n_seq);
+                if (sequence_fork_enabled && llama_n_seq_max(ctx_dft) != sequence_fork_n_seq) {
+                    SRV_ERR("draft context has %u sequence IDs, expected %u\n",
+                        llama_n_seq_max(ctx_dft), sequence_fork_n_seq);
                     return false;
                 }
 
@@ -3418,7 +3436,9 @@ private:
                                 } else if (rollback > 0 && rollback <= n_rs) {
                                     decision = "active-bounded-rollback";
                                     sequence_fork_plan_rollback++;
-                                } else if (slot.fork_boundary_valid && shadow_len > 0 && shadow_lcp > 0 && shadow_rollback <= n_rs) {
+                                } else if (slot.fork_boundary_valid && shadow_len > 0 && shadow_lcp > 0 &&
+                                           ((!sequence_fork_enabled && shadow_rollback <= n_rs) ||
+                                            ( sequence_fork_enabled && shadow_rollback == 0))) {
                                     decision = shadow_rollback == 0 ? "shadow-exact" : "shadow-bounded-rollback";
                                     restore_shadow = true;
                                     sequence_fork_plan_shadow++;
@@ -3426,22 +3446,50 @@ private:
                                     sequence_fork_plan_reset++;
                                 }
 
-                                if (restore_shadow && sequence_fork_enabled) {
-                                    common_context_seq_rm(ctx_tgt, slot.id, -1, -1);
-                                    common_context_seq_rm(ctx_dft, slot.id, -1, -1);
-                                    llama_memory_seq_cp(llama_get_memory(ctx_tgt), slot.fork_shadow_id, slot.id, -1, -1);
-                                    llama_memory_seq_cp(llama_get_memory(ctx_dft), slot.fork_shadow_id, slot.id, -1, -1);
+                                if (sequence_fork_enabled && !restore_shadow &&
+                                        strcmp(decision, "full-reprocess") == 0 && slot.fork_boundary_valid) {
+                                    // The old boundary cannot satisfy this branch. Keeping it resident
+                                    // would duplicate the prefix in unified KV while the active sequence
+                                    // is rebuilt, inflating the physical FA span and memory pressure.
+                                    common_context_seq_rm(ctx_tgt, slot.fork_shadow_id, -1, -1);
+                                    common_context_seq_rm(ctx_dft, slot.fork_shadow_id, -1, -1);
+                                    slot.fork_boundary_tokens.clear();
+                                    slot.fork_boundary_valid = false;
+                                    slot.fork_boundary_pos_max = -1;
+                                    SLT_WRN(slot, "%s", "sequence-fork discarded unmatched shadow before full reprocess\n");
+                                }
 
-                                    std::vector<uint8_t> spec_state;
-                                    bool restored = common_speculative_get_state(spec.get(), slot.fork_shadow_id, spec_state);
+                                if (restore_shadow && sequence_fork_enabled) {
+                                    const llama_pos shadow_tgt_pos = llama_memory_seq_pos_max(
+                                        llama_get_memory(ctx_tgt), slot.fork_shadow_id);
+                                    const llama_pos shadow_dft_pos = llama_memory_seq_pos_max(
+                                        llama_get_memory(ctx_dft), slot.fork_shadow_id);
+                                    bool restored = slot.fork_boundary_pos_max >= 0 &&
+                                        shadow_tgt_pos == slot.fork_boundary_pos_max &&
+                                        shadow_dft_pos == slot.fork_boundary_pos_max;
+
                                     if (restored) {
-                                        common_speculative_set_state(spec.get(), slot.id, spec_state);
+                                        common_context_seq_rm(ctx_tgt, slot.id, -1, -1);
+                                        common_context_seq_rm(ctx_dft, slot.id, -1, -1);
+                                        llama_memory_seq_cp(llama_get_memory(ctx_tgt), slot.fork_shadow_id, slot.id, -1, -1);
+                                        llama_memory_seq_cp(llama_get_memory(ctx_dft), slot.fork_shadow_id, slot.id, -1, -1);
+
+                                        std::vector<uint8_t> spec_state;
+                                        restored = common_speculative_get_state(spec.get(), slot.fork_shadow_id, spec_state);
+                                        if (restored) {
+                                            common_speculative_set_state(spec.get(), slot.id, spec_state);
+                                        }
                                     }
                                     if (restored && shadow_rollback > 0) {
                                         restored = llama_memory_seq_rm(
                                             llama_get_memory(ctx_tgt), slot.id, (llama_pos) shadow_lcp, -1);
                                         restored = llama_memory_seq_rm(
                                             llama_get_memory(ctx_dft), slot.id, (llama_pos) shadow_lcp, -1) && restored;
+                                    }
+                                    if (restored) {
+                                        const llama_pos expected_pos = slot.fork_boundary_pos_max - (llama_pos) shadow_rollback;
+                                        restored = llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), slot.id) == expected_pos &&
+                                            llama_memory_seq_pos_max(llama_get_memory(ctx_dft), slot.id) == expected_pos;
                                     }
 
                                     if (restored) {
@@ -3992,6 +4040,26 @@ private:
                         snapshot_ok = common_speculative_get_state(spec.get(), slot.id, spec_state);
                         if (snapshot_ok) {
                             common_speculative_set_state(spec.get(), slot.fork_shadow_id, spec_state);
+                        }
+
+                        const llama_pos active_tgt_pos = llama_memory_seq_pos_max(
+                            llama_get_memory(ctx_tgt), slot.id);
+                        const llama_pos active_dft_pos = llama_memory_seq_pos_max(
+                            llama_get_memory(ctx_dft), slot.id);
+                        const llama_pos shadow_tgt_pos = llama_memory_seq_pos_max(
+                            llama_get_memory(ctx_tgt), slot.fork_shadow_id);
+                        const llama_pos shadow_dft_pos = llama_memory_seq_pos_max(
+                            llama_get_memory(ctx_dft), slot.fork_shadow_id);
+                        snapshot_ok = snapshot_ok && active_tgt_pos >= 0 &&
+                            active_tgt_pos == active_dft_pos &&
+                            active_tgt_pos == shadow_tgt_pos &&
+                            active_tgt_pos == shadow_dft_pos;
+                        slot.fork_boundary_pos_max = snapshot_ok ? active_tgt_pos : -1;
+                        if (!snapshot_ok) {
+                            common_context_seq_rm(ctx_tgt, slot.fork_shadow_id, -1, -1);
+                            common_context_seq_rm(ctx_dft, slot.fork_shadow_id, -1, -1);
+                            SLT_ERR(slot, "sequence-fork snapshot invariant failed: active=[%d,%d] shadow=[%d,%d]\n",
+                                active_tgt_pos, active_dft_pos, shadow_tgt_pos, shadow_dft_pos);
                         }
                     }
 

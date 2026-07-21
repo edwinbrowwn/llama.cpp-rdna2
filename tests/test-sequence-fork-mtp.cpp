@@ -7,6 +7,7 @@
 #include <clocale>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -22,14 +23,15 @@ static bool decode_prompt(
         llama_context * ctx_tgt,
         common_speculative * spec,
         const llama_tokens & tokens,
-        llama_seq_id seq_id) {
+        llama_seq_id seq_id,
+        llama_pos pos_start = 0) {
     const size_t n_batch = llama_n_batch(ctx_tgt);
     for (size_t offset = 0; offset < tokens.size(); offset += n_batch) {
         const size_t count = std::min(n_batch, tokens.size() - offset);
         batch_owner owner((int32_t) count);
         for (size_t i = 0; i < count; ++i) {
             // MTP process() consumes every target next-n embedding row.
-            common_batch_add(owner.batch, tokens[offset + i], (llama_pos) (offset + i), { seq_id }, true);
+            common_batch_add(owner.batch, tokens[offset + i], pos_start + (llama_pos) (offset + i), { seq_id }, true);
         }
         if (llama_decode(ctx_tgt, owner.batch) != 0) {
             LOG_ERR("%s: target decode failed at offset %zu\n", __func__, offset);
@@ -52,6 +54,7 @@ int main(int argc, char ** argv) {
     params.n_ubatch = 128;
     params.n_parallel = 3;
     params.sampling.seed = 1234;
+    params.n_predict = 32; // repeated target/draft shadow-restore cycles
 
     common_init();
     if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_COMMON)) {
@@ -171,11 +174,10 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    llama_tokens result_source;
     llama_tokens result_copied;
     llama_tokens result_missing;
-    llama_tokens * results[] = { &result_source, &result_copied, &result_missing };
-    for (llama_seq_id seq_id = 0; seq_id < 3; ++seq_id) {
+    llama_tokens * results[] = { nullptr, &result_copied, &result_missing };
+    for (llama_seq_id seq_id : { seq_copied, seq_missing }) {
         auto & dp = common_speculative_get_draft_params(spec.get(), seq_id);
         dp.drafting = true;
         dp.n_max = 3;
@@ -187,15 +189,105 @@ int main(int argc, char ** argv) {
     }
     common_speculative_draft(spec.get());
 
-    if (result_source != result_copied) {
-        LOG_ERR("%s: copied fork draft differs from source\n", __func__);
-        LOG_ERR("source size=%zu copied size=%zu missing size=%zu\n",
-            result_source.size(), result_copied.size(), result_missing.size());
+    if (result_copied.empty()) {
+        LOG_ERR("%s: copied fork produced no baseline draft\n", __func__);
         return 1;
     }
+    const bool missing_control_equal = result_copied == result_missing;
 
-    LOG_INF("%s: PASS model hybrid=%d prompt=%zu state=%zu bytes draft_tokens=%zu missing_control_equal=%d\n",
-        __func__, (int) llama_model_is_hybrid(model), prompt.size(), state_source.size(),
-        result_source.size(), (int) (result_source == result_missing));
+    // Reset temporary controls. The source sequence remains the immutable shadow.
+    llama_memory_seq_rm(llama_get_memory(ctx_tgt.get()), seq_copied, -1, -1);
+    llama_memory_seq_rm(llama_get_memory(ctx_tgt.get()), seq_missing, -1, -1);
+    llama_memory_seq_rm(llama_get_memory(ctx_dft), seq_copied, -1, -1);
+    llama_memory_seq_rm(llama_get_memory(ctx_dft), seq_missing, -1, -1);
+
+    llama_tokens suffix;
+    const char * suffix_env = getenv("GGML_TEST_FORK_SUFFIX_TOKENS");
+    const int requested_suffix_tokens = suffix_env ? std::max(1, atoi(suffix_env)) : 0;
+    if (llama_vocab_type(vocab) == LLAMA_VOCAB_TYPE_NONE) {
+        const int n_vocab = llama_vocab_n_tokens(vocab);
+        const int n_suffix = requested_suffix_tokens > 0 ? requested_suffix_tokens : 8;
+        for (int i = 0; i < n_suffix; ++i) {
+            suffix.push_back(1 + (i + 83) % std::max(1, n_vocab - 1));
+        }
+    } else if (requested_suffix_tokens > 0) {
+        std::string suffix_text;
+        for (int i = 0; i < requested_suffix_tokens; ++i) {
+            suffix_text += "token ";
+        }
+        suffix = common_tokenize(ctx_tgt.get(), suffix_text, false);
+    } else {
+        suffix = common_tokenize(ctx_tgt.get(),
+            "Continue the forked MTP branch with a deterministic short observation.", false);
+    }
+    llama_tokens prompt_with_suffix = prompt;
+    prompt_with_suffix.insert(prompt_with_suffix.end(), suffix.begin(), suffix.end());
+
+    llama_tokens active_tail;
+    const char * tail_env = getenv("GGML_TEST_FORK_ACTIVE_TAIL_TOKENS");
+    const int requested_tail_tokens = tail_env ? std::max(0, atoi(tail_env)) : 0;
+    if (requested_tail_tokens > 0) {
+        const int n_vocab = llama_vocab_n_tokens(vocab);
+        for (int i = 0; i < requested_tail_tokens; ++i) {
+            active_tail.push_back(1 + (i + 101) % std::max(1, n_vocab - 1));
+        }
+    }
+
+    llama_tokens draft_reference;
+    const int cycles = std::max(1, params.n_predict);
+    for (int cycle = 0; cycle < cycles; ++cycle) {
+        llama_memory_seq_cp(llama_get_memory(ctx_tgt.get()), seq_source, seq_copied, -1, -1);
+        llama_memory_seq_cp(llama_get_memory(ctx_dft), seq_source, seq_copied, -1, -1);
+        common_speculative_set_state(spec.get(), seq_copied, state_source);
+
+        if (!decode_prompt(ctx_tgt.get(), spec.get(), suffix, seq_copied, (llama_pos) prompt.size())) {
+            LOG_ERR("%s: target/MTP suffix processing failed at cycle %d\n", __func__, cycle);
+            return 1;
+        }
+
+        llama_tokens draft;
+        auto & dp = common_speculative_get_draft_params(spec.get(), seq_copied);
+        dp.drafting = true;
+        dp.n_max = 3;
+        dp.n_past = (llama_pos) prompt_with_suffix.size();
+        dp.id_last = prompt_with_suffix.back();
+        dp.prompt = &prompt_with_suffix;
+        dp.result = &draft;
+        common_speculative_begin(spec.get(), seq_copied, prompt_with_suffix);
+        common_speculative_draft(spec.get());
+
+        if (cycle == 0) {
+            draft_reference = draft;
+        } else if (draft != draft_reference) {
+            LOG_ERR("%s: repeated MTP draft differs at cycle %d (reference=%zu current=%zu)\n",
+                __func__, cycle, draft_reference.size(), draft.size());
+            return 1;
+        }
+
+        if (!active_tail.empty()) {
+            // Draft generation has populated speculative positions in ctx_dft.
+            // The server discards that unaccepted region before processing the
+            // real continuation.
+            if (!llama_memory_seq_rm(
+                    llama_get_memory(ctx_dft), seq_copied,
+                    (llama_pos) prompt_with_suffix.size(), -1)) {
+                LOG_ERR("%s: failed to remove speculative draft region at cycle %d\n", __func__, cycle);
+                return 1;
+            }
+        }
+        if (!active_tail.empty() && !decode_prompt(
+                ctx_tgt.get(), spec.get(), active_tail, seq_copied,
+                (llama_pos) prompt_with_suffix.size())) {
+            LOG_ERR("%s: active continuation tail failed at cycle %d\n", __func__, cycle);
+            return 1;
+        }
+
+        llama_memory_seq_rm(llama_get_memory(ctx_tgt.get()), seq_copied, -1, -1);
+        llama_memory_seq_rm(llama_get_memory(ctx_dft), seq_copied, -1, -1);
+    }
+
+    LOG_INF("%s: PASS model hybrid=%d prompt=%zu suffix=%zu active_tail=%zu state=%zu bytes draft_tokens=%zu missing_control_equal=%d cycles=%d\n",
+        __func__, (int) llama_model_is_hybrid(model), prompt.size(), suffix.size(), active_tail.size(), state_source.size(),
+        draft_reference.size(), (int) missing_control_equal, cycles);
     return 0;
 }

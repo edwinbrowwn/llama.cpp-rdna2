@@ -120,13 +120,17 @@ The first prototype should use these existing operations without server changes.
 - [x] Internal sequence-ID pool / shadow sequence mapping (IDs 0–3 active, 4–7 shadow).
 - [x] Turn-boundary target/draft/MTP snapshot.
 - [x] Shadow-to-active switch-back with bounded recurrent rollback.
-- [ ] Cancellation and error cleanup.
+- [x] Cancellation during prompt and generation; recovery request completed.
+- [ ] Hard driver-timeout recovery is external; no automatic retry after GPU wedge.
 - [x] Pi token-transition audit (offline usage/LCP proxy analysis).
 - [x] Token-only dry-run planner.
 - [x] Four parallel slots.
 - [x] Unified-KV basic contention.
 - [x] First 16 captured Pi requests on 35B.
 - [ ] Full captured sessions and long-context server stress.
+  - 35B full 34-request replay passes with graph replay disabled.
+  - 122B first 16 requests pass, including one deep-branch clean reprocess.
+  - 122B full replay stalled after a two-token shadow rollback; stateful mode is being restricted to exact shadow matches because MTP `pending_h` has no rollback snapshots.
   - Full 34-request 35B replay reached 12 exact shadow restores, then page-faulted in tile FA on the 13th around 27k.
   - This used no host checkpoint load or rollback; repeated switch-back is now the focused standalone reproducer target.
 - [ ] Multimodal text/image lifecycle.
@@ -192,6 +196,11 @@ These are intentionally deferred until the fork path is correct.
 - Keep production and experimental builds isolated.
 - Validate the server boundary policy in token-only dry-run mode before allocating internal shadow sequence IDs. Completed: one latest boundary covered all 15 captured follow-ups.
 - Initial stateful mode requires unified KV and MTP, reserves one shadow ID per user slot, and disables idle-slot prompt-cache eviction so GPU shadows remain resident.
+- Initial stateful mode also requires `GGML_CUDA_DISABLE_GRAPHS=1`. FA remains enabled. Full captured replay passed only when runtime HIP graph replay was disabled; performance was effectively unchanged in the measured workload.
+- Internal sequence capacity must be allocated when target/draft contexts are created. Post-construction recurrent-only expansion was removed from the prototype.
+- An unmatched shadow must be discarded before full reprocessing; otherwise unified KV retains the old prefix while allocating a duplicate active prefix, inflating physical FA span and memory pressure.
+- Snapshot and restore positions are validated on CPU across target and draft memories before the next GPU decode.
+- Stateful MTP shadow restore is exact-match-only. Target/draft recurrent state has bounded rollback snapshots, but MTP `pending_h` currently represents only the full boundary and cannot be rolled back 1–3 tokens safely.
 
 ## Test Results
 
@@ -407,7 +416,7 @@ Four-slot concurrent stateful run:
 faults/errors=0
 ```
 
-Full captured-session stateful replay:
+Full captured-session stateful replay with graph replay enabled:
 
 ```text
 12 exact shadow restores completed
@@ -417,7 +426,47 @@ no recurrent rollback
 failure surfaced later during vocab candidate transfer synchronization
 ```
 
-Conclusion: a single switch-back and short parallel runs are safe, but repeated shadow-to-active reuse can still accumulate an invalid hybrid/attention state. The standalone harness now repeats alternate/canonical switch-back cycles to isolate this without server overhead.
+Focused standalone controls all passed:
+
+```text
+32 repeated target-only switch-backs
+32 repeated target+draft+MTP switch-backs
+32 repeated MTP switch-backs with vocabulary sharding
+32 repeated cycles with 401-token suffix and 512-token active tail
+```
+
+Full captured-session stateful replay with `GGML_CUDA_DISABLE_GRAPHS=1`:
+
+```text
+34/34 requests
+33 exact shadow restores
+66,770 total prompt tokens evaluated
+59.8 s total prompt processing
+0 faults/errors
+```
+
+Performance A/B for requests 0–15:
+
+```text
+graphs enabled:  PP 24.455 s, generation 82.719 s
+graphs disabled: PP 24.486 s, generation 82.780 s
+```
+
+Conclusion: stale/replayed HIP graphs are a server-only failure multiplier after sequence-ID state switching. The first stable implementation requires graph replay off while retaining FA.
+
+### 122B driver-timeout audit
+
+A later 122B exact-match-only replay completed ordinary shadow restores, then selected full reprocessing for deep/bounded branches. The prototype incorrectly kept the unmatched shadow resident while rebuilding the entire active prompt. Under unified KV this duplicated tens of thousands of physical prefix cells, expanded the FA cache span, collapsed PP from roughly 544 t/s toward 238 t/s, and ended in a driver wedge with retained VRAM after process exit.
+
+Safety changes made offline before any rerun:
+
+```text
+unmatched shadow is cleared before full reprocess
+internal target/draft sequence capacity is allocated at context creation (8), not expanded after scheduler initialization
+stateful MTP restore is exact-shadow-only
+runtime HIP graph replay remains disabled
+CPU invariants verify target/draft active and shadow positions before decode
+```
 
 Unified KV idle-slot prompt-cache eviction cleared shadow lifecycle state in the first parallel attempt. Experimental stateful mode now disables idle-slot eviction so shadows remain GPU-resident. Attention prefix cells remain shared; recurrent state uses copy-on-write.
 
