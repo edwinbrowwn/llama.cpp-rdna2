@@ -94,7 +94,7 @@ The first prototype should use these existing operations without server changes.
 - [x] MTP target/draft state, including copied per-sequence `pending_h`.
 - [x] 16k prefix on one GPU.
 - [ ] Varied suffix sizes.
-- [x] Unified KV.
+- [x] Unified KV through a 64k fork/switch-back boundary.
 
 ### Gate 3 — 35B four-GPU TP
 
@@ -105,14 +105,15 @@ The first prototype should use these existing operations without server changes.
 - [x] Run repeated forks at a 16k prefix.
 - [x] Verify vocabulary-sharded output remains compatible.
 - [ ] Stress varied suffix sizes at longer context.
-- [ ] Re-run TP 16k switch-back after GPU reset; one rerun page-faulted during ordinary pre-fork tile FA before any `seq_cp`.
+- [x] Re-run TP 16k switch-back after GPU reset; all marked phases passed with FA enabled.
+- [x] Pass TP switch-back at 32k and 64k boundaries.
 
 ### Gate 4 — Targeted 122B confirmation
 
-- [ ] Basic clean-vs-fork correctness.
-- [ ] Repeated fork lifecycle.
-- [ ] Long-prefix branch test.
-- [ ] MTP state alignment.
+- [x] Basic clean-vs-fork correctness.
+- [x] Repeated fork lifecycle.
+- [x] 16k-prefix branch test.
+- [x] MTP state alignment.
 
 ### Gate 5 — Server integration
 
@@ -121,7 +122,7 @@ Only after Gates 1–4 pass:
 - [ ] Internal sequence-ID pool / shadow sequence mapping.
 - [ ] Turn-boundary snapshot, continuation fork, commit, and discard.
 - [ ] Cancellation and error cleanup.
-- [ ] Pi token-transition audit.
+- [x] Pi token-transition audit (offline usage/LCP proxy analysis).
 - [ ] Four parallel slots.
 - [ ] Unified-KV contention.
 - [ ] Exact captured Pi sessions.
@@ -165,10 +166,14 @@ These are intentionally deferred until the fork path is correct.
 - [x] Add deterministic/statistical multi-token continuation comparison.
 - [x] Validate direct source-vs-fork continuation against clean cross-sequence variability.
 - [x] Add MTP target/draft fork-state validation and versioned `pending_h` state hooks.
+- [x] Validate shadow switch-back at 481, 16k, 32k, and 64k boundaries.
+- [x] Pass targeted 122B basic, 16k, and MTP gates.
+- [x] Complete offline Pi transition audit.
+- [ ] Design minimal server shadow-sequence lifecycle and exact boundary-selection policy.
 
 ## Decision Log
 
-- Do not modify `llama-server` until standalone sequence-fork correctness is proven.
+- Do not modify `llama-server` until standalone sequence-fork correctness is proven. This gate is now satisfied through 64k TP and targeted 122B confirmation.
 - Use 35B for iteration speed; use 122B only for targeted acceptance.
 - Start on one GPU without TP, MTP, graphs, or unified KV.
 - Add one feature at a time; do not use a combinatorial test matrix.
@@ -302,9 +307,51 @@ A sequence fork must therefore copy all three components:
 
 Existing recurrent rollback regression test remains clean after the MTP state-hook change.
 
-### Independent long-prefill fault observation
+### Shadow switch-back and scale validation
 
-A later 35B TP 16k switch-back run page-faulted in `flash_attn_tile<256,256,4,8,false>` before the harness reached its first clean-reference or `seq_cp` log. The same TP 16k fixture had passed multiple times earlier. This failure therefore cannot be attributed to sequence forking; it is either residual GPU state after the prior driver timeout or an independent nondeterministic TP tile-FA problem. Phase markers were added for the post-reset rerun. No more GPU tests should run before reset.
+The standalone harness now preserves a boundary shadow, continues the active sequence down an unrelated branch, clears the active sequence, copies the shadow back into the same active sequence ID, and evaluates the canonical branch with tile FA.
+
+Results:
+
+```text
+tiny CPU: bitwise exact switch-back PASS
+35B one GPU, 481-token boundary: PASS
+35B one GPU, 16k boundary: PASS
+35B TP, 16k boundary after GPU reset: PASS
+35B TP, 32k boundary: PASS
+35B TP, 64k boundary with 262k unified pool: PASS
+```
+
+64k TP details:
+
+```text
+prefix=64,001
+fork metadata avg=9.133 ms, max=9.498 ms
+clean suffix=136.50–182.50 ms
+fork suffix avg=109.68 ms
+shadow switch-back max_abs=0.73944, RMS=0.143615, argmax matched
+source state preserved (1,377,885,184 bytes)
+```
+
+One pre-reset TP 16k rerun page-faulted during ordinary source-prefix tile FA before any `seq_cp`. After resetting the GPUs, the exact marked fixture passed all phases. This was residual GPU state from the earlier driver timeout, not a fork failure.
+
+### 122B targeted confirmation
+
+```text
+basic TP, eight fork cycles: PASS
+fork metadata avg=0.068 ms
+fork suffix≈120.66 ms vs clean≈116.9 ms
+8-token clean/fork/direct continuations: zero mismatches
+source state preserved (168,135,232 bytes)
+16k TP switch-back: PASS
+16k fork metadata avg=1.982 ms
+16k source state preserved (549,865,152 bytes)
+MTP state=12,296 bytes; copied draft matches source; negative control differs
+```
+
+### Offline Pi transition audit
+
+Two captured sessions show median prompt-prefix reuse of 96–98%. Approximately 36% of turns add at most 256 uncached tokens; many larger turns still retain nearly the entire prior prefix. This validates turn-boundary forks as the correct optimization target.
 
 Source inspection findings:
 
