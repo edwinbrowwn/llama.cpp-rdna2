@@ -439,39 +439,53 @@ int main(int argc, char ** argv) {
     LOG_INF("%s: direct source/fork continuation %d tokens (max_abs=%g max_rms=%g mismatches=%d)\n",
         __func__, continuation_steps, direct_max_abs, direct_max_rms, direct_token_mismatches);
 
-    // Discard the active continuation, restore the same slot ID from the shadow
-    // sequence using seq_cp, take an unrelated branch, then restore once more and
-    // verify the canonical suffix. This models server turn-boundary switching.
+    // Repeatedly discard the active continuation, restore the same slot ID from
+    // the persistent shadow, take an unrelated branch, and restore again for the
+    // canonical branch. This models repeated server turn-boundary switching.
     if (!llama_memory_seq_rm(llama_get_memory(ctx.get()), seq_source, -1, -1) ||
         !llama_memory_seq_rm(llama_get_memory(ctx.get()), seq_fork_a, -1, -1)) {
         LOG_ERR("%s: failed to clear direct continuation sequences\n", __func__);
         return 1;
     }
-    llama_memory_seq_cp(llama_get_memory(ctx.get()), seq_fork_b, seq_source, -1, -1);
-    if (!decode_tokens(ctx.get(), alternate_suffix, (llama_pos) prefix.size(), seq_source, nullptr)) {
-        return 1;
-    }
-    if (!llama_memory_seq_rm(llama_get_memory(ctx.get()), seq_source, -1, -1)) {
-        LOG_ERR("%s: failed to clear abandoned branch\n", __func__);
-        return 1;
-    }
-    llama_memory_seq_cp(llama_get_memory(ctx.get()), seq_fork_b, seq_source, -1, -1);
-    llama_memory_seq_rm(llama_get_memory(ctx.get()), seq_fork_b, -1, -1);
 
-    std::vector<float> logits_switch_back;
-    if (!decode_tokens(ctx.get(), suffix, (llama_pos) prefix.size(), seq_source, &logits_switch_back)) {
-        return 1;
+    double switch_max_abs = 0.0;
+    double switch_max_rms = 0.0;
+    for (int cycle = 0; cycle < cycles; ++cycle) {
+        llama_memory_seq_cp(llama_get_memory(ctx.get()), seq_fork_b, seq_source, -1, -1);
+        if (!decode_tokens(ctx.get(), alternate_suffix, (llama_pos) prefix.size(), seq_source, nullptr)) {
+            LOG_ERR("%s: alternate branch failed at switch cycle %d\n", __func__, cycle);
+            return 1;
+        }
+        if (!llama_memory_seq_rm(llama_get_memory(ctx.get()), seq_source, -1, -1)) {
+            LOG_ERR("%s: failed to clear abandoned branch at switch cycle %d\n", __func__, cycle);
+            return 1;
+        }
+
+        llama_memory_seq_cp(llama_get_memory(ctx.get()), seq_fork_b, seq_source, -1, -1);
+        std::vector<float> logits_switch_back;
+        if (!decode_tokens(ctx.get(), suffix, (llama_pos) prefix.size(), seq_source, &logits_switch_back)) {
+            LOG_ERR("%s: canonical branch failed at switch cycle %d\n", __func__, cycle);
+            return 1;
+        }
+        const logit_diff diff_switch_back = compare_logits(logits_reference, logits_switch_back);
+        switch_max_abs = std::max(switch_max_abs, diff_switch_back.max_abs);
+        switch_max_rms = std::max(switch_max_rms, diff_switch_back.rms);
+        if (diff_switch_back.argmax_a != diff_switch_back.argmax_b ||
+            diff_switch_back.max_abs > allowed_max_abs || diff_switch_back.rms > allowed_rms) {
+            LOG_ERR("%s: switch-back cycle %d differs: max_abs=%g rms=%g argmax=%d/%d\n",
+                __func__, cycle, diff_switch_back.max_abs, diff_switch_back.rms,
+                diff_switch_back.argmax_a, diff_switch_back.argmax_b);
+            return 1;
+        }
+        if (!llama_memory_seq_rm(llama_get_memory(ctx.get()), seq_source, -1, -1)) {
+            LOG_ERR("%s: failed to clear canonical branch at switch cycle %d\n", __func__, cycle);
+            return 1;
+        }
     }
-    const logit_diff diff_switch_back = compare_logits(logits_reference, logits_switch_back);
-    if (diff_switch_back.argmax_a != diff_switch_back.argmax_b ||
-        diff_switch_back.max_abs > allowed_max_abs || diff_switch_back.rms > allowed_rms) {
-        LOG_ERR("%s: switch-back branch differs: max_abs=%g rms=%g argmax=%d/%d\n",
-            __func__, diff_switch_back.max_abs, diff_switch_back.rms,
-            diff_switch_back.argmax_a, diff_switch_back.argmax_b);
-        return 1;
-    }
-    LOG_INF("%s: shadow switch-back PASS (max_abs=%g rms=%g argmax=%d)\n",
-        __func__, diff_switch_back.max_abs, diff_switch_back.rms, diff_switch_back.argmax_a);
+    llama_memory_seq_rm(llama_get_memory(ctx.get()), seq_fork_b, -1, -1);
+    LOG_INF("%s: repeated shadow switch-back PASS cycles=%d (max_abs=%g rms=%g argmax=%d)\n",
+        __func__, cycles, switch_max_abs, switch_max_rms,
+        compare_logits(logits_reference, logits_reference).argmax_a);
 
     const double continuation_allowed_abs = std::max(eps, 1.5*continuation_clean_max_abs);
     const double continuation_allowed_rms = std::max(eps, 1.5*continuation_clean_max_rms);

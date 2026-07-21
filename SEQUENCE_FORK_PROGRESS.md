@@ -127,6 +127,8 @@ The first prototype should use these existing operations without server changes.
 - [x] Unified-KV basic contention.
 - [x] First 16 captured Pi requests on 35B.
 - [ ] Full captured sessions and long-context server stress.
+  - Full 34-request 35B replay reached 12 exact shadow restores, then page-faulted in tile FA on the 13th around 27k.
+  - This used no host checkpoint load or rollback; repeated switch-back is now the focused standalone reproducer target.
 - [ ] Multimodal text/image lifecycle.
 
 ## Acceptance Criteria
@@ -404,6 +406,18 @@ Four-slot concurrent stateful run:
 8,272 total evaluated prompt tokens
 faults/errors=0
 ```
+
+Full captured-session stateful replay:
+
+```text
+12 exact shadow restores completed
+13th exact shadow restore page-faulted in tile FA around 27k
+no host checkpoint load
+no recurrent rollback
+failure surfaced later during vocab candidate transfer synchronization
+```
+
+Conclusion: a single switch-back and short parallel runs are safe, but repeated shadow-to-active reuse can still accumulate an invalid hybrid/attention state. The standalone harness now repeats alternate/canonical switch-back cycles to isolate this without server overhead.
 
 Unified KV idle-slot prompt-cache eviction cleared shadow lifecycle state in the first parallel attempt. Experimental stateful mode now disables idle-slot eviction so shadows remain GPU-resident. Attention prefix cells remain shared; recurrent state uses copy-on-write.
 
