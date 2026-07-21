@@ -134,7 +134,9 @@ The first prototype should use these existing operations without server changes.
   - 122B full replay stalled after a two-token shadow rollback; stateful mode is being restricted to exact shadow matches because MTP `pending_h` has no rollback snapshots.
   - Full 34-request 35B replay reached 12 exact shadow restores, then page-faulted in tile FA on the 13th around 27k.
   - This used no host checkpoint load or rollback; repeated switch-back is now the focused standalone reproducer target.
-- [ ] Multimodal text/image lifecycle.
+- [x] Multimodal projector loaded for text-only exact shadow restore.
+- [x] Same-image exact shadow restore lifecycle completed without faults.
+- [ ] Image embeddings are still recomputed after restore; shadow memory currently preserves model sequence state, not cached mmproj chunk embeddings.
 - [ ] Concurrent dense grammar with `GGML_TP_VOCAB_OUTPUT` is a separate retained-feature bug; sequence-fork parallel lifecycle is validated with mirrored output, while sequential vocabulary-sharded tool use remains supported.
 
 ## Acceptance Criteria
@@ -489,10 +491,12 @@ Unified KV idle-slot prompt-cache eviction cleared shadow lifecycle state in the
 122B captured requests 0–7: 8/8, six exact shadows, PASS
 122B captured requests 0–12: 13/13, unmatched shadow discarded before deep clean reprocess, PASS
 122B captured requests 0–15: 16/16, ten exact shadows and five safe clean reprocess decisions, PASS
+35B + real mmproj, text-only exact shadow: PASS
+35B + real mmproj, repeated identical image prompt: lifecycle PASS (image chunk still recomputed)
 all stages returned VRAM to idle and left no KFD process
 ```
 
-A four-concurrent tool/grammar workload with vocabulary sharding asserts in dense-logit materialization even when sequence-fork mode is disabled. Diagnosis shows graph output tensor metadata is short-lived and dense rows are context-global across staggered slot decode/sampling. A partial eager-copy fix was intentionally removed because correct repair requires per-slot/per-sequence dense-logit persistence or serialized dense sampling. This is tracked separately from sequence-fork lifecycle work. Four concurrent exact shadows pass with mirrored output; sequential vocabulary-sharded tool/grammar use remains supported.
+A four-concurrent tool/grammar workload with vocabulary sharding asserts in dense-logit materialization even when sequence-fork mode is disabled. Diagnosis shows graph output tensor metadata is short-lived and dense rows are context-global across staggered slot decode/sampling. Incremental eager copying can capture individual decode rows, but later staggered slot decodes clear context-global storage before all consumers sample. A correct repair requires per-slot/per-sequence dense-logit persistence or serialized dense sampling. The partial experiment was removed from the sequence-fork branch. Four concurrent exact shadows pass with mirrored output; sequential vocabulary-sharded tool/grammar use remains supported.
 
 Deep-branch safety result on 122B:
 
