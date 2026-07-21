@@ -542,6 +542,7 @@ Unified KV idle-slot prompt-cache eviction cleared shadow lifecycle state in the
 122B captured requests 0–7: 8/8, six exact shadows, PASS
 122B captured requests 0–12: 13/13, unmatched shadow discarded before deep clean reprocess, PASS
 122B captured requests 0–15: 16/16, ten exact shadows and five safe clean reprocess decisions, PASS
+122B captured requests 0–20: 21/21, eleven exact shadows, nine discarded shadows with clean reprocess, 0 faults, PASS
 35B + real mmproj, text-only exact shadow: PASS
 35B + real mmproj, repeated identical image prompt: lifecycle PASS (image chunk still recomputed)
 35B single-GPU sleep/wake reload: PASS; no stale shadow after reload
@@ -585,6 +586,8 @@ unmatched shadow discarded before full reprocess
 ```
 
 Later bounded shadow mismatches remain exact-only fallbacks. Repeated full reprocesses are stable but slow as unified-KV physical span/fragmentation grows; bounded MTP rollback is not enabled.
+
+122B requests 0–20 confirm a recurring pattern: the deep-branch turn repeatedly leaves a two-token shadow mismatch (shadow_rollback=2), forcing a full clean reprocess every other turn beyond ~28k tokens (38–160 s each). The lifecycle remains safe (0 faults, full VRAM release across a 20-minute run), but the dominant remaining cost is these repeated reprocesses. Fixing that requires either a proven bounded MTP rollback (previous attempt produced a one-token-shifted draft and was removed) or capturing the shadow snapshot two tokens earlier at the true boundary.
 
 Source inspection findings:
 
