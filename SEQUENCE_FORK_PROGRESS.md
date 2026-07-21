@@ -190,7 +190,9 @@ These are intentionally deferred until the fork path is correct.
 - [x] Add cancellation/error cleanup tests.
 - [x] Full 35B captured-session replay with graph replay disabled.
 - [x] Staged post-audit validation: 35B single GPU, 35B TP exact shadow, captured requests 0–7, four-slot mirrored-output exact shadows, and 122B requests 0–2.
-- [ ] Re-run longer 122B sequence only after additional lifecycle audit; do not jump directly to full replay.
+- [x] Staged 122B requests 0–7 and 0–12 after lifecycle audit.
+- [x] Staged 122B requests 0–15 with exact-only shadows; deep/bounded branches safely reprocessed and VRAM fully released.
+- [ ] Full 122B replay remains deferred until the expensive repeated clean-reprocess path is improved or bounded MTP state is proven.
 
 ## Decision Log
 
@@ -206,7 +208,7 @@ These are intentionally deferred until the fork path is correct.
 - An unmatched shadow must be discarded before full reprocessing; otherwise unified KV retains the old prefix while allocating a duplicate active prefix, inflating physical FA span and memory pressure.
 - Snapshot and restore positions are validated on CPU across target and draft memories before the next GPU decode.
 - Existing single-slot prompt-cache shrink/expand logic is bypassed in sequence-fork mode so it cannot reduce preallocated internal sequence capacity.
-- Stateful MTP shadow restore is exact-match-only. Target/draft recurrent state has bounded rollback snapshots, but MTP `pending_h` currently represents only the full boundary and cannot be rolled back 1–3 tokens safely.
+- Stateful MTP shadow restore is exact-match-only. A rollback-history experiment produced a one-token-shifted draft sequence on the second cycle and was removed; unproven bounded MTP state is not retained.
 
 ## Test Results
 
@@ -484,10 +486,23 @@ Unified KV idle-slot prompt-cache eviction cleared shadow lifecycle state in the
 35B captured requests 0–7: 8/8, seven exact shadows, PASS
 35B four concurrent exact shadows, mirrored output: 8/8, PASS
 122B captured requests 0–2: 3/3, one exact shadow, PASS
+122B captured requests 0–7: 8/8, six exact shadows, PASS
+122B captured requests 0–12: 13/13, unmatched shadow discarded before deep clean reprocess, PASS
+122B captured requests 0–15: 16/16, ten exact shadows and five safe clean reprocess decisions, PASS
 all stages returned VRAM to idle and left no KFD process
 ```
 
-A four-concurrent tool/grammar workload with vocabulary sharding asserts in dense-logit materialization even when sequence-fork mode is disabled. Diagnosis shows graph output tensor metadata is short-lived and dense rows are context-global across staggered slot decode/sampling. A partial eager-copy fix was intentionally removed because correct repair requires per-slot/per-sequence dense-logit persistence or serialized dense sampling. This is tracked separately from sequence-fork lifecycle work.
+A four-concurrent tool/grammar workload with vocabulary sharding asserts in dense-logit materialization even when sequence-fork mode is disabled. Diagnosis shows graph output tensor metadata is short-lived and dense rows are context-global across staggered slot decode/sampling. A partial eager-copy fix was intentionally removed because correct repair requires per-slot/per-sequence dense-logit persistence or serialized dense sampling. This is tracked separately from sequence-fork lifecycle work. Four concurrent exact shadows pass with mirrored output; sequential vocabulary-sharded tool/grammar use remains supported.
+
+Deep-branch safety result on 122B:
+
+```text
+unmatched shadow discarded before full reprocess
+26,917-token clean reprocess: 38.4 s, 701.7 t/s
+0 faults; VRAM fully released
+```
+
+Later bounded shadow mismatches remain exact-only fallbacks. Repeated full reprocesses are stable but slow as unified-KV physical span/fragmentation grows; bounded MTP rollback is not enabled.
 
 Source inspection findings:
 
