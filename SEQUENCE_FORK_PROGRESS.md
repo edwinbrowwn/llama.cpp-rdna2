@@ -2,6 +2,53 @@
 
 Last updated: 2026-07-20
 
+## Current Handoff
+
+```text
+Production branch: exp-gpu-sampling @ 1a3578dd6 (safe AMD checkpoint disable)
+Experimental branch: exp-sequence-fork @ 4bcdc5f85
+Experimental worktree: ~/llama-cpp-sequence-fork
+Progress file: ~/llama-cpp-sequence-fork/SEQUENCE_FORK_PROGRESS.md
+```
+
+Current experimental requirements:
+
+```text
+GGML_SERVER_SEQUENCE_FORK=1
+GGML_CUDA_DISABLE_GRAPHS=1
+--kv-unified
+--spec-type draft-mtp
+--flash-attn on
+```
+
+Stateful restore is exact-shadow-only. Unmatched shadows are discarded before clean reprocessing. Internal active+shadow sequence capacity is allocated at target/draft context creation. Idle-slot cache eviction is disabled while the feature is active. CPU invariants validate active/shadow target/draft positions.
+
+Post-audit staged results:
+
+```text
+35B single GPU exact shadow: PASS
+35B TP exact shadow + MTP + vocab: PASS
+35B captured 0–7: PASS
+35B four concurrent exact shadows, mirrored output: PASS
+122B captured 0–2: PASS
+122B captured 0–7: PASS
+122B captured 0–12 including deep clean reprocess: PASS
+122B captured 0–15 exact-only policy: PASS
+mmproj text-only and repeated-image lifecycle: PASS
+all completed stages returned VRAM to idle
+```
+
+Known separate bug: four simultaneous tool/grammar slots with `GGML_TP_VOCAB_OUTPUT=1` assert in dense-logit fallback even when sequence-fork mode is disabled. Sequential vocabulary-sharded tool use works. Partial eager-copy experiments were removed; correct repair needs per-sequence dense-logit persistence or serialized dense sampling.
+
+Subagent status: a requested three-agent read-only audit on 2026-07-21 failed before launch because the local `pi-subagents` runtime could not resolve `typebox/compile`. No child modified files or produced findings.
+
+Next focused work:
+
+1. independent manual lifecycle audit for sleep/wake, LoRA, cache purge, and task release;
+2. keep full 122B replay deferred until those guards are complete;
+3. design concurrent dense-logit persistence as a separate workstream;
+4. do not run after any GPU fault/timeout without reset and clean VRAM/KFD checks.
+
 ## Goal
 
 Replace in-place recurrent checkpoint restore on AMD with a turn-boundary sequence fork/switch lifecycle that:
