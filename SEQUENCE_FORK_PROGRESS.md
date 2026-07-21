@@ -544,6 +544,7 @@ Unified KV idle-slot prompt-cache eviction cleared shadow lifecycle state in the
 122B captured requests 0–15: 16/16, ten exact shadows and five safe clean reprocess decisions, PASS
 122B captured requests 0–20: 21/21, eleven exact shadows, nine discarded shadows with clean reprocess, 0 faults, PASS
 122B captured requests 0–15 with bounded rollback: 16/16, ten exact + four bounded-rollback (2-token) restores, one full reprocess, PP 56,806 tokens/81.0 s vs 151,158/398.6 s exact-only (4.9×), decode speed unchanged, 0 faults, PASS
+122B captured requests 0–20 with bounded rollback: 21/21, eleven exact + eight bounded-rollback restores, one full reprocess (vs nine exact-only), PP 65,056 tokens/118.4 s vs 290,811/842.4 s (7.1×), wall 8:50 vs 20:23, 0 faults, VRAM fully released, PASS
 35B + real mmproj, text-only exact shadow: PASS
 35B + real mmproj, repeated identical image prompt: lifecycle PASS (image chunk still recomputed)
 35B single-GPU sleep/wake reload: PASS; no stale shadow after reload
