@@ -163,7 +163,7 @@ These are intentionally deferred until the fork path is correct.
 - [x] Pass 35B 16k-prefix tests on one GPU and TP.
 - [x] Add deterministic/statistical multi-token continuation comparison.
 - [x] Validate direct source-vs-fork continuation against clean cross-sequence variability.
-- [ ] Add MTP target/draft fork-state validation.
+- [ ] Add MTP target/draft fork-state validation (source inspection shows MTP `pending_h` is per-sequence and currently lacks a `get_state`/`set_state` override).
 
 ## Decision Log
 
@@ -275,6 +275,12 @@ direct source/fork max_abs=1.33537, RMS=0.210420, mismatches=1/16
 fork/direct spread below 1.5x clean-layout bound
 PASS
 ```
+
+MTP source inspection finding:
+
+- Qwen MTP maintains per-sequence `pending_h` carryover in `common_speculative_impl_draft_mtp`.
+- Existing generic speculative `get_state`/`set_state` APIs are called by server checkpoints, but the MTP implementation currently has no override.
+- A sequence fork must copy target memory, draft memory, and MTP `pending_h`; target-memory `seq_cp` alone is insufficient.
 
 Source inspection findings:
 
