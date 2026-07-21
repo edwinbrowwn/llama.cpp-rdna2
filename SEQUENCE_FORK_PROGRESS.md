@@ -169,7 +169,8 @@ The first prototype should use these existing operations without server changes.
 - [x] Shadow-to-active switch-back with bounded recurrent rollback.
 - [x] Cancellation during prompt and generation; recovery request completed.
 - [x] Shadow invalidation guards for LoRA/aLoRA changes, context shift, slot restore/erase, prompt clear, and child state copy.
-- [ ] Sleep/wake reload test and LoRA runtime test remain.
+- [x] Sleep/wake reload test: contexts/shadows destroyed, internal capacity recreated, next request starts initial.
+- [ ] LoRA runtime test remains; no compatible adapter fixture is installed.
 - [ ] Hard driver-timeout recovery is external; no automatic retry after GPU wedge.
 - [x] Pi token-transition audit (offline usage/LCP proxy analysis).
 - [x] Token-only dry-run planner.
@@ -542,6 +543,7 @@ Unified KV idle-slot prompt-cache eviction cleared shadow lifecycle state in the
 122B captured requests 0–15: 16/16, ten exact shadows and five safe clean reprocess decisions, PASS
 35B + real mmproj, text-only exact shadow: PASS
 35B + real mmproj, repeated identical image prompt: lifecycle PASS (image chunk still recomputed)
+35B single-GPU sleep/wake reload: PASS; no stale shadow after reload
 all stages returned VRAM to idle and left no KFD process
 ```
 
