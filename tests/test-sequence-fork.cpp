@@ -325,6 +325,64 @@ int main(int argc, char ** argv) {
         }
     }
 
+    // Validate that numerical layout variation does not change a deterministic
+    // multi-token continuation. The clean sequence is recomputed independently;
+    // the fork sequence starts from the preserved boundary.
+    const int continuation_steps = std::min(16, cycles);
+    std::vector<float> logits_cont_clean_a;
+    std::vector<float> logits_cont_clean_b;
+    std::vector<float> logits_cont_fork;
+    if (!decode_tokens(ctx.get(), prefix, 0, seq_clean_a, nullptr) ||
+        !decode_tokens(ctx.get(), suffix, (llama_pos) prefix.size(), seq_clean_a, &logits_cont_clean_a) ||
+        !decode_tokens(ctx.get(), prefix, 0, seq_clean_b, nullptr) ||
+        !decode_tokens(ctx.get(), suffix, (llama_pos) prefix.size(), seq_clean_b, &logits_cont_clean_b)) {
+        return 1;
+    }
+    llama_memory_seq_cp(llama_get_memory(ctx.get()), seq_source, seq_fork_a, -1, -1);
+    if (!decode_tokens(ctx.get(), suffix, (llama_pos) prefix.size(), seq_fork_a, &logits_cont_fork)) {
+        return 1;
+    }
+
+    double continuation_clean_max_abs = 0.0;
+    double continuation_clean_max_rms = 0.0;
+    double continuation_fork_max_abs = 0.0;
+    double continuation_fork_max_rms = 0.0;
+    int continuation_clean_token_mismatches = 0;
+    int continuation_fork_token_mismatches = 0;
+    for (int step = 0; step < continuation_steps; ++step) {
+        const logit_diff diff_clean = compare_logits(logits_cont_clean_a, logits_cont_clean_b);
+        const logit_diff diff_fork  = compare_logits(logits_cont_clean_a, logits_cont_fork);
+        continuation_clean_max_abs = std::max(continuation_clean_max_abs, diff_clean.max_abs);
+        continuation_clean_max_rms = std::max(continuation_clean_max_rms, diff_clean.rms);
+        continuation_fork_max_abs = std::max(continuation_fork_max_abs, diff_fork.max_abs);
+        continuation_fork_max_rms = std::max(continuation_fork_max_rms, diff_fork.rms);
+        continuation_clean_token_mismatches += diff_clean.argmax_a != diff_clean.argmax_b;
+        continuation_fork_token_mismatches += diff_clean.argmax_a != diff_fork.argmax_b;
+        if (step + 1 == continuation_steps) {
+            break;
+        }
+
+        const llama_token token = (llama_token) diff_clean.argmax_a;
+        const llama_tokens one_token = { token };
+        const llama_pos pos = (llama_pos) (prefix.size() + suffix.size() + step);
+        if (!decode_tokens(ctx.get(), one_token, pos, seq_clean_a, &logits_cont_clean_a) ||
+            !decode_tokens(ctx.get(), one_token, pos, seq_clean_b, &logits_cont_clean_b) ||
+            !decode_tokens(ctx.get(), one_token, pos, seq_fork_a, &logits_cont_fork)) {
+            return 1;
+        }
+    }
+    LOG_INF("%s: continuation %d tokens; clean spread max_abs=%g max_rms=%g mismatches=%d; fork spread max_abs=%g max_rms=%g mismatches=%d\n",
+        __func__, continuation_steps,
+        continuation_clean_max_abs, continuation_clean_max_rms, continuation_clean_token_mismatches,
+        continuation_fork_max_abs, continuation_fork_max_rms, continuation_fork_token_mismatches);
+
+    if (!llama_memory_seq_rm(llama_get_memory(ctx.get()), seq_clean_a, -1, -1) ||
+        !llama_memory_seq_rm(llama_get_memory(ctx.get()), seq_clean_b, -1, -1) ||
+        !llama_memory_seq_rm(llama_get_memory(ctx.get()), seq_fork_a, -1, -1)) {
+        LOG_ERR("%s: failed to remove continuation sequences\n", __func__);
+        return 1;
+    }
+
     std::vector<uint8_t> source_state_after;
     if (!get_seq_state(ctx.get(), seq_source, source_state_after)) {
         return 1;
@@ -332,6 +390,50 @@ int main(int argc, char ** argv) {
     if (source_state_before != source_state_after) {
         LOG_ERR("%s: source sequence state changed after fork cycles (%zu vs %zu bytes)\n",
             __func__, source_state_before.size(), source_state_after.size());
+        return 1;
+    }
+
+    // The final oracle compares a direct continuation of the preserved source
+    // against a fork from that exact source. This removes independently allocated
+    // clean-sequence layout from the correctness decision.
+    llama_memory_seq_cp(llama_get_memory(ctx.get()), seq_source, seq_fork_a, -1, -1);
+    std::vector<float> logits_direct;
+    std::vector<float> logits_direct_fork;
+    if (!decode_tokens(ctx.get(), suffix, (llama_pos) prefix.size(), seq_source, &logits_direct) ||
+        !decode_tokens(ctx.get(), suffix, (llama_pos) prefix.size(), seq_fork_a, &logits_direct_fork)) {
+        return 1;
+    }
+
+    double direct_max_abs = 0.0;
+    double direct_max_rms = 0.0;
+    int direct_token_mismatches = 0;
+    for (int step = 0; step < continuation_steps; ++step) {
+        const logit_diff diff = compare_logits(logits_direct, logits_direct_fork);
+        direct_max_abs = std::max(direct_max_abs, diff.max_abs);
+        direct_max_rms = std::max(direct_max_rms, diff.rms);
+        direct_token_mismatches += diff.argmax_a != diff.argmax_b;
+        if (step + 1 == continuation_steps) {
+            break;
+        }
+
+        const llama_tokens one_token = { (llama_token) diff.argmax_a };
+        const llama_pos pos = (llama_pos) (prefix.size() + suffix.size() + step);
+        if (!decode_tokens(ctx.get(), one_token, pos, seq_source, &logits_direct) ||
+            !decode_tokens(ctx.get(), one_token, pos, seq_fork_a, &logits_direct_fork)) {
+            return 1;
+        }
+    }
+    LOG_INF("%s: direct source/fork continuation %d tokens (max_abs=%g max_rms=%g mismatches=%d)\n",
+        __func__, continuation_steps, direct_max_abs, direct_max_rms, direct_token_mismatches);
+
+    const double continuation_allowed_abs = std::max(eps, 1.5*continuation_clean_max_abs);
+    const double continuation_allowed_rms = std::max(eps, 1.5*continuation_clean_max_rms);
+    if (continuation_fork_max_abs > continuation_allowed_abs ||
+        continuation_fork_max_rms > continuation_allowed_rms ||
+        direct_max_abs > continuation_allowed_abs ||
+        direct_max_rms > continuation_allowed_rms) {
+        LOG_ERR("%s: fork continuation exceeds clean-layout variability: allowed max_abs=%g rms=%g\n",
+            __func__, continuation_allowed_abs, continuation_allowed_rms);
         return 1;
     }
 

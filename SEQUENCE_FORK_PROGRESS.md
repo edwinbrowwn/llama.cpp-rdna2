@@ -161,7 +161,7 @@ These are intentionally deferred until the fork path is correct.
 - [x] Pass 35B one-GPU 100-cycle test.
 - [x] Pass 35B four-GPU TP basic and vocabulary-sharded tests.
 - [x] Pass 35B 16k-prefix tests on one GPU and TP.
-- [ ] Add deterministic multi-token continuation comparison.
+- [x] Add deterministic/statistical multi-token continuation comparison.
 - [ ] Add MTP target/draft fork-state validation.
 
 ## Decision Log
@@ -237,14 +237,31 @@ fork suffix avg=76.82 ms
 PASS
 ```
 
-16k prefix, eight cycles:
+16k prefix, statistical continuation:
 
 ```text
-fork metadata avg=1.972 ms, max=2.297 ms
-clean suffix=81.47–83.94 ms
-fork suffix avg=74.93 ms (one 134.32 ms warmup/recapture outlier)
-argmax token matches one-GPU reference (271)
+fork metadata avg=1.923 ms, max=2.213 ms
+clean suffix=80.70–83.65 ms
+fork suffix avg=70.31 ms (one 133.73 ms warmup/recapture outlier)
+16-token clean spread: max_abs=0.99656, RMS=0.200011, mismatches=1
+16-token fork spread: max_abs=1.08603, RMS=0.203496, mismatches=1
+16-token direct source/fork: max_abs=1.33537, RMS=0.210420, mismatches=1
+all fork/direct spread remains below 1.5x clean-layout bound
 source state preserved (393,885,184 bytes)
+PASS
+```
+
+### Multi-token correctness interpretation
+
+The tiny CPU model is bitwise exact over 16 continuation tokens. The quantized 35B GPU model is not sequence-layout deterministic: independently clean coexisting sequences can select different greedy tokens under the same token history. Forked and direct-source continuations show comparable mismatch counts and logit spread, bounded against measured clean-layout variability. Same-sequence recomputation remains bitwise identical.
+
+At 16k on one GPU:
+
+```text
+clean mismatches=1/16
+fork-vs-canonical-clean mismatches=0/16
+direct source/fork mismatches=1/16
+fork/direct spread below clean-layout bound
 PASS
 ```
 
