@@ -116,6 +116,7 @@ struct llama_context {
     void set_embeddings (bool value);
     void set_embeddings_nextn(bool value, bool masked);
     void set_embeddings_layer_inp(uint32_t lid, bool enable);
+    void set_vocab_output_dense(bool value);
     void set_nextn_layer_offset(int32_t offset);
     void set_causal_attn(bool value);
     void set_warmup(bool value);
@@ -349,6 +350,7 @@ private:
     // needs the complete vocabulary (for example grammar or active penalties).
     const ggml_tensor * vocab_last_logits = nullptr;
     uint32_t vocab_last_logits_rows = 0;
+    bool vocab_force_dense_logits = false;
     std::vector<float> vocab_dense_logits;
     std::vector<swap_info> vocab_dense_pending_swaps;
 

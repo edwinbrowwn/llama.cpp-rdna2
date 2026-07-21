@@ -851,9 +851,22 @@ bool llama_context::materialize_vocab_dense_logits() {
     }
 
     const size_t n_vocab = model.vocab.n_tokens();
+    const size_t requested_bytes = (size_t) vocab_last_logits_rows*n_vocab*sizeof(float);
+    const size_t tensor_bytes = ggml_nbytes(vocab_last_logits);
+    if (requested_bytes > tensor_bytes) {
+        LLAMA_LOG_ERROR("%s: dense fallback requests %u rows (%zu bytes) from tensor with %lld rows and %zu bytes; ne=[%lld,%lld,%lld,%lld] nb=[%zu,%zu,%zu,%zu]\n",
+            __func__, vocab_last_logits_rows, requested_bytes,
+            (long long) ggml_nrows(vocab_last_logits), tensor_bytes,
+            (long long) vocab_last_logits->ne[0], (long long) vocab_last_logits->ne[1],
+            (long long) vocab_last_logits->ne[2], (long long) vocab_last_logits->ne[3],
+            vocab_last_logits->nb[0], vocab_last_logits->nb[1],
+            vocab_last_logits->nb[2], vocab_last_logits->nb[3]);
+        return false;
+    }
+
     vocab_dense_logits.resize((size_t) vocab_last_logits_rows*n_vocab);
     ggml_backend_tensor_get(vocab_last_logits,
-        vocab_dense_logits.data(), 0, vocab_dense_logits.size()*sizeof(float));
+        vocab_dense_logits.data(), 0, requested_bytes);
 
     for (const swap_info & swap : vocab_dense_pending_swaps) {
         if (swap.i0 >= vocab_last_logits_rows || swap.i1 >= vocab_last_logits_rows) {
@@ -1207,6 +1220,10 @@ void llama_context::set_embeddings_nextn(bool value, bool masked) {
 
     cparams.embeddings_nextn        = value;
     cparams.embeddings_nextn_masked = masked;
+}
+
+void llama_context::set_vocab_output_dense(bool value) {
+    vocab_force_dense_logits = value;
 }
 
 void llama_context::set_embeddings_layer_inp(uint32_t lid, bool enable) {
@@ -1994,6 +2011,25 @@ int llama_context::decode(const llama_batch & batch_inp) {
                 if (n_outputs_prev == 0 && n_outputs == n_outputs_all) {
                     vocab_last_logits = t_logits;
                     vocab_last_logits_rows = n_outputs;
+                    if ((uint32_t) ggml_nrows(t_logits) != n_outputs) {
+                        LLAMA_LOG_WARN("%s: vocabulary logits row mismatch: outputs=%u tensor_rows=%lld ne=[%lld,%lld,%lld,%lld]\n",
+                            __func__, n_outputs, (long long) ggml_nrows(t_logits),
+                            (long long) t_logits->ne[0], (long long) t_logits->ne[1],
+                            (long long) t_logits->ne[2], (long long) t_logits->ne[3]);
+                    }
+                }
+                if (vocab_force_dense_logits && n_outputs_all <= cparams.n_seq_max) {
+                    if (vocab_dense_logits.empty()) {
+                        vocab_dense_logits.resize((size_t) n_outputs_all*n_vocab);
+                    }
+                    const size_t dense_row_bytes = (size_t) n_vocab*sizeof(float);
+                    ggml_backend_tensor_get(t_logits,
+                        vocab_dense_logits.data() + (size_t) n_outputs_prev*n_vocab,
+                        0, (size_t) n_outputs*dense_row_bytes);
+                    // Graph tensor metadata is short-lived. Dense callers use the
+                    // accumulated host rows after decode returns.
+                    vocab_last_logits = nullptr;
+                    vocab_last_logits_rows = 0;
                 }
                 const int32_t k = std::min<int32_t>(256, n_vocab);
                 float * sampled_logits = sampling.logits.data + n_outputs_prev*sampling.stride;
@@ -3859,6 +3895,10 @@ float * llama_get_embeddings_seq(llama_context * ctx, llama_seq_id seq_id) {
 
 void llama_set_embeddings_nextn(llama_context * ctx, bool value, bool masked) {
     ctx->set_embeddings_nextn(value, masked);
+}
+
+void llama_set_vocab_output_dense(llama_context * ctx, bool value) {
+    ctx->set_vocab_output_dense(value);
 }
 
 void llama_set_embeddings_layer_inp(llama_context * ctx, uint32_t lid, bool value) {

@@ -11,6 +11,7 @@
 #include "common.h"
 #include "fit.h"
 #include "llama.h"
+#include "../../src/llama-ext.h"
 #include "log.h"
 #include "sampling.h"
 #include "speculative.h"
@@ -2998,8 +2999,37 @@ private:
         llama_batch batch_view;
         int32_t off_next = 0;
         int32_t n_batch = llama_n_batch(ctx_tgt);
+        const char * vocab_output_env = getenv("GGML_TP_VOCAB_OUTPUT");
+        const bool vocab_output_requested = vocab_output_env != nullptr && strcmp(vocab_output_env, "1") == 0;
+        auto slot_requires_dense_logits = [&](int32_t id_slot) {
+            server_slot * slot = get_slot_by_id(id_slot);
+            return slot && slot->smpl && !common_sampler_can_use_compact(slot->smpl.get(), 256);
+        };
+
         for (int32_t off = 0; off < batch.size(); off = off_next) {
-            const int32_t n_tokens = std::min(n_batch, batch.size() - off);
+            int32_t n_tokens = std::min(n_batch, batch.size() - off);
+
+            // Dense vocabulary fallback stores graph output metadata only until
+            // the next decode. Keep all outputs for one dense-sampling slot in
+            // the same view and sample them before decoding another slot.
+            if (vocab_output_requested) {
+                int32_t output_slot = -1;
+                bool output_slot_dense = false;
+                for (int32_t i = 0; i < n_tokens; ++i) {
+                    const auto & token = batch.tokens[off + i];
+                    if (!token.output) {
+                        continue;
+                    }
+                    const bool dense = slot_requires_dense_logits(token.id_slot);
+                    if (output_slot < 0) {
+                        output_slot = token.id_slot;
+                        output_slot_dense = dense;
+                    } else if (token.id_slot != output_slot && (output_slot_dense || dense)) {
+                        n_tokens = i;
+                        break;
+                    }
+                }
+            }
             try {
                 scoped_timer t(t_decode, n_decode);
                 // TODO @ngxson : maybe handle n_batch == 1 here instead of inside decode()
@@ -3136,8 +3166,18 @@ private:
 
             generating.push_back(&slot);
 
+            const char * vocab_env = getenv("GGML_TP_VOCAB_OUTPUT");
+            const bool dense_vocab_slot = vocab_env != nullptr && strcmp(vocab_env, "1") == 0 &&
+                slot.smpl && !common_sampler_can_use_compact(slot.smpl.get(), 256);
+
             if (spec) {
                 common_speculative_get_draft_params(spec.get(), slot.id).drafting = false;
+                if (dense_vocab_slot) {
+                    slot.spec_draft.clear();
+                    slot.spec_i_batch.clear();
+                    SLT_DBG(slot, "%s", "disabling speculative draft for dense vocabulary sampling\n");
+                    return;
+                }
 
                 const bool use_ckpt_tgt = ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
                 const bool use_ckpt_dft = ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
@@ -3912,6 +3952,16 @@ private:
         } else {
             n_empty_consecutive = 0;
         }
+
+        bool require_dense_vocab_logits = false;
+        for (const auto & slot : slots) {
+            if (slot.is_processing() && slot.smpl &&
+                    !common_sampler_can_use_compact(slot.smpl.get(), 256)) {
+                require_dense_vocab_logits = true;
+                break;
+            }
+        }
+        llama_set_vocab_output_dense(ctx_tgt, require_dense_vocab_logits);
 
         const int ret = llama_decode(ctx_tgt, batch_view);
 

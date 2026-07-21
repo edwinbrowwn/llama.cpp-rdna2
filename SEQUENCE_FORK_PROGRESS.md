@@ -187,7 +187,7 @@ The first prototype should use these existing operations without server changes.
 - [x] Multimodal projector loaded for text-only exact shadow restore.
 - [x] Same-image exact shadow restore lifecycle completed without faults.
 - [ ] Image embeddings are still recomputed after restore; shadow memory currently preserves model sequence state, not cached mmproj chunk embeddings.
-- [ ] Concurrent dense grammar with `GGML_TP_VOCAB_OUTPUT` is a separate retained-feature bug; sequence-fork parallel lifecycle is validated with mirrored output, while sequential vocabulary-sharded tool use remains supported.
+- [x] Concurrent dense grammar with `GGML_TP_VOCAB_OUTPUT`: dense slot output groups are serialized, dense rows are eagerly accumulated while graph tensors are valid, and MTP drafting is disabled only for dense-incompatible slots. Compact-compatible slots retain the original fast path.
 
 ## Acceptance Criteria
 
@@ -549,7 +549,23 @@ Unified KV idle-slot prompt-cache eviction cleared shadow lifecycle state in the
 all stages returned VRAM to idle and left no KFD process
 ```
 
-A four-concurrent tool/grammar workload with vocabulary sharding asserts in dense-logit materialization even when sequence-fork mode is disabled. Diagnosis shows graph output tensor metadata is short-lived and dense rows are context-global across staggered slot decode/sampling. Incremental eager copying can capture individual decode rows, but later staggered slot decodes clear context-global storage before all consumers sample. A correct repair requires per-slot/per-sequence dense-logit persistence or serialized dense sampling. The partial experiment was removed from the sequence-fork branch. Four concurrent exact shadows pass with mirrored output; sequential vocabulary-sharded tool/grammar use remains supported.
+A four-concurrent tool/grammar workload with vocabulary sharding originally asserted in dense-logit materialization even when sequence-fork mode was disabled. The fix now combines:
+
+1. sampler capability detection before decode;
+2. serialization of output groups when any involved slot requires dense logits;
+3. eager accumulation of dense rows while each graph tensor remains valid;
+4. MTP drafting disabled only for dense-incompatible slots so speculative output groups never cross serialized views;
+5. bounds-checked lazy fallback as a fail-safe.
+
+Validation:
+
+```text
+four concurrent tool/grammar requests, no sequence fork: 8/8 PASS
+four concurrent exact sequence-fork shadows + vocab sharding + grammar: 8/8 PASS
+0 faults/errors; VRAM fully released
+```
+
+Dense concurrent generation is intentionally slower because it is serialized and does not use MTP drafting. Compact-compatible vocabulary-sharded slots retain parallel/MTP fast paths.
 
 Deep-branch safety result on 122B:
 

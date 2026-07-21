@@ -52,6 +52,10 @@ void common_perf_print(const struct llama_context * ctx, const struct common_sam
 // get the underlying llama_sampler_chain
 struct llama_sampler * common_sampler_get(const struct common_sampler * gsmpl);
 
+// Returns whether the sampler can consume compact vocabulary-parallel TOP_K
+// candidates without requesting dense full-vocabulary logits.
+bool common_sampler_can_use_compact(const struct common_sampler * gsmpl, size_t candidate_count = 256);
+
 // extended sampling implementation:
 //
 // - set logits

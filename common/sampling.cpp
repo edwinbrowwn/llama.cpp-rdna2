@@ -502,6 +502,18 @@ void common_sampler_free(struct common_sampler * gsmpl) {
     delete gsmpl;
 }
 
+bool common_sampler_can_use_compact(const struct common_sampler * gsmpl, size_t candidate_count) {
+    if (!gsmpl) {
+        return false;
+    }
+    try {
+        gsmpl->validate_compact_sampling(candidate_count);
+        return true;
+    } catch (const std::exception &) {
+        return false;
+    }
+}
+
 static bool grammar_should_apply(struct common_sampler * gsmpl) {
     if (!gsmpl->grmr) {
         return false;
