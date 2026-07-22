@@ -1126,17 +1126,22 @@ static bool ggml_backend_cuda_comm_vocab_top_k(
     }
     NCCL_CHECK(ncclGroupEnd());
 
+    // On ROCm, rank 0 can reach the host read while peer all-gather streams are
+    // still completing. Wait for every peer before reading rank 0's gathered
+    // buffer. These synchronizations previously happened after the D2H copy,
+    // which was too late and could surface as an illegal memory access there.
+    for (size_t i = 1; i < n_backends; ++i) {
+        auto * cuda_ctx = (ggml_backend_cuda_context *) comm_ctx->backends[i]->context;
+        ggml_cuda_set_device(cuda_ctx->device);
+        CUDA_CHECK(cudaStreamSynchronize(cuda_ctx->stream()));
+    }
+
     std::vector<uint64_t> packed_host(n_backends*local_count);
     auto * root_ctx = (ggml_backend_cuda_context *) comm_ctx->backends[0]->context;
     ggml_cuda_set_device(root_ctx->device);
     CUDA_CHECK(cudaMemcpyAsync(packed_host.data(), gathered_dev[0].get(), packed_host.size()*sizeof(uint64_t),
                                cudaMemcpyDeviceToHost, root_ctx->stream()));
     CUDA_CHECK(cudaStreamSynchronize(root_ctx->stream()));
-    for (size_t i = 1; i < n_backends; ++i) {
-        auto * cuda_ctx = (ggml_backend_cuda_context *) comm_ctx->backends[i]->context;
-        ggml_cuda_set_device(cuda_ctx->device);
-        CUDA_CHECK(cudaStreamSynchronize(cuda_ctx->stream()));
-    }
 
     std::vector<uint64_t> row_candidates(n_backends*k);
     for (int64_t row = 0; row < nrows; ++row) {
