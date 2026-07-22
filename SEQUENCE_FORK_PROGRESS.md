@@ -62,14 +62,39 @@ Clean-throughput audit:
 - current idle clocks/power/VRAM are normal, but no under-load clock/temperature trace was captured;
 - unit tests prove default restored provenance and FA op force bits are false, but no runtime backend-selection trace exists yet.
 
-Before another long-context attempt, add explicit policy/kernel observability and capture under-load clocks; do not merely extend the curl timeout.
+The empty-slot provenance bug was fixed by `a3e355984`: a prompt-cache load is marked restored only when prompt metadata is nonempty and the loaded target sequence has a valid position. Unit tests cover empty metadata, missing sequence state, and valid restored state.
+
+Instrumented consolidated requests 30–33 after the fix:
+
+```text
+request 30 initial: server forced_vector=0; backend tile on all GPUs
+  58,865 tokens, 578.0 t/s, PASS
+request 31 exact restore: vector on all GPUs, prompt+generation PASS
+request 32 large mismatch: atomic clean tile reprocess, PASS
+request 33 exact restore: vector on all GPUs through prompt+generation
+  3,655 suffix tokens, 36.8 t/s, PASS
+4/4 responses; 0 faults/errors; full process/KFD/VRAM cleanup
+```
+
+This validates actual backend dispatch, not only server policy state. Diagnostic broad synchronization remained off.
+
+Thermal telemetry is now the remaining blocker before a full replay:
+
+```text
+GPU junction peaks: 102–103 C on all four GPUs
+GPU edge peaks:      92–96 C
+board power peaks:  230–237 W per GPU
+GPU use:             99%
+```
+
+The earlier progressive clean-prompt slowdown is consistent with thermal/power throttling. Do not run a sustained full replay at these temperatures without cooling, fan, or power-limit mitigation and user approval.
 
 ## Current Handoff
 
 ```text
 Production branch: exp-gpu-sampling @ 1a3578dd6 (safe AMD checkpoint disable)
 Experimental branch: exp-sequence-fork
-Experimental implementation head: fabe8edc2 (restored-state vector persistence + eligibility/lifecycle hardening; GPU-unvalidated)
+Experimental implementation head: a3e355984 (persistent restored-vector policy + empty prompt-cache provenance fix)
 Atomic full-reprocess hardening retained: f87b17ed9
 Peer-gather ordering patch reverted: 049375fbe
 Bounded-shadow source commit retained: aea3814b8
