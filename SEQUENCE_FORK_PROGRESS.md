@@ -7,7 +7,7 @@ Last updated: 2026-07-20
 ```text
 Production branch: exp-gpu-sampling @ 1a3578dd6 (safe AMD checkpoint disable)
 Experimental branch: exp-sequence-fork
-Experimental implementation head: 39e238985 (adaptive restored-suffix vector FA; GPU-unvalidated)
+Experimental implementation head: 9c7d31c6c (adaptive restored-suffix vector FA, 1/12 threshold)
 Atomic full-reprocess hardening retained: f87b17ed9
 Peer-gather ordering patch reverted: 049375fbe
 Bounded-shadow source commit retained: aea3814b8
@@ -52,7 +52,7 @@ Commit `39e238985` implements the adaptive policy without process-global environ
 - force-vector selection is encoded per FA graph operation;
 - both target and MTP draft contexts receive the scoped policy for exactly one restored decode view;
 - per-slot counters track exact restored prompt tokens and split mixed vector/tile views;
-- suffixes over 1/8, unsupported vector shapes, and restore failures use atomic clean tile reprocessing;
+- suffixes over 1/12, unsupported vector shapes, and restore failures use atomic clean tile reprocessing;
 - clean/initial/append/generation work retains normal FA selection;
 - AMD/model capability uses actual per-layer K/V head dimensions, not `embedding_length/head_count`;
 - 35B and 122B GGUF metadata both report K/V head dimension 256 and are eligible;
@@ -64,7 +64,7 @@ CPU validation:
 test-sequence-fork-policy: PASS
   scoped FA op-parameter round trip
   compatible/incompatible/mismatched model head shapes
-  exact 1/8 policy boundaries
+  exact 1/12 policy boundaries
   unsupported/non-AMD fallback
   counter lifecycle and underflow rejection
   mixed vector/tile view split boundaries
@@ -73,7 +73,21 @@ recurrent rollback checkpoint: PASS
 server + HIP backend build: PASS
 ```
 
-No GPU workload has run against `39e238985` yet.
+Staged GPU validation:
+
+```text
+35B TP + MTP + vocab, requests 0–1:
+  exact restore, 60-token vector suffix, PASS, 0 faults
+122B TP + MTP + vocab, requests 0–1:
+  bounded rollback=2, 33-token vector suffix, PASS, 0 faults
+122B focused requests 30–33 (previous deterministic fault):
+  request 31: 104-token restored vector suffix
+  request 32: atomic 59,126-token clean tile reprocess
+  request 33: 3,655-token restored vector suffix
+  4/4 PASS, 0 faults/errors, full VRAM/KFD cleanup
+```
+
+The focused fault reproduction used no broad synchronization or gather-order experiment.
 
 Subagent status: a requested three-agent read-only audit on 2026-07-21 failed before launch because the local `pi-subagents` runtime could not resolve `typebox/compile`. No child modified files or produced findings.
 
@@ -175,7 +189,7 @@ Treat restored-prompt tile FA as unsupported on AMD hybrid/recurrent models unti
 
 - initial/append-only prompts: normal tile FA;
 - clean full reprocess: atomic reset plus normal tile FA;
-- exact or bounded shadow restore with a small suffix (initial conservative threshold: suffix ≤ 1/8 of full prompt): vector FA for every remaining prompt token;
+- exact or bounded shadow restore with a small suffix (current conservative threshold: suffix ≤ 1/12 of full prompt): vector FA for every remaining prompt token;
 - larger restored suffix: reject restore and use atomic clean tile-FA full reprocess, which is both safer and faster at that ratio;
 - after the restored suffix is consumed: return to normal kernel selection for generation;
 - if vector FA is not eligible: reject the restore and perform a clean tile-FA full reprocess;
@@ -188,12 +202,13 @@ Retained optimizations: four-GPU tensor splitting, FA enabled, unified KV, MTP, 
 Measured restored-suffix cost at the final request:
 
 ```text
-tile suffix (diagnostic passing runs): 155–173 t/s, ~21–24 s for 3,655 tokens
-full-suffix vector:                     38.5 t/s, ~95 s for 3,659 tokens
-clean full prompt:                     231 t/s, ~272 s for 62,781 tokens
+tile suffix (historical/diagnostic):   155–173 t/s, ~21–24 s for 3,655 tokens
+old target/checkpoint vector policy:    38.5 t/s, ~95 s for 3,659 tokens
+current target+MTP vector policy:        23.0 t/s, ~159 s for 3,655 tokens
+clean full request-33 prompt:           231.0 t/s, ~272 s for 62,781 tokens
 ```
 
-Thus vector is ~4.0–4.5× slower than tile for those suffix tokens (about 75–78% lower suffix PP throughput), but still ~2.9× faster than clean full reprocessing for the complete request and saves about 177 seconds of PP. The theoretical measured break-even is near suffix/full ≈ 1/6; use 1/8 initially for margin.
+The current policy forces both target and draft contexts safe, so it is slower than the older checkpoint measurement. For request 33 it remains ~1.71× faster than clean full reprocessing and saves about 113 seconds of PP. Current measured break-even is near suffix/full ≈ 1/10; threshold `1/12` adds safety margin.
 
 ### Restored-suffix vector policy considerations
 
@@ -255,7 +270,7 @@ Use these measures in order:
 3. **Maintain session/slot affinity.** Do not evict or repurpose the active completion state before the client's next turn. A server-managed conversation/session handle would guarantee this better than stateless full-prompt similarity matching.
 4. **Keep a small historical boundary ring only for real branch/edit workflows.** One active completion plus the current prompt shadow already covers normal continuation and one branch. Additional older shadows can reduce deep-edit reprocessing but require more preallocated sequence IDs and recurrent memory; measure before adding.
 5. **For captured deterministic replay, optionally teacher-force the recorded assistant tokens in a separate cache-efficiency benchmark.** Do not confuse this with generation correctness. Fixed historical requests otherwise intentionally mismatch newly sampled replay output and overstate real-session suffixes.
-6. **Route adaptively.** If the best safe suffix exceeds 1/8 of the full prompt, clean tile reprocess is initially preferred over vector restore.
+6. **Route adaptively.** If the best safe suffix exceeds 1/12 of the full prompt, clean tile reprocess is preferred over vector restore.
 
 What cannot be removed: new tool output, new user content, or assistant content that genuinely differs from the cached generation. Those tokens must be evaluated by some kernel.
 
