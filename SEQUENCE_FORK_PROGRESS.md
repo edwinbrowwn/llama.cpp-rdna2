@@ -40,7 +40,19 @@ recurrent rollback: PASS
 server + HIP build: PASS
 ```
 
-No GPU workload has run against `8f1b64f22` / `fabe8edc2`. Do not start another full replay. Production `exp-gpu-sampling @ 1a3578dd6` remains untouched.
+Bounded GPU validation of `fabe8edc2`:
+
+```text
+122B requests 0–11: 12/12 PASS
+request 11: exact restore at 26,219
+restored prompt suffix: 643 tokens, vector accounting completed
+generation: 407 tokens completed, 30.6 t/s
+0 faults/errors; full process/KFD/VRAM cleanup
+```
+
+This resolves the shortest reproduction of PID `24952`'s request-11 timeout. Do not start another full replay yet. Production `exp-gpu-sampling @ 1a3578dd6` remains untouched.
+
+A subsequent requests 30–33 attempt did not reach restored state: initial clean request 30 processed 51,200/58,865 tokens before curl's 900-second timeout. No GPU fault occurred and cleanup was clean. Throughput degraded progressively from ~535 to ~57 t/s. This is a separate clean-prompt throughput anomaly; do not attribute it to vector leakage or hardware state without policy/clock evidence.
 
 ## Current Handoff
 
