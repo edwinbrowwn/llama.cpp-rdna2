@@ -6,7 +6,9 @@ Last updated: 2026-07-20
 
 ```text
 Production branch: exp-gpu-sampling @ 1a3578dd6 (safe AMD checkpoint disable)
-Experimental branch: exp-sequence-fork @ 69fee080c
+Experimental branch: exp-sequence-fork
+Feature source commit: aea3814b8 (bounded shadow rollback)
+Latest recorded result before this checkpoint: 60dd1912b
 Experimental worktree: ~/llama-cpp-sequence-fork
 Progress file: ~/llama-cpp-sequence-fork/SEQUENCE_FORK_PROGRESS.md
 ```
@@ -21,7 +23,7 @@ GGML_CUDA_DISABLE_GRAPHS=1
 --flash-attn on
 ```
 
-Stateful restore is exact-shadow-only. Unmatched shadows are discarded before clean reprocessing. Internal active+shadow sequence capacity is allocated at target/draft context creation. Idle-slot cache eviction is disabled while the feature is active. CPU invariants validate active/shadow target/draft positions.
+Stateful restore permits exact matches and bounded shadow rollback within the recurrent snapshot window (`shadow_rollback <= n_rs`, currently 3). Larger mismatches discard the shadow before clean reprocessing. Internal active+shadow sequence capacity is allocated at target/draft context creation. Idle-slot cache eviction is disabled while the feature is active. CPU invariants validate active/shadow target/draft positions.
 
 Post-audit staged results:
 
@@ -38,16 +40,34 @@ mmproj text-only and repeated-image lifecycle: PASS
 all completed stages returned VRAM to idle
 ```
 
-Known separate bug: four simultaneous tool/grammar slots with `GGML_TP_VOCAB_OUTPUT=1` assert in dense-logit fallback even when sequence-fork mode is disabled. Sequential vocabulary-sharded tool use works. Partial eager-copy experiments were removed; correct repair needs per-sequence dense-logit persistence or serialized dense sampling.
+Concurrent dense grammar with `GGML_TP_VOCAB_OUTPUT=1` is fixed by serializing dense-incompatible slot output groups, eagerly accumulating dense rows while graph tensors are valid, and disabling MTP only for those slots. The compact-compatible parallel/MTP path remains enabled and has a passing regression.
 
 Subagent status: a requested three-agent read-only audit on 2026-07-21 failed before launch because the local `pi-subagents` runtime could not resolve `typebox/compile`. No child modified files or produced findings.
 
-Next focused work:
+## Current Diagnostic Breakpoint
 
-1. independent manual lifecycle audit for sleep/wake, LoRA, cache purge, and task release;
-2. keep full 122B replay deferred until those guards are complete;
-3. design concurrent dense-logit persistence as a separate workstream;
-4. do not run after any GPU fault/timeout without reset and clean VRAM/KFD checks.
+Proven:
+
+1. 122B requests 30–33 reproduce the illegal access in about 7.5 minutes with sequence forks enabled.
+2. The same requests 30–33 complete without faults when sequence forks are disabled, although clean prompt processing takes about 21.5 minutes.
+3. The enabled run faults during final-request prompt processing after an exact restore at 59,126 tokens; the request has 62,781 input tokens.
+4. HIP reports the error at `ggml_backend_cuda_comm_vocab_top_k` during D2H synchronization. Because execution is asynchronous, this is an observation point, not yet proof that TOP_K caused the illegal access.
+5. The failed `AMD_SERIALIZE_KERNEL=3 AMD_SERIALIZE_COPY=3` attempt never passed the script's 300-second readiness timeout. It produced no fault localization and must not be treated as evidence.
+6. Every failed run cleaned up: no server/KFD process, VRAM returned to ~17 MiB per GPU, SMI remained responsive.
+
+Unknown:
+
+- whether the originating kernel is vocabulary TOP_K, long-context FlashAttention, unified-KV physical-span handling, or another asynchronous producer;
+- whether vocabulary sharding is necessary for the reproducer;
+- whether a single restored shadow at ~59k is sufficient, independent of earlier history.
+
+Next focused work — do not start another long matrix:
+
+1. create a 30–33 reproducer script with a configurable server-ready timeout and feature toggles;
+2. add explicit stream synchronization/error checks immediately after candidate kernels in a diagnostic build so the first failing operation is reported;
+3. run one fork-enabled 30–33 diagnostic reproduction;
+4. only after localization, run the single discriminating toggle (for example vocab sharding off if TOP_K remains implicated);
+5. after any GPU fault/timeout, stop and verify process/KFD/VRAM cleanup before another run.
 
 ## Goal
 
