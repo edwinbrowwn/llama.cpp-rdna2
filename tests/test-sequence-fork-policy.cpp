@@ -67,6 +67,14 @@ int main() {
 
     CHECK(!llama_model_supports_flash_attn_force_vec(nullptr));
 
+    CHECK(cache_types_support_vector(GGML_TYPE_F16, GGML_TYPE_F16));
+    CHECK(cache_types_support_vector(GGML_TYPE_Q4_0, GGML_TYPE_Q4_0));
+    CHECK(cache_types_support_vector(GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
+    CHECK(cache_types_support_vector(GGML_TYPE_BF16, GGML_TYPE_BF16));
+    CHECK(!cache_types_support_vector(GGML_TYPE_F16, GGML_TYPE_Q8_0));
+    CHECK(!cache_types_support_vector(GGML_TYPE_F32, GGML_TYPE_F32));
+    CHECK(!cache_types_support_vector(GGML_TYPE_Q5_0, GGML_TYPE_Q5_0));
+
     // Conservative 1/12 threshold, including the exact boundary.
     CHECK(should_use_vector(true, true, 84, 77));
     CHECK(!should_use_vector(true, true, 84, 76));
@@ -115,6 +123,10 @@ int main() {
     CHECK(!state.start(0));
     CHECK(!state.active());
     CHECK(!state.force_vector());
+    state.mark_restored();
+    CHECK(!state.active());
+    CHECK(state.force_vector());
+    state.clear_all();
     CHECK(!state.start((size_t) UINT32_MAX + 1));
     CHECK(!state.active());
     CHECK(!state.force_vector());

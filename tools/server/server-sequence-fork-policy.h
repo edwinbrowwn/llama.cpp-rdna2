@@ -5,9 +5,26 @@
 #include <limits>
 #include <utility>
 
+#include "ggml.h"
+
 namespace server_sequence_fork_policy {
 
 constexpr size_t restored_suffix_ratio_denominator = 12;
+
+inline bool cache_types_support_vector(ggml_type type_k, ggml_type type_v) {
+    if (type_k != type_v) {
+        return false;
+    }
+    switch (type_k) {
+        case GGML_TYPE_F16:
+        case GGML_TYPE_Q4_0:
+        case GGML_TYPE_Q8_0:
+        case GGML_TYPE_BF16:
+            return true;
+        default:
+            return false;
+    }
+}
 
 inline bool should_use_vector(
         bool   is_amd,
@@ -45,6 +62,10 @@ public:
     void clear_all() {
         remaining_ = 0;
         force_vector_ = false;
+    }
+
+    void mark_restored() {
+        force_vector_ = true;
     }
 
     bool active() const {

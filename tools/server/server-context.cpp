@@ -1284,9 +1284,15 @@ private:
                 }
             }
 
+            const bool target_cache_supported = server_sequence_fork_policy::cache_types_support_vector(
+                params_base.cache_type_k, params_base.cache_type_v);
+            const bool draft_cache_supported = server_sequence_fork_policy::cache_types_support_vector(
+                params_base.speculative.draft.cache_type_k,
+                params_base.speculative.draft.cache_type_v);
             sequence_fork_fa_vec_supported = sequence_fork_amd &&
                 params_base.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED &&
-                llama_model_supports_flash_attn_force_vec(model_tgt);
+                llama_model_supports_flash_attn_force_vec(model_tgt) &&
+                target_cache_supported && draft_cache_supported;
 
             if (sequence_fork_amd) {
                 SRV_WRN("sequence fork AMD restored-suffix policy: vector_fa=%d threshold=1/12; clean/large prompts retain tile FA\n",
@@ -1842,6 +1848,9 @@ private:
 
                 if (!ret->prompt_load(*prompt_cache, task.tokens)) {
                     ret->prompt_clear();
+                } else if (sequence_fork_enabled && sequence_fork_amd) {
+                    ret->fork_restored_prompt.mark_restored();
+                    SLT_WRN(*ret, "%s", "prompt-cache state load marked for vector FA until clean rebuild\n");
                 }
 
                 prompt_cache->update();
@@ -2776,6 +2785,13 @@ private:
                 } break;
             case SERVER_TASK_TYPE_SLOT_RESTORE:
                 {
+                    if (sequence_fork_enabled) {
+                        send_error(task,
+                            "Slot-file restore is not supported while sequence-fork mode is active",
+                            ERROR_TYPE_INVALID_REQUEST);
+                        break;
+                    }
+
                     const int id_slot = task.slot_action.id_slot;
                     server_slot * slot = get_slot_by_id(id_slot);
                     if (slot == nullptr) {
