@@ -24,14 +24,30 @@ Recovery patch `8f1b64f22`:
 - only atomic prompt clear/full rebuild clears provenance;
 - unit tests cover counter completion, persistence, copy, and full clear.
 
-`8f1b64f22` is CPU-tested only. Do not start another full replay. Production `exp-gpu-sampling @ 1a3578dd6` remains untouched.
+`8f1b64f22` addresses a definite policy violation but is not proven to be the sole timeout cause because no matching kernel record persisted. Follow-up `fabe8edc2` adds conservative target+draft KV cache-type eligibility, marks RAM prompt-cache loads as restored, and rejects slot-file restore while sequence-fork mode is active because aligned draft/MTP state cannot be reconstructed safely.
+
+CPU validation after adversarial review:
+
+```text
+policy unit tests: PASS
+  restored provenance persists after suffix/task completion
+  atomic clear removes provenance
+  parent/child copy semantics
+  target/draft cache-type compatibility
+  unsupported and mismatched cache fallbacks
+64-cycle sequence-fork: PASS
+recurrent rollback: PASS
+server + HIP build: PASS
+```
+
+No GPU workload has run against `8f1b64f22` / `fabe8edc2`. Do not start another full replay. Production `exp-gpu-sampling @ 1a3578dd6` remains untouched.
 
 ## Current Handoff
 
 ```text
 Production branch: exp-gpu-sampling @ 1a3578dd6 (safe AMD checkpoint disable)
 Experimental branch: exp-sequence-fork
-Experimental implementation head: 8f1b64f22 (restored state remains vector through generation; GPU-unvalidated)
+Experimental implementation head: fabe8edc2 (restored-state vector persistence + eligibility/lifecycle hardening; GPU-unvalidated)
 Atomic full-reprocess hardening retained: f87b17ed9
 Peer-gather ordering patch reverted: 049375fbe
 Bounded-shadow source commit retained: aea3814b8
