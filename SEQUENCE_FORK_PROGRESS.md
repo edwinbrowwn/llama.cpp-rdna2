@@ -92,11 +92,135 @@ Recovered evidence and safety status:
 
 ### Strict next sequence
 
-1. Add/check host invariants after atomic clear: active and shadow target/draft positions must all be absent before batching token zero. CPU build/tests only.
-2. With explicit approval, run only requests 0–12 to cross the first deep full-reprocess transition. No full replay.
-3. Because the failure is timing-sensitive, require two consecutive bounded passes before advancing.
-4. If either bounded run fails, stop. Use its first host invariant/kernel record to choose exactly one discriminator; do not start a toggle matrix.
-5. Only after two bounded passes: run one full 122B replay, then finish varied-suffix coverage and production closeout.
+1. Add deterministic host ownership/layout invariants for every fork transition. CPU build/tests only.
+2. Replay the captured operation pattern at reduced scale on a CPU/tiny-model harness and prove that full reset returns the cache to a canonical empty layout and exact restore does not grow physical span monotonically.
+3. With explicit approval, run one bounded **Scenario B** test (requests 0–12) to cross the deep full-reprocess transition with audit logging. No full replay.
+4. If B passes and all invariants are canonical, run one bounded **Scenario A** test (requests 30–33) for the long exact-restore path.
+5. Repetition alone is not proof: do not substitute “two passes” for structural invariants. If either scenario fails or any invariant is noncanonical, stop and choose exactly one discriminator from that evidence.
+6. Only after both distinct scenarios pass with canonical state: run one full 122B replay, then finish varied-suffix coverage and production closeout.
+
+## Pre-GPU Logical Validation Plan
+
+### Failure modes must remain separate
+
+**Scenario A — long exact restore**
+
+```text
+shadow exact at 59,126
+input 62,781
+incremental suffix 3,655
+fault surfaced near the end of prompt processing at TOP_K/D2H
+kernel journal: GPU TCP read page fault
+```
+
+**Scenario B — deep full reprocess**
+
+```text
+active 27,268; active LCP 11,538
+shadow 26,862; shadow LCP 11,538
+shadow discarded; input 26,917
+server stopped immediately after full-reprocess plan
+kernel journal: GPU TCP read page fault
+```
+
+`f87b17ed9` can explain B but cannot by itself explain A. Any complete theory must cover both or explicitly establish two defects.
+
+### State ownership model to validate
+
+For each user slot, track these independently:
+
+1. target attention active sequence;
+2. target recurrent active sequence and rollback index;
+3. draft attention active sequence;
+4. draft recurrent active sequence and rollback index;
+5. target/draft shadow counterparts;
+6. MTP `pending_h` / speculative state for active and shadow IDs;
+7. server prompt tokens and checkpoints;
+8. unified-KV physical stream: head, used cells, highest used cell, per-sequence cell/ref counts;
+9. graph inputs: selected KV indices and resulting `n_kv`/physical span.
+
+Logical position equality is necessary but insufficient: hybrid `seq_pos_max()` can hide a residual component because it combines attention and recurrent ranges. Audit data must inspect attention and recurrent components separately.
+
+### Required transition postconditions
+
+**Snapshot**
+
+- target and draft active contexts are complete before metadata mutation;
+- active target/draft positions equal `boundary_tokens - 1`;
+- shadow target/draft positions equal active after copy;
+- attention copy shares cells without increasing physical cell count;
+- recurrent source/destination references are valid;
+- copied MTP state is associated with the same boundary.
+
+**Exact restore**
+
+- old active-only generation cells are released;
+- copied active and resident shadow have the same logical boundary;
+- no cell references an unexpected sequence ID;
+- physical `used` and `used_max_p1` are bounded by the active/shadow union and do not grow solely from repeated restore;
+- selected FA indices are within the backing cache and below computed `n_kv`.
+
+**Bounded restore**
+
+- all exact-restore conditions hold;
+- target/draft position becomes `shadow_lcp - 1`;
+- rollback is within recurrent snapshot capacity;
+- stale MTP state is treated only as a proposal source and must be refreshed before it can become authoritative.
+
+**Full reprocess**
+
+- target and draft are synchronized before sequence metadata changes;
+- active and shadow attention/recurrent references are all absent after clear;
+- recurrent rollback indices reset;
+- prompt tokens and checkpoints are empty;
+- unified-KV head/used/span return to canonical empty values for the slot/stream when no other slot is active;
+- first new token is position zero;
+- no graph is built if any clear invariant fails.
+
+### Instrumentation requirements before GPU use
+
+Use one environment-gated host audit mode; do not add broad device synchronizations that change timing.
+
+At each snapshot/restore/full-reset boundary log:
+
+- operation, slot, active/shadow IDs;
+- target/draft attention min/max, recurrent min/max, and recurrent rollback index;
+- attention stream head, used cells, `used_max_p1`, and per-sequence ref counts;
+- first/last selected KV cell for each ubatch and computed `n_kv`;
+- prompt token/checkpoint counts and MTP state validity.
+
+Fail closed before decode on an impossible sequence reference, nonempty full-reset component, out-of-range cell index, or `max_selected_index >= n_kv`.
+
+### Hypothesis matrix and falsifiers
+
+| Hypothesis | Explains A | Explains B | Evidence that would falsify it |
+|---|---:|---:|---|
+| Non-atomic full reset | No | Yes | B fails with canonical atomic-clear invariants |
+| Unified-KV fragmentation / bad physical span | Yes | Yes | both scenarios show canonical bounded head/used/span and valid indices immediately before fault |
+| Async target/draft KV writes during metadata mutation | Yes | Yes | explicit boundary synchronization plus canonical stats still faults at the same operation |
+| Bounded rollback/MTP history | Possibly | Possibly | A/B reproduce with no bounded rollback in preceding trace while layout is otherwise identical |
+| Vocabulary sharding | Possibly | Possibly | same fault occurs before sampling with vocab output disabled and identical host layout |
+| FA kernel/layout | Yes | Yes | fault persists with a known-safe non-FA path after all host invariants pass |
+| Generic model length/hardware | Weak | Weak | already weakened by no-fork 62k pass; would require failure without fork history |
+
+### Inverted checks
+
+Before accepting the current approach, answer:
+
+- Why did old code sometimes pass Scenario B? A correct answer must include timing/layout differences, not merely the input tokens.
+- Why did diagnostic synchronization make Scenario A pass? It may hide any upstream race; it does not implicate the synchronized function.
+- Why did the gather patch pass A but fail earlier at B? This argues that changed timing, not gather correctness, selected the outcome.
+- Why can A fail after an exact restore if full reset is the only bug? It cannot; therefore exact restore/physical-span invariants are mandatory too.
+- What observation would make us revert `f87b17ed9`? Canonical old/new full-reset states with an unchanged B failure, or a new regression caused by forced synchronization/clear semantics.
+
+### Safety and stop rules
+
+- Never start with a full replay.
+- No GPU run without clean process/KFD/VRAM precheck and user awareness.
+- A timeout is not recovery; on page fault, stop immediately and require health verification or reboot.
+- Preserve all logs and prior-boot journal evidence before any next run.
+- Do not alter more than one causal dimension per discriminator.
+- Do not promote experimental changes based only on absence of a fault.
 
 ## Long-Context Fault Investigation
 
