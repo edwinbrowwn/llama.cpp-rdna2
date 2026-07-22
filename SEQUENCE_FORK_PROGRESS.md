@@ -208,6 +208,28 @@ Initial, active-append, and atomic full reprocess remain tile-FA paths.
 - Child `n_cmpl` slots must not inherit stale restored-token counters.
 - Sleep/wake and model reload recreate counters at zero.
 
+### Minimizing restored suffix length
+
+The lower bound is the genuinely new token tail:
+
+```text
+suffix = input_tokens - best_safe_cached_prefix
+best_safe_cached_prefix = max(active completion LCP, prompt-shadow LCP, optional older-boundary LCP)
+```
+
+Use these measures in order:
+
+1. **Prefer active completion state for normal continuation.** The active sequence already contains the server's accepted generated tokens. If the client returns that exact assistant/tool-call output, only the new user/tool-result tail needs decoding. Audit why active LCP loses and do not choose the older prompt shadow merely because it is exact.
+2. **Canonicalize template boundaries.** Preserve the exact reasoning opener/closer, EOS/EOT, tool-call delimiters, whitespace, and `preserve_thinking` behavior between generated tokens and next-request chat templating. The known `<think>\n` two-token mismatch is avoidable boundary churn.
+3. **Maintain session/slot affinity.** Do not evict or repurpose the active completion state before the client's next turn. A server-managed conversation/session handle would guarantee this better than stateless full-prompt similarity matching.
+4. **Keep a small historical boundary ring only for real branch/edit workflows.** One active completion plus the current prompt shadow already covers normal continuation and one branch. Additional older shadows can reduce deep-edit reprocessing but require more preallocated sequence IDs and recurrent memory; measure before adding.
+5. **For captured deterministic replay, optionally teacher-force the recorded assistant tokens in a separate cache-efficiency benchmark.** Do not confuse this with generation correctness. Fixed historical requests otherwise intentionally mismatch newly sampled replay output and overstate real-session suffixes.
+6. **Route adaptively.** If the best safe suffix exceeds 1/8 of the full prompt, clean tile reprocess is initially preferred over vector restore.
+
+What cannot be removed: new tool output, new user content, or assistant content that genuinely differs from the cached generation. Those tokens must be evaluated by some kernel.
+
+The captured final request's 3,655-token suffix includes up to ~1,023 tokens of replay-generated assistant divergence plus genuinely new content. A live session that reuses its own output can potentially remove much of that first component, but not the tool/user tail.
+
 **Acceptance**
 
 - Logs must state restore boundary, exact vector token count, kernel-policy entry/exit, and fallback reason.
