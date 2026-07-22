@@ -6,6 +6,8 @@
 #include "fattn-wmma-f16.cuh"
 #include "fattn.cuh"
 
+#include <atomic>
+
 template <int DKQ, int DV, int ncols2>
 static void ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
@@ -590,7 +592,27 @@ size_t ggml_cuda_flash_attn_ext_get_alloc_size(int device, const ggml_tensor * d
 
 void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     ggml_cuda_set_device(ctx.device);
-    switch (ggml_cuda_get_best_fattn_kernel(ggml_cuda_get_device(), dst)) {
+    const int device = ggml_cuda_get_device();
+    const best_fattn_kernel kernel = ggml_cuda_get_best_fattn_kernel(device, dst);
+
+    static const bool log_policy = getenv("GGML_CUDA_FA_POLICY_LOG") != nullptr;
+    static std::atomic<int> last_policy[GGML_CUDA_MAX_DEVICES];
+    if (log_policy) {
+        const bool forced = ggml_flash_attn_ext_get_force_vec(dst);
+        const int policy = (forced ? 1000 : 0) + (int) kernel;
+        const int previous = last_policy[device].exchange(policy);
+        if (previous != policy) {
+            const char * name = kernel == BEST_FATTN_KERNEL_VEC      ? "vector" :
+                                kernel == BEST_FATTN_KERNEL_TILE     ? "tile" :
+                                kernel == BEST_FATTN_KERNEL_WMMA_F16 ? "wmma" :
+                                kernel == BEST_FATTN_KERNEL_MMA_F16  ? "mma" : "none";
+            GGML_LOG_WARN("FA policy dispatch: device=%d forced_vector=%d kernel=%s q_tokens=%lld kv_tokens=%lld\n",
+                device, (int) forced, name,
+                (long long) dst->src[0]->ne[1], (long long) dst->src[1]->ne[1]);
+        }
+    }
+
+    switch (kernel) {
         case BEST_FATTN_KERNEL_NONE:
             GGML_ABORT("fatal error");
         case BEST_FATTN_KERNEL_TILE:

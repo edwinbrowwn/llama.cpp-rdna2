@@ -983,6 +983,7 @@ private:
     uint64_t sequence_fork_plan_rollback = 0;
     uint64_t sequence_fork_plan_shadow = 0;
     uint64_t sequence_fork_plan_reset = 0;
+    int sequence_fork_last_fa_policy = -1;
 
     std::unique_ptr<server_prompt_cache> prompt_cache;
 
@@ -3102,6 +3103,18 @@ private:
                 // TODO @ngxson : maybe handle n_batch == 1 here instead of inside decode()
 
                 batch_view = batch.get_view(off, n_tokens);
+                if (getenv("GGML_SERVER_FA_POLICY_LOG") != nullptr &&
+                        sequence_fork_last_fa_policy != (int) force_vec_view) {
+                    const server_slot * policy_slot = n_tokens > 0
+                        ? get_slot_by_id(batch.tokens[off].id_slot)
+                        : nullptr;
+                    SRV_WRN("FA view policy: forced_vector=%d off=%d tokens=%d slot=%d restored_remaining=%u restored_provenance=%d\n",
+                        (int) force_vec_view, off, n_tokens,
+                        policy_slot ? policy_slot->id : -1,
+                        policy_slot ? policy_slot->fork_restored_prompt.remaining() : 0,
+                        policy_slot ? (int) policy_slot->fork_restored_prompt.force_vector() : 0);
+                    sequence_fork_last_fa_policy = (int) force_vec_view;
+                }
                 llama_set_flash_attn_force_vec(ctx_tgt, force_vec_view);
                 if (ctx_dft) {
                     llama_set_flash_attn_force_vec(ctx_dft, force_vec_view);
