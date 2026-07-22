@@ -54,8 +54,8 @@ Recovered evidence and safety status:
 
 - Host restarted cleanly: no server/KFD process, all GPUs at ~17 MiB, SMI responsive.
 - Requests 0–11 completed. Request 12 (`26,917` input tokens) discarded the unmatched shadow and selected `full-reprocess`; the server log stops immediately after that plan.
-- The prior-boot kernel journal records a `gfxhub` page fault on GPU `43:00.0` from the TCP client, permission fault on a read, for the matching `llama-server` process. There is no TOP_K/D2H error in the server log for this failure.
-- Therefore TOP_K was an asynchronous observation point in the earlier 62k failure, not a proven origin. The focused run passed because synchronization changed timing.
+- No prior-boot kernel entry matches this request-12 job PID (`40276`); the persisted GPU page faults belong to the earlier request-33 full run (`33581`) and focused reproduction (`34718`). Request 12 is therefore recorded as a GPU timeout/manual shutdown, not a proven page fault.
+- In both proven request-33 failures, ROCm names `flash_attn_tile<256,256,4,8,false>` as the faulting kernel. TOP_K/D2H only reported the already-existing asynchronous FA error.
 - Experimental patch `16565727c` was reverted by `049375fbe` before any further workload.
 - Do **not** rerun the full replay. Production branch `exp-gpu-sampling @ 1a3578dd6` was not modified.
 - Offline audit found that `decision=full-reprocess` discarded only the shadow and did not itself force `n_past=0` or clear the active sequence; it depended on later generic checkpoint heuristics. This violated the intended safe-fallback semantics and left shared cells live across the transition.
@@ -68,9 +68,56 @@ Recovered evidence and safety status:
 
 - Production is safe and unchanged; the fault exists only on the experimental sequence-fork branch.
 - Core sequence copy/switch correctness, recurrent rollback, 35B TP, MTP, four slots, cancellation, sleep/wake, multimodal lifecycle, and 122B requests 0–20 have passing staged results.
-- Two observed GPU failures are timing/history-sensitive: one surfaced at TOP_K/D2H near 62k after an exact restore; the later full run produced a kernel-reported TCP read page fault immediately after the request-12 deep full-reprocess plan at 26.9k.
+- Two reproducible request-33 failures are timing/history-sensitive: ROCm identifies the faulting kernel as tile FA near 62k after an exact restore; TOP_K/D2H is only the later synchronization point. A separate request-12 run with the experimental gather patch timed out without a persisted kernel record.
 - The same requests 30–33 complete without sequence forks, so context length alone is not sufficient.
 - The deep request had discarded its unmatched shadow, but the old planner had not atomically cleared active state or forced token-zero rebuild at the decision point.
+
+### Captured replay evidence matrix
+
+| Run | Range/configuration | Outcome | Key implication |
+|---|---|---|---|
+| 35B full, HIP graphs enabled | 0–33 | FA tile fault near request 12 / ~27k | graph replay was unsafe for forked FA |
+| 35B full, graphs disabled | 0–33 | 34/34 pass through ~67k | current 35B control passes |
+| 122B staged exact-only | 0–12, 0–15, 0–20 | all pass; request-12 full reprocess passes repeatedly | request 12/input length alone is not sufficient |
+| 122B bounded rollback | 0–15, 0–20 | all pass | bounded rollback alone is not sufficient |
+| 122B older full | through request 12 | request 12 full reprocess completes; request 13 bounded restore times out | state after full rebuild may poison successor transition |
+| 122B bounded full | 0–33 | request 33 FA tile page fault | proven long exact-restore failure |
+| 122B focused fork | 30–33 | request 33 FA tile page fault | earlier requests 0–29 are unnecessary |
+| 122B focused no-fork | 30–33 | 4/4 pass | fork/restore history is necessary; length alone is not |
+| 122B broad-sync diagnostic | 30–33 | pass | timing changes suppress the fault but do not localize it |
+| 122B gather-order experiment | 30–33 pass; later full run times out at request 12 | experiment changes timing and is unsafe; reverted | not evidence for gather as root |
+
+The passing and failing request-12 runs have essentially identical logical lengths/LCPs. The primary unknown is physical ownership/layout and completion ordering, not token selection.
+
+### Earlier restored-state experiments
+
+The pre-fork checkpoint investigation already isolated the same failure class on 122B:
+
+```text
+checkpoint restore + vocab output: crash
+checkpoint restore + mirrored output: crash
+checkpoint restore without MTP: crash
+checkpoint restore with HIP graphs disabled: crash
+checkpoint restore with device-context/synchronization workaround: crash
+skip checkpoint load entirely: pass
+checkpoints disabled: pass
+minimal requests 26–27 with restored tile FA: crash
+vector FA for only the first restored microbatch: later crash
+vector FA for the entire restored suffix: pass
+high-context full 34-request 122B replay with full-suffix vector FA: pass
+```
+
+Key artifacts:
+
+- `~/llama-jobs/checkpoint-isolation-summary/results.txt`
+- `~/llama-jobs/replay-session-019f81d5-high-context-vector`
+- `~/llama-jobs/replay-session-019f81d5-near-limit-vector`
+- `~/llama-jobs/replay-min-26-27-fa-vec*`
+- `~/llama-jobs/replay-min-26-27-full-checkpoint`
+
+The full-suffix vector replay completed all 34 requests; its final 3,659 restored prompt tokens ran at 38.5 t/s without a fault. The near-limit first-microbatch-only variant later returned to tile FA and faulted. This establishes that graph reset or one vector microbatch is insufficient, while avoiding tile FA for the entire restored suffix is a known-safe precedent.
+
+Sequence forks avoid host checkpoint serialization and tensor copies, but they still present restored sequence state to FA. The identical tile kernel fault means the checkpoint evidence transfers directly to server policy even if the ultimate backend defect remains unknown.
 
 ### Ruled out or deprioritized
 
@@ -84,20 +131,86 @@ Recovered evidence and safety status:
 
 ### Ranked live hypotheses
 
-1. **Non-atomic shared-cell transition at full reprocess.** Target/draft operations were not synchronized and active state was not immediately cleared. `f87b17ed9` directly addresses this and is the first discriminator.
-2. **Unified-KV physical-cell reuse / FA layout after active+shadow history.** If hypothesis 1 fails, inspect host KV indices, head, used span, and target/draft sequence positions before the first decode; do not change kernels first.
-3. **Cross-device asynchronous KV writes during `seq_rm`/`seq_cp`.** Closely related to 1; explicit context synchronization should either fix it or make the failure surface before metadata mutation.
-4. **Bounded rollback history as a cofactor.** Lower priority because requests 0–20 passed and the fatal transition was a full reprocess, but not fully excluded.
-5. **Vocabulary sharding as a cofactor.** Not the primary target unless the atomic transition still fails and host invariants pass.
+1. **AMD tile FA is unsafe on restored hybrid/recurrent prompt state.** This is directly supported by both checkpoint and sequence-fork evidence. The exact backend defect may be physical KV layout, mask/view lifetime, or asynchronous pool reuse, but restored tile dispatch is the proven common trigger.
+2. **Non-atomic shared-cell transition at full reprocess.** Target/draft operations were not synchronized and active state was not immediately cleared. This can poison the next restored shadow; `f87b17ed9` remains sensible hardening for clean fallback but is not sufficient to make restored tile FA supported.
+3. **Unified-KV physical-cell reuse / FA tensor view after active+shadow history.** This is the leading backend root-cause family if tile FA itself must be repaired.
+4. **Cross-device asynchronous KV writes or temporary-buffer lifetime.** Timing-sensitive sync results keep this plausible, but they do not justify broad barriers.
+5. **Bounded rollback history.** Lower priority because exact restores and checkpoint restores also fault.
+6. **Vocabulary sharding.** Ruled out as primary by mirrored/no-MTP checkpoint crashes and the explicit FA faulting kernel.
+
+### Recommended completion architecture
+
+Treat restored-prompt tile FA as unsupported on AMD hybrid/recurrent models until the backend is independently repaired:
+
+- initial/append-only prompts: normal tile FA;
+- clean full reprocess: atomic reset plus normal tile FA;
+- exact or bounded shadow restore: vector FA for every remaining prompt token;
+- after the restored suffix is consumed: return to normal kernel selection for generation;
+- if vector FA is not eligible: reject the restore and perform a clean tile-FA full reprocess;
+- keep HIP graph replay disabled for the experimental sequence-fork mode.
+
+This preserves the main benefit: the final failing request evaluates ~3.7k restored suffix tokens instead of ~62.8k clean tokens. It sacrifices tile speed only on the reused suffix. Prior full-suffix vector evidence measured 38.5 t/s for the final suffix and completed the full 122B session.
+
+### Restored-suffix vector policy considerations
+
+**Transitions that mark a suffix as restored**
+
+- shadow-exact restore;
+- shadow-bounded rollback;
+- active bounded rollback;
+- any future host/device state restore.
+
+Initial, active-append, and atomic full reprocess remain tile-FA paths.
+
+**Counter semantics**
+
+- Keep `restored_prompt_tokens_remaining` per slot/sequence, never one global counter.
+- Set it to the exact number of prompt tokens that will be decoded after the restored boundary, including any mandatory one-token prompt-logit reevaluation.
+- Decrement only by prompt tokens actually decoded for that sequence, not by total mixed-batch or MTP draft tokens.
+- Clear it on completion, cancellation, slot release/purge, prompt clear, LoRA change, context shift, sleep/wake, restore failure, and clean full reprocess.
+
+**Batching/concurrency**
+
+- Do not let a process-global kernel-selection flag leak across unrelated slots.
+- Split target decode views at restored/non-restored slot boundaries before setting the force-vector mode.
+- Preserve speculative output-group integrity; if a safe split is impossible, disable drafting for that restored view rather than crossing the boundary.
+- It is safe for a mixed view to use vector for all tokens, but that is an explicit conservative fallback, not the default fast path.
+
+**Backend selection**
+
+- Prefer a scoped context/decode flag carried into FA kernel selection over `setenv()/unsetenv()`.
+- If the old environment mechanism is temporarily reused, prove the server decode loop is single-threaded and set/unset it with RAII around exactly one `llama_decode` view.
+- Keep HIP graph replay disabled; a vector selection must never reuse a cached tile graph.
+- Check vector eligibility before restore. If head/type/layout is unsupported, abandon restore and use atomic clean tile reprocess.
+
+**MTP and correctness**
+
+- Target vector FA changes only verification/prompt evaluation; MTP drafts remain proposals and target verification remains authoritative.
+- Previous full-suffix vector runs included 122B MTP, but add deterministic logit/argmax comparison for the sequence-fork path.
+- Record MTP acceptance separately; lower acceptance is a performance issue, not a correctness failure.
+
+**Multimodal and lifecycle**
+
+- A restored image-containing prompt follows the same target policy; if vector eligibility or batch splitting is ambiguous, clean reprocess.
+- Child `n_cmpl` slots must not inherit stale restored-token counters.
+- Sleep/wake and model reload recreate counters at zero.
+
+**Acceptance**
+
+- Logs must state restore boundary, exact vector token count, kernel-policy entry/exit, and fallback reason.
+- No tile FA launch may occur for a marked restored target suffix.
+- Counter must reach zero exactly when the restored suffix ends.
+- Generation and later clean prompts return to normal kernel selection.
+- Cancellation at every restored ubatch boundary leaves no marked slot or sequence state.
 
 ### Strict next sequence
 
-1. Add deterministic host ownership/layout invariants for every fork transition. CPU build/tests only.
-2. Replay the captured operation pattern at reduced scale on a CPU/tiny-model harness and prove that full reset returns the cache to a canonical empty layout and exact restore does not grow physical span monotonically.
-3. With explicit approval, run one bounded **Scenario B** test (requests 0–12) to cross the deep full-reprocess transition with audit logging. No full replay.
-4. If B passes and all invariants are canonical, run one bounded **Scenario A** test (requests 30–33) for the long exact-restore path.
-5. Repetition alone is not proof: do not substitute “two passes” for structural invariants. If either scenario fails or any invariant is noncanonical, stop and choose exactly one discriminator from that evidence.
-6. Only after both distinct scenarios pass with canonical state: run one full 122B replay, then finish varied-suffix coverage and production closeout.
+1. Design a per-slot restored-suffix counter and batch-splitting policy; avoid a process-global flag leaking to unrelated slots.
+2. Reintroduce vector-kernel selection in a scoped backend/context mechanism, or use the old environment mechanism only if the server decode loop proves single-threaded and the flag is set/unset around exactly one batch view.
+3. Add CPU tests for counter accounting across multiple ubatches, bounded restore, exact restore, cancellation, and mixed restored/non-restored slots.
+4. Retain host ownership/layout invariants and atomic clean fallback; do not use their absence as permission for restored tile FA.
+5. GPU ladder only after code review: 35B small restore, 122B requests 26–27/minimal restored suffix, 122B requests 30–33, then one full replay.
+6. Keep backend tile-FA root-cause instrumentation as a separate research track; it is not required to ship a safe sequence-fork policy.
 
 ## Pre-GPU Logical Validation Plan
 
@@ -113,17 +226,17 @@ fault surfaced near the end of prompt processing at TOP_K/D2H
 kernel journal: GPU TCP read page fault
 ```
 
-**Scenario B — deep full reprocess**
+**Scenario B — deep full reprocess timeout**
 
 ```text
 active 27,268; active LCP 11,538
 shadow 26,862; shadow LCP 11,538
 shadow discarded; input 26,917
 server stopped immediately after full-reprocess plan
-kernel journal: GPU TCP read page fault
+manual shutdown; no matching persisted kernel fault for PID 40276
 ```
 
-`f87b17ed9` can explain B but cannot by itself explain A. Any complete theory must cover both or explicitly establish two defects.
+Scenario A is immediately preceded by request 32 doing a 59,126-token full reprocess. Therefore `f87b17ed9` can potentially explain both: directly hardening B and preventing request 32 from creating a noncanonical layout later consumed by A. This is a hypothesis, not yet validation.
 
 ### State ownership model to validate
 
@@ -195,13 +308,13 @@ Fail closed before decode on an impossible sequence reference, nonempty full-res
 
 | Hypothesis | Explains A | Explains B | Evidence that would falsify it |
 |---|---:|---:|---|
-| Non-atomic full reset | No | Yes | B fails with canonical atomic-clear invariants |
-| Unified-KV fragmentation / bad physical span | Yes | Yes | both scenarios show canonical bounded head/used/span and valid indices immediately before fault |
-| Async target/draft KV writes during metadata mutation | Yes | Yes | explicit boundary synchronization plus canonical stats still faults at the same operation |
-| Bounded rollback/MTP history | Possibly | Possibly | A/B reproduce with no bounded rollback in preceding trace while layout is otherwise identical |
-| Vocabulary sharding | Possibly | Possibly | same fault occurs before sampling with vocab output disabled and identical host layout |
-| FA kernel/layout | Yes | Yes | fault persists with a known-safe non-FA path after all host invariants pass |
-| Generic model length/hardware | Weak | Weak | already weakened by no-fork 62k pass; would require failure without fork history |
+| Restored prompt state is unsafe on AMD tile FA | Yes | B is not a proven FA fault | a full-suffix vector policy faults in the vector kernel under the same restored trace; existing evidence instead shows full-vector pass |
+| Non-atomic full reset / poisoned successor layout | Yes, indirectly via request 32 | Possibly | A fails despite canonical atomic-clear and post-rebuild layout while full-suffix vector remains safe |
+| Unified-KV fragmentation / bad physical span | Yes | Possibly | canonical bounded head/used/span and valid indices immediately before restored tile fault |
+| Async target/draft KV writes during metadata mutation | Yes | Possibly | explicit boundary synchronization plus canonical stats still produces the restored tile fault |
+| Bounded rollback/MTP history | No for exact/checkpoint failures | Possibly | already deprioritized by exact and no-MTP checkpoint crashes |
+| Vocabulary sharding | No as primary | No evidence | already deprioritized by mirrored checkpoint crashes and explicit FA kernel report |
+| Generic model length/hardware | Weak | Weak | already weakened by no-fork 62k and full-vector 34-request passes |
 
 ### Inverted checks
 
@@ -210,8 +323,9 @@ Before accepting the current approach, answer:
 - Why did old code sometimes pass Scenario B? A correct answer must include timing/layout differences, not merely the input tokens.
 - Why did diagnostic synchronization make Scenario A pass? It may hide any upstream race; it does not implicate the synchronized function.
 - Why did the gather patch pass A but fail earlier at B? This argues that changed timing, not gather correctness, selected the outcome.
-- Why can A fail after an exact restore if full reset is the only bug? It cannot; therefore exact restore/physical-span invariants are mandatory too.
-- What observation would make us revert `f87b17ed9`? Canonical old/new full-reset states with an unchanged B failure, or a new regression caused by forced synchronization/clear semantics.
+- Why can A fail after an exact restore if full reset is the bug? Because its restored shadow was created immediately after request 32 rebuilt 59,126 tokens. Validate both the request-32 post-rebuild layout and request-33 exact-restore layout.
+- What observation would make us revert `f87b17ed9`? Canonical old/new full-reset states with no successor-layout difference, or a new regression caused by forced synchronization/clear semantics.
+- Are we solving the backend or shipping a safe policy? Full-suffix vector FA has direct full-session evidence; restored tile FA repair does not. Do not block safe completion on backend research unless tile-only operation remains a hard requirement.
 
 ### Safety and stop rules
 
@@ -228,13 +342,13 @@ Focused reproducer: `~/ar-bench/run-sequence-fork-long-context-diag.sh` defaults
 
 Proven sequence:
 
-1. Fork-enabled requests 30–33 reproduced the illegal access deterministically at the D2H read in `ggml_backend_cuda_comm_vocab_top_k` on final-request prompt processing (exact restore at 59,126 tokens; input 62,781).
+1. Fork-enabled requests 30–33 reproduced the illegal access deterministically on final-request prompt processing (exact restore at 59,126 tokens; input 62,781). ROCm identifies `flash_attn_tile<256,256,4,8,false>` as the faulting kernel; D2H in `ggml_backend_cuda_comm_vocab_top_k` is only where the asynchronous error is reported.
 2. The same requests completed without forks, ruling out a generic 62k model/FA limit.
 3. An environment-gated diagnostic bracket synchronized streams before local TOP_K, after local TOP_K, and after NCCL all-gather. The reproducer passed, proving only that the failure is timing/order-sensitive; it did not localize the originating operation.
 4. Code inspection found that peer NCCL streams were synchronized only *after* rank 0 began reading the gathered buffer to host. On ROCm, rank 0 could reach D2H while peer all-gather work was still completing.
 5. Experimental patch `16565727c` moved the three existing peer synchronizations before the D2H read and removed the broad diagnostic barriers.
 6. One uninstrumented fork-enabled 30–33 run passed 4/4, including the 62,781-token final request.
-7. The immediately following full 122B replay page-faulted at the request-12 deep full-reprocess transition and required manual shutdown. This disproved the claimed localization: the TOP_K sync point was not the originating operation.
+7. The immediately following full 122B replay timed out at the request-12 deep full-reprocess transition and required manual shutdown. No matching kernel record persisted. This still disproved the claimed gather localization, but it must not be conflated with the two proven request-33 FA page faults.
 8. `16565727c` is reverted by `049375fbe`. No GPU validation was run after the revert.
 
 Offline source analysis produced atomic full-reprocess fix `f87b17ed9`. It is CPU-tested but deliberately GPU-unvalidated after the manual-shutdown incident. No further workload should be launched in this iteration.
@@ -244,12 +358,12 @@ Offline source analysis produced atomic full-reprocess fix `f87b17ed9`. It is CP
 Replace in-place recurrent checkpoint restore on AMD with a turn-boundary sequence fork/switch lifecycle that:
 
 - preserves prefix reuse for Qwen hybrid/recurrent models;
-- keeps restored/branched prompt processing on normal tile flash attention;
+- keeps clean prompt processing on tile flash attention; restored AMD hybrid suffixes use full-suffix vector FA until the backend tile defect is independently resolved;
 - produces the same logits as clean recomputation;
 - works first on one GPU, then four-GPU tensor parallelism;
 - supports MTP and eventually unified KV plus four server slots;
 - avoids host checkpoint serialization on the common path;
-- avoids vector-FA prompt fallbacks and full prompt reprocessing.
+- avoids full prompt reprocessing on the common path while confining the AMD vector-FA safety fallback to restored suffix tokens only.
 
 ## Production Baseline
 
