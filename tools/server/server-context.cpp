@@ -3515,16 +3515,21 @@ private:
                                 }
 
                                 if (sequence_fork_enabled && !restore_shadow &&
-                                        strcmp(decision, "full-reprocess") == 0 && slot.fork_boundary_valid) {
-                                    // The old boundary cannot satisfy this branch. Keeping it resident
-                                    // would duplicate the prefix in unified KV while the active sequence
-                                    // is rebuilt, inflating the physical FA span and memory pressure.
-                                    common_context_seq_rm(ctx_tgt, slot.fork_shadow_id, -1, -1);
-                                    common_context_seq_rm(ctx_dft, slot.fork_shadow_id, -1, -1);
-                                    slot.fork_boundary_tokens.clear();
-                                    slot.fork_boundary_valid = false;
-                                    slot.fork_boundary_pos_max = -1;
-                                    SLT_WRN(slot, "%s", "sequence-fork discarded unmatched shadow before full reprocess\n");
+                                        strcmp(decision, "full-reprocess") == 0) {
+                                    // A full reprocess must be an atomic cache transition. Synchronize
+                                    // every context before releasing shared active/shadow cells, then
+                                    // force the generic prompt path to rebuild from token zero. Leaving
+                                    // n_past at the active LCP made this decision depend on later
+                                    // checkpoint heuristics and could reuse cells while TP writes were
+                                    // still in flight.
+                                    llama_synchronize(ctx_tgt);
+                                    if (ctx_dft) {
+                                        llama_synchronize(ctx_dft);
+                                    }
+                                    slot.prompt_clear();
+                                    n_past = 0;
+                                    n_past_common = 0;
+                                    SLT_WRN(slot, "%s", "sequence-fork cleared active and shadow state before full reprocess\n");
                                 }
 
                                 if (restore_shadow && sequence_fork_enabled) {
