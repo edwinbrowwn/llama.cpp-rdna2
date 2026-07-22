@@ -2429,8 +2429,9 @@ ggml_tensor * llm_graph_context::build_attn_mha(
                                   hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f);
         res->add_fused_node({LLM_FUSED_OP_FLASH_ATTN, cur, il});
 
-        ggml_flash_attn_ext_add_sinks(cur, sinks);
-        ggml_flash_attn_ext_set_prec (cur, GGML_PREC_F32);
+        ggml_flash_attn_ext_add_sinks    (cur, sinks);
+        ggml_flash_attn_ext_set_prec     (cur, GGML_PREC_F32);
+        ggml_flash_attn_ext_set_force_vec(cur, cparams.flash_attn_force_vec);
 
         if (v_mla) {
 #if 0

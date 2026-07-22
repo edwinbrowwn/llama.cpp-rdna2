@@ -86,6 +86,11 @@ using llama_memory_breakdown = std::map<ggml_backend_buffer_type_t, llama_memory
 LLAMA_API int32_t llama_model_n_expert (const struct llama_model * model);
 LLAMA_API int32_t llama_model_n_devices(const struct llama_model * model);
 
+// Returns whether every attention layer has a K/V head shape supported by the
+// vector FlashAttention kernel. Runtime tensor/cache constraints are still
+// checked by the backend when the graph is allocated.
+LLAMA_API bool llama_model_supports_flash_attn_force_vec(const struct llama_model * model);
+
 LLAMA_API ggml_backend_dev_t llama_model_get_device(const struct llama_model * model, int i);
 
 LLAMA_API llama_memory_breakdown llama_get_memory_breakdown(const struct llama_context * ctx);
@@ -98,6 +103,11 @@ LLAMA_API void llama_set_embeddings_nextn(struct llama_context * ctx, bool value
 // Request eager dense full-vocabulary logits while the vocabulary-parallel graph
 // output tensor is still alive. Used only for samplers incompatible with compact TOP_K.
 LLAMA_API void llama_set_vocab_output_dense(struct llama_context * ctx, bool value);
+
+// Force vector FlashAttention for graphs built by this context. The caller is
+// responsible for limiting this to restored prompt suffixes and resetting it
+// before unrelated prompt or generation work.
+LLAMA_API void llama_set_flash_attn_force_vec(struct llama_context * ctx, bool value);
 
 // Select which appended NextN block the DECODER_MTP graph runs (offset past
 // the trunk: il = n_layer() + offset). Used by the speculative NextN driver to

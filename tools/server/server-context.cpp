@@ -6,6 +6,7 @@
 #include "server-queue.h"
 #include "server-schema.h"
 #include "server-stream.h"
+#include "server-sequence-fork-policy.h"
 
 #include "build-info.h"
 #include "common.h"
@@ -223,6 +224,7 @@ struct server_slot {
     bool fork_boundary_valid = false;
     llama_seq_id fork_shadow_id = -1;
     llama_pos fork_boundary_pos_max = -1;
+    server_sequence_fork_policy::restored_suffix_state fork_restored_prompt;
 
     bool prompt_save(server_prompt_cache & prompt_cache) const {
         if (prompt.tokens.size() == 0) {
@@ -272,6 +274,7 @@ struct server_slot {
         fork_boundary_tokens.clear();
         fork_boundary_valid = false;
         fork_boundary_pos_max = -1;
+        fork_restored_prompt.clear();
     }
 
     void prompt_clear() {
@@ -320,6 +323,7 @@ struct server_slot {
         SLT_DBG(*this, "%s", "\n");
 
         n_prompt_tokens_cache = 0;
+        fork_restored_prompt.clear();
 
         last_nl_pos    = 0;
         generated_text = "";
@@ -969,6 +973,8 @@ private:
     bool sequence_fork_dry_run = false;
     bool sequence_fork_requested = false;
     bool sequence_fork_enabled = false;
+    bool sequence_fork_amd = false;
+    bool sequence_fork_fa_vec_supported = false;
     uint32_t sequence_fork_n_seq = 0;
     uint64_t sequence_fork_plan_append = 0;
     uint64_t sequence_fork_plan_rollback = 0;
@@ -1263,6 +1269,26 @@ private:
             SRV_ERR("target context has %u sequence IDs, expected %u\n",
                 llama_n_seq_max(ctx_tgt), sequence_fork_n_seq);
             return false;
+        }
+
+        sequence_fork_amd = false;
+        if (sequence_fork_enabled) {
+            for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+                const std::string dev_name = ggml_backend_dev_name(ggml_backend_dev_get(i));
+                if (dev_name.find("ROCm") != std::string::npos) {
+                    sequence_fork_amd = true;
+                    break;
+                }
+            }
+
+            sequence_fork_fa_vec_supported = sequence_fork_amd &&
+                params_base.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED &&
+                llama_model_supports_flash_attn_force_vec(model_tgt);
+
+            if (sequence_fork_amd) {
+                SRV_WRN("sequence fork AMD restored-suffix policy: vector_fa=%d threshold=1/8; clean/large prompts retain tile FA\n",
+                    (int) sequence_fork_fa_vec_supported);
+            }
         }
 
         n_ctx = llama_n_ctx(ctx_tgt);
@@ -3005,9 +3031,31 @@ private:
             server_slot * slot = get_slot_by_id(id_slot);
             return slot && slot->smpl && !common_sampler_can_use_compact(slot->smpl.get(), 256);
         };
+        auto slot_requires_restored_vector_fa = [&](int32_t id_slot) {
+            server_slot * slot = get_slot_by_id(id_slot);
+            return slot && slot->fork_restored_prompt.active();
+        };
 
         for (int32_t off = 0; off < batch.size(); off = off_next) {
             int32_t n_tokens = std::min(n_batch, batch.size() - off);
+
+            // Do not mix restored-vector and ordinary tile-FA prompt tokens in
+            // one target decode view. Multiple restored slots can remain batched
+            // together; only the kernel-policy boundary forces a split.
+            const bool force_vec_view = n_tokens > 0 &&
+                slot_requires_restored_vector_fa(batch.tokens[off].id_slot);
+            n_tokens = (int32_t) server_sequence_fork_policy::homogeneous_prefix(
+                (size_t) n_tokens,
+                [&](size_t i) {
+                    return slot_requires_restored_vector_fa(batch.tokens[off + (int32_t) i].id_slot);
+                });
+
+            for (int32_t i = 0; i < n_tokens; ++i) {
+                GGML_ASSERT(slot_requires_restored_vector_fa(batch.tokens[off + i].id_slot) == force_vec_view);
+            }
+            if (force_vec_view) {
+                GGML_ASSERT(sequence_fork_enabled && sequence_fork_amd && sequence_fork_fa_vec_supported);
+            }
 
             // Dense vocabulary fallback stores graph output metadata only until
             // the next decode. Keep all outputs for one dense-sampling slot in
@@ -3035,12 +3083,42 @@ private:
                 // TODO @ngxson : maybe handle n_batch == 1 here instead of inside decode()
 
                 batch_view = batch.get_view(off, n_tokens);
-                bool ok = decode(n_batch, off, batch_view);
+                llama_set_flash_attn_force_vec(ctx_tgt, force_vec_view);
+                if (ctx_dft) {
+                    llama_set_flash_attn_force_vec(ctx_dft, force_vec_view);
+                }
+
+                bool ok = false;
+                try {
+                    ok = decode(n_batch, off, batch_view);
+                } catch (...) {
+                    llama_set_flash_attn_force_vec(ctx_tgt, false);
+                    if (ctx_dft) {
+                        llama_set_flash_attn_force_vec(ctx_dft, false);
+                    }
+                    throw;
+                }
+                llama_set_flash_attn_force_vec(ctx_tgt, false);
+                if (ctx_dft) {
+                    llama_set_flash_attn_force_vec(ctx_dft, false);
+                }
 #ifdef DEBUG_TIMINGS
                 llama_synchronize(ctx_tgt);
 #endif
 
                 if (ok) {
+                    for (int32_t i = 0; i < n_tokens; ++i) {
+                        server_slot * slot = get_slot_by_id(batch.tokens[off + i].id_slot);
+                        if (!slot || !slot->fork_restored_prompt.active()) {
+                            continue;
+                        }
+                        GGML_ASSERT(force_vec_view);
+                        GGML_ASSERT(slot->fork_restored_prompt.consume(1));
+                        if (!slot->fork_restored_prompt.active()) {
+                            SLT_WRN(*slot, "%s", "sequence-fork restored suffix complete; returning to normal FA selection\n");
+                        }
+                    }
+
                     // move the head of the batch forward with the number of tokens we just processed
                     off_next = off + n_tokens;
 
@@ -3347,6 +3425,7 @@ private:
                         // keep track how many tokens we can reuse from the previous state
                         int n_past = 0;
                         int n_past_common = 0;
+                        bool sequence_fork_restored_prompt = false;
 
                         // empty prompt passed -> release the slot and send empty response
                         if (input_tokens.empty()) {
@@ -3514,8 +3593,46 @@ private:
                                     sequence_fork_plan_reset++;
                                 }
 
+                                if (sequence_fork_enabled && sequence_fork_amd) {
+                                    size_t restored_lcp = 0;
+                                    const bool active_restore = strcmp(decision, "active-bounded-rollback") == 0;
+                                    if (active_restore) {
+                                        restored_lcp = active_lcp;
+                                    } else if (restore_shadow) {
+                                        restored_lcp = shadow_lcp;
+                                    }
+
+                                    if (restored_lcp > 0) {
+                                        const size_t restored_suffix = input_tokens.size() - restored_lcp;
+                                        const bool use_vector = server_sequence_fork_policy::should_use_vector(
+                                            sequence_fork_amd,
+                                            sequence_fork_fa_vec_supported,
+                                            input_tokens.size(),
+                                            restored_lcp);
+                                        if (!use_vector) {
+                                            if (active_restore) {
+                                                GGML_ASSERT(sequence_fork_plan_rollback > 0);
+                                                sequence_fork_plan_rollback--;
+                                            } else {
+                                                GGML_ASSERT(sequence_fork_plan_shadow > 0);
+                                                sequence_fork_plan_shadow--;
+                                            }
+                                            sequence_fork_plan_reset++;
+                                            decision = sequence_fork_fa_vec_supported
+                                                ? "full-reprocess-large-suffix"
+                                                : "full-reprocess-no-vector-fa";
+                                            restore_shadow = false;
+                                            SLT_WRN(slot,
+                                                "sequence-fork restore rejected: suffix=%zu prompt=%zu vector_supported=%d; using clean tile-FA reprocess\n",
+                                                restored_suffix, input_tokens.size(), (int) sequence_fork_fa_vec_supported);
+                                        } else {
+                                            sequence_fork_restored_prompt = true;
+                                        }
+                                    }
+                                }
+
                                 if (sequence_fork_enabled && !restore_shadow &&
-                                        strcmp(decision, "full-reprocess") == 0) {
+                                        strncmp(decision, "full-reprocess", strlen("full-reprocess")) == 0) {
                                     // A full reprocess must be an atomic cache transition. Synchronize
                                     // every context before releasing shared active/shadow cells, then
                                     // force the generic prompt path to rebuild from token zero. Leaving
@@ -3577,6 +3694,7 @@ private:
                                         common_context_seq_rm(ctx_dft, slot.id, -1, -1);
                                         n_past = 0;
                                         n_past_common = 0;
+                                        sequence_fork_restored_prompt = false;
                                         decision = "shadow-restore-failed";
                                         SLT_WRN(slot, "%s", "sequence-fork shadow rollback failed; using full reprocess\n");
                                     }
@@ -3708,6 +3826,16 @@ private:
                             SLT_WRN(slot, "need to evaluate at least 1 token for each active slot (n_past = %d, task.n_tokens() = %d)\n", n_past, slot.task->n_tokens());
                             n_past--;
                             SLT_WRN(slot, "n_past was set to %d\n", n_past);
+                        }
+
+                        slot.fork_restored_prompt.clear();
+                        if (sequence_fork_restored_prompt && n_past > 0) {
+                            const int32_t remaining = slot.task->n_tokens() - n_past;
+                            GGML_ASSERT(remaining > 0);
+                            GGML_ASSERT(slot.fork_restored_prompt.start((size_t) remaining));
+                            SLT_WRN(slot,
+                                "sequence-fork restored suffix: forcing vector FA for %u/%d prompt tokens from cached position %d\n",
+                                slot.fork_restored_prompt.remaining(), slot.task->n_tokens(), n_past);
                         }
 
                         slot.n_prompt_tokens_cache = n_past;

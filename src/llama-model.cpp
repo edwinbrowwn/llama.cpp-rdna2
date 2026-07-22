@@ -2542,6 +2542,29 @@ int32_t llama_model_n_head_kv(const llama_model * model) {
     return model->hparams.n_head_kv();
 }
 
+bool llama_model_supports_flash_attn_force_vec(const llama_model * model) {
+    if (model == nullptr) {
+        return false;
+    }
+
+    bool has_attention = false;
+    for (uint32_t il = 0; il < model->hparams.n_layer(); ++il) {
+        const uint32_t n_head_kv = model->hparams.n_head_kv(il);
+        if (n_head_kv == 0) {
+            continue;
+        }
+
+        const uint32_t dk = model->hparams.n_embd_head_k(il);
+        const uint32_t dv = model->hparams.n_embd_head_v(il);
+        has_attention = true;
+        if (dk != dv || dk > 256 || dk % 64 != 0 || dk == 192) {
+            return false;
+        }
+    }
+
+    return has_attention;
+}
+
 int32_t llama_model_n_swa(const llama_model * model) {
     // dsv4 kv-cache has SWA but it cannot be used as a rollback because of
     // other compression ratios, so we return 0 here

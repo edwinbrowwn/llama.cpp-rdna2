@@ -1226,6 +1226,10 @@ void llama_context::set_vocab_output_dense(bool value) {
     vocab_force_dense_logits = value;
 }
 
+void llama_context::set_flash_attn_force_vec(bool value) {
+    cparams.flash_attn_force_vec = value;
+}
+
 void llama_context::set_embeddings_layer_inp(uint32_t lid, bool enable) {
     LLAMA_LOG_DEBUG("%s: lid = %d, enable = %d\n", __func__, lid, enable);
 
@@ -3899,6 +3903,10 @@ void llama_set_embeddings_nextn(llama_context * ctx, bool value, bool masked) {
 
 void llama_set_vocab_output_dense(llama_context * ctx, bool value) {
     ctx->set_vocab_output_dense(value);
+}
+
+void llama_set_flash_attn_force_vec(llama_context * ctx, bool value) {
+    ctx->set_flash_attn_force_vec(value);
 }
 
 void llama_set_embeddings_layer_inp(llama_context * ctx, uint32_t lid, bool value) {

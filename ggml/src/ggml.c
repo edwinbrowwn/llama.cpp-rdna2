@@ -5433,6 +5433,7 @@ struct ggml_tensor * ggml_flash_attn_ext(
 
     float params[] = { scale, max_bias, logit_softcap };
     ggml_set_op_params(result, params, sizeof(params));
+    ggml_set_op_params_i32(result, 4, 0);
 
     result->op     = GGML_OP_FLASH_ATTN_EXT;
     result->src[0] = q;
@@ -5461,6 +5462,20 @@ enum ggml_prec ggml_flash_attn_ext_get_prec(
     const int32_t prec_i32 = ggml_get_op_params_i32(a, 3);
 
     return (enum ggml_prec) prec_i32;
+}
+
+void ggml_flash_attn_ext_set_force_vec(
+        struct ggml_tensor * a,
+        bool                 force_vec) {
+    GGML_ASSERT(a->op == GGML_OP_FLASH_ATTN_EXT);
+
+    ggml_set_op_params_i32(a, 4, force_vec ? 1 : 0);
+}
+
+bool ggml_flash_attn_ext_get_force_vec(const struct ggml_tensor * a) {
+    GGML_ASSERT(a->op == GGML_OP_FLASH_ATTN_EXT);
+
+    return ggml_get_op_params_i32(a, 4) != 0;
 }
 
 void ggml_flash_attn_ext_add_sinks(

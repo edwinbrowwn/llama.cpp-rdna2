@@ -2434,6 +2434,16 @@ extern "C" {
     GGML_API enum ggml_prec ggml_flash_attn_ext_get_prec(
             const struct ggml_tensor * a);
 
+    // Force the backend's vector FlashAttention kernel for this operation.
+    // Backends that cannot satisfy the request must reject the operation rather
+    // than silently selecting another FlashAttention implementation.
+    GGML_API void ggml_flash_attn_ext_set_force_vec(
+            struct ggml_tensor * a,
+            bool                 force_vec);
+
+    GGML_API bool ggml_flash_attn_ext_get_force_vec(
+            const struct ggml_tensor * a);
+
     GGML_API void ggml_flash_attn_ext_add_sinks(
             struct ggml_tensor * a,
             struct ggml_tensor * sinks);
