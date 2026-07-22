@@ -62,6 +62,42 @@ Recovered evidence and safety status:
 - Experimental fix `f87b17ed9` makes full reprocess atomic: synchronize target/draft, clear active and shadow state plus prompt checkpoints, set `n_past=n_past_common=0`, then rebuild. Server build, CPU sequence-fork cycles, and recurrent rollback tests pass.
 - `f87b17ed9` has **not** been GPU-tested. Do not run another full replay without a separately approved, bounded validation plan.
 
+## Page-Fault Triage: What Matters and What Does Not
+
+### Established facts
+
+- Production is safe and unchanged; the fault exists only on the experimental sequence-fork branch.
+- Core sequence copy/switch correctness, recurrent rollback, 35B TP, MTP, four slots, cancellation, sleep/wake, multimodal lifecycle, and 122B requests 0–20 have passing staged results.
+- Two observed GPU failures are timing/history-sensitive: one surfaced at TOP_K/D2H near 62k after an exact restore; the later full run produced a kernel-reported TCP read page fault immediately after the request-12 deep full-reprocess plan at 26.9k.
+- The same requests 30–33 complete without sequence forks, so context length alone is not sufficient.
+- The deep request had discarded its unmatched shadow, but the old planner had not atomically cleared active state or forced token-zero rebuild at the decision point.
+
+### Ruled out or deprioritized
+
+- **Concurrent dense vocabulary grammar bug:** separately fixed and independently regressed; not the current blocker.
+- **TOP_K buffer sizing / peer-gather ordering as root cause:** not supported. TOP_K was an asynchronous observation point; the ordering experiment is reverted.
+- **HIP graph replay:** explicitly disabled in failing runs.
+- **AMD host checkpoint restore:** disabled; no host checkpoint load occurred.
+- **Generic 62k model limit:** no-fork requests 30–33 completed at the same length.
+- **Multimodal, LoRA, and multi-slot lifecycle:** absent from the failing single-slot captured workload.
+- **Persistent leak after failure:** not the origin; restart returned all GPUs/KFD state to idle.
+
+### Ranked live hypotheses
+
+1. **Non-atomic shared-cell transition at full reprocess.** Target/draft operations were not synchronized and active state was not immediately cleared. `f87b17ed9` directly addresses this and is the first discriminator.
+2. **Unified-KV physical-cell reuse / FA layout after active+shadow history.** If hypothesis 1 fails, inspect host KV indices, head, used span, and target/draft sequence positions before the first decode; do not change kernels first.
+3. **Cross-device asynchronous KV writes during `seq_rm`/`seq_cp`.** Closely related to 1; explicit context synchronization should either fix it or make the failure surface before metadata mutation.
+4. **Bounded rollback history as a cofactor.** Lower priority because requests 0–20 passed and the fatal transition was a full reprocess, but not fully excluded.
+5. **Vocabulary sharding as a cofactor.** Not the primary target unless the atomic transition still fails and host invariants pass.
+
+### Strict next sequence
+
+1. Add/check host invariants after atomic clear: active and shadow target/draft positions must all be absent before batching token zero. CPU build/tests only.
+2. With explicit approval, run only requests 0–12 to cross the first deep full-reprocess transition. No full replay.
+3. Because the failure is timing-sensitive, require two consecutive bounded passes before advancing.
+4. If either bounded run fails, stop. Use its first host invariant/kernel record to choose exactly one discriminator; do not start a toggle matrix.
+5. Only after two bounded passes: run one full 122B replay, then finish varied-suffix coverage and production closeout.
+
 ## Long-Context Fault Investigation
 
 Focused reproducer: `~/ar-bench/run-sequence-fork-long-context-diag.sh` defaults to captured requests 30–33 and exposes only readiness, fork, vocab-output, and diagnostic-sync toggles.
@@ -70,7 +106,7 @@ Proven sequence:
 
 1. Fork-enabled requests 30–33 reproduced the illegal access deterministically at the D2H read in `ggml_backend_cuda_comm_vocab_top_k` on final-request prompt processing (exact restore at 59,126 tokens; input 62,781).
 2. The same requests completed without forks, ruling out a generic 62k model/FA limit.
-3. An environment-gated diagnostic bracket synchronized streams before local TOP_K, after local TOP_K, and after NCCL all-gather. The reproducer passed, proving an asynchronous ordering/lifetime defect rather than a buffer-size overflow.
+3. An environment-gated diagnostic bracket synchronized streams before local TOP_K, after local TOP_K, and after NCCL all-gather. The reproducer passed, proving only that the failure is timing/order-sensitive; it did not localize the originating operation.
 4. Code inspection found that peer NCCL streams were synchronized only *after* rank 0 began reading the gathered buffer to host. On ROCm, rank 0 could reach D2H while peer all-gather work was still completing.
 5. Experimental patch `16565727c` moved the three existing peer synchronizations before the D2H read and removed the broad diagnostic barriers.
 6. One uninstrumented fork-enabled 30–33 run passed 4/4, including the 62,781-token final request.
