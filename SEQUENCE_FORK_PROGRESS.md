@@ -87,7 +87,7 @@ board power peaks:  230–237 W per GPU
 GPU use:             99%
 ```
 
-The earlier progressive clean-prompt slowdown is consistent with thermal/power throttling. Do not run a sustained full replay at these temperatures without cooling, fan, or power-limit mitigation and user approval.
+The earlier progressive clean-prompt slowdown is now proven to have been empty-slot vector leakage, not thermal throttling: after `a3e355984`, the clean 58,865-token prompt used tile FA and sustained 578 t/s. The 102–103 C junction temperatures remain a separate operational risk; do not run a sustained full replay without cooling, fan, or power-limit mitigation and user approval.
 
 ## Current Handoff
 
