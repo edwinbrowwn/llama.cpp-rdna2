@@ -7,7 +7,7 @@
 
 namespace server_sequence_fork_policy {
 
-constexpr size_t restored_suffix_ratio_denominator = 8;
+constexpr size_t restored_suffix_ratio_denominator = 12;
 
 inline bool should_use_vector(
         bool   is_amd,

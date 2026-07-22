@@ -67,9 +67,9 @@ int main() {
 
     CHECK(!llama_model_supports_flash_attn_force_vec(nullptr));
 
-    // Conservative 1/8 threshold, including the exact boundary.
-    CHECK(should_use_vector(true, true, 80, 70));
-    CHECK(!should_use_vector(true, true, 80, 69));
+    // Conservative 1/12 threshold, including the exact boundary.
+    CHECK(should_use_vector(true, true, 84, 77));
+    CHECK(!should_use_vector(true, true, 84, 76));
     CHECK(should_use_vector(true, true, 62781, 59126));
     CHECK(!should_use_vector(true, true, 26917, 11538));
 

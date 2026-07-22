@@ -1286,7 +1286,7 @@ private:
                 llama_model_supports_flash_attn_force_vec(model_tgt);
 
             if (sequence_fork_amd) {
-                SRV_WRN("sequence fork AMD restored-suffix policy: vector_fa=%d threshold=1/8; clean/large prompts retain tile FA\n",
+                SRV_WRN("sequence fork AMD restored-suffix policy: vector_fa=%d threshold=1/12; clean/large prompts retain tile FA\n",
                     (int) sequence_fork_fa_vec_supported);
             }
         }
