@@ -54,6 +54,16 @@ This resolves the shortest reproduction of PID `24952`'s request-11 timeout. Do 
 
 A subsequent requests 30–33 attempt did not reach restored state: initial clean request 30 processed 51,200/58,865 tokens before curl's 900-second timeout. No GPU fault occurred and cleanup was clean. Throughput degraded progressively from ~535 to ~57 t/s. This is a separate clean-prompt throughput anomaly; do not attribute it to vector leakage or hardware state without policy/clock evidence.
 
+Clean-throughput audit:
+
+- planner decision was `initial`; no restored suffix/provenance log occurred;
+- the same binary's preceding 11,509-token initial prompt sustained 793 t/s;
+- the long run degraded continuously with context rather than showing a fixed low rate;
+- current idle clocks/power/VRAM are normal, but no under-load clock/temperature trace was captured;
+- unit tests prove default restored provenance and FA op force bits are false, but no runtime backend-selection trace exists yet.
+
+Before another long-context attempt, add explicit policy/kernel observability and capture under-load clocks; do not merely extend the curl timeout.
+
 ## Current Handoff
 
 ```text
