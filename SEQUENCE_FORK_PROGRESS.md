@@ -93,14 +93,30 @@ The earlier progressive clean-prompt slowdown is now proven to have been empty-s
 
 ```text
 Production branch: exp-gpu-sampling @ 1a3578dd6 (safe AMD checkpoint disable)
-Experimental branch: exp-sequence-fork
-Experimental implementation head: a3e355984 (persistent restored-vector policy + empty prompt-cache provenance fix)
+Experimental branch: exp-sequence-fork @ faf2726a5
+Upstream baseline merged: origin/master @ e8e6c7af2
+Experimental implementation: a3e355984 (persistent restored-vector policy + empty prompt-cache provenance fix)
+FA policy instrumentation: 8ece59488
 Atomic full-reprocess hardening retained: f87b17ed9
 Peer-gather ordering patch reverted: 049375fbe
 Bounded-shadow source commit retained: aea3814b8
 Previous diagnostic checkpoint: 0a4a268df
 Experimental worktree: ~/llama-cpp-sequence-fork
 Progress file: ~/llama-cpp-sequence-fork/SEQUENCE_FORK_PROGRESS.md
+```
+
+Upstream merge validation:
+
+```text
+merge commit: faf2726a5
+origin/master: e8e6c7af2
+merge conflicts: none
+server + HIP build: PASS
+test-sequence-fork-policy: PASS
+test-sequence-fork (64 cycles): PASS
+recurrent rollback: PASS
+test-chat: PASS
+branch divergence after merge: 77 ahead / 0 behind
 ```
 
 Current experimental requirements:
