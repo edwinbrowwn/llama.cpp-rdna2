@@ -86,8 +86,10 @@ int main() {
 
     restored_suffix_state state;
     CHECK(!state.active());
+    CHECK(!state.force_vector());
     CHECK(state.start(10));
     CHECK(state.active());
+    CHECK(state.force_vector());
     CHECK(state.remaining() == 10);
     CHECK(state.consume(4));
     CHECK(state.remaining() == 6);
@@ -96,15 +98,32 @@ int main() {
     CHECK(state.consume(6));
     CHECK(!state.active());
     CHECK(state.remaining() == 0);
+    CHECK(state.force_vector());
 
-    // Cancellation, prompt clear, slot release, and sleep/wake all use clear().
+    // Task release clears the prompt counter but the restored sequence remains
+    // tainted until its memory is atomically rebuilt.
     CHECK(state.start(3));
-    state.clear();
+    state.clear_prompt();
     CHECK(!state.active());
+    CHECK(state.force_vector());
+
+    // Prompt clear/full reprocess clears the underlying restored provenance.
+    state.clear_all();
+    CHECK(!state.active());
+    CHECK(!state.force_vector());
+
     CHECK(!state.start(0));
     CHECK(!state.active());
+    CHECK(!state.force_vector());
     CHECK(!state.start((size_t) UINT32_MAX + 1));
     CHECK(!state.active());
+    CHECK(!state.force_vector());
+
+    CHECK(state.start(5));
+    restored_suffix_state copied = state;
+    CHECK(copied.active());
+    CHECK(copied.force_vector());
+    CHECK(copied.remaining() == 5);
 
     const std::vector<bool> mixed = {true, true, false, false};
     CHECK(homogeneous_prefix(mixed.size(), [&](size_t i) { return mixed[i]; }) == 2);

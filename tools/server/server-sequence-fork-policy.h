@@ -26,19 +26,33 @@ class restored_suffix_state {
 public:
     bool start(size_t tokens) {
         if (tokens == 0 || tokens > std::numeric_limits<uint32_t>::max()) {
-            remaining_ = 0;
+            clear_all();
             return false;
         }
         remaining_ = (uint32_t) tokens;
+        force_vector_ = true;
         return true;
     }
 
-    void clear() {
+    // Clear task-local suffix accounting while preserving the requirement that
+    // any subsequent use of this restored sequence remains on vector FA.
+    void clear_prompt() {
         remaining_ = 0;
+    }
+
+    // Clear both accounting and restored-state provenance after the underlying
+    // sequence memory has been atomically discarded and rebuilt.
+    void clear_all() {
+        remaining_ = 0;
+        force_vector_ = false;
     }
 
     bool active() const {
         return remaining_ > 0;
+    }
+
+    bool force_vector() const {
+        return force_vector_;
     }
 
     uint32_t remaining() const {
@@ -55,6 +69,7 @@ public:
 
 private:
     uint32_t remaining_ = 0;
+    bool force_vector_ = false;
 };
 
 template <typename IsVector>

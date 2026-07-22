@@ -274,7 +274,7 @@ struct server_slot {
         fork_boundary_tokens.clear();
         fork_boundary_valid = false;
         fork_boundary_pos_max = -1;
-        fork_restored_prompt.clear();
+        fork_restored_prompt.clear_prompt();
     }
 
     void prompt_clear() {
@@ -287,6 +287,7 @@ struct server_slot {
 
         prompt.clear();
         fork_clear_shadow();
+        fork_restored_prompt.clear_all();
     }
 
     std::vector<common_adapter_lora_info> lora;
@@ -323,7 +324,7 @@ struct server_slot {
         SLT_DBG(*this, "%s", "\n");
 
         n_prompt_tokens_cache = 0;
-        fork_restored_prompt.clear();
+        fork_restored_prompt.clear_prompt();
 
         last_nl_pos    = 0;
         generated_text = "";
@@ -729,6 +730,8 @@ struct server_slot {
                 common_speculative_set_state(spec, other.id, spec_state);
             }
         }
+
+        other.fork_restored_prompt = fork_restored_prompt;
 
         other.n_decoded   = n_decoded;
         other.n_remaining = n_remaining;
@@ -3033,7 +3036,7 @@ private:
         };
         auto slot_requires_restored_vector_fa = [&](int32_t id_slot) {
             server_slot * slot = get_slot_by_id(id_slot);
-            return slot && slot->fork_restored_prompt.active();
+            return slot && slot->fork_restored_prompt.force_vector();
         };
 
         for (int32_t off = 0; off < batch.size(); off = off_next) {
@@ -3098,11 +3101,7 @@ private:
                     }
                     throw;
                 }
-                llama_set_flash_attn_force_vec(ctx_tgt, false);
-                if (ctx_dft) {
-                    llama_set_flash_attn_force_vec(ctx_dft, false);
-                }
-#ifdef DEBUG_TIMINGS
+                #ifdef DEBUG_TIMINGS
                 llama_synchronize(ctx_tgt);
 #endif
 
@@ -3115,7 +3114,7 @@ private:
                         GGML_ASSERT(force_vec_view);
                         GGML_ASSERT(slot->fork_restored_prompt.consume(1));
                         if (!slot->fork_restored_prompt.active()) {
-                            SLT_WRN(*slot, "%s", "sequence-fork restored suffix complete; returning to normal FA selection\n");
+                            SLT_WRN(*slot, "%s", "sequence-fork restored suffix complete; retaining vector FA while restored state remains active\n");
                         }
                     }
 
@@ -3126,9 +3125,17 @@ private:
                     n_batch = llama_n_batch(ctx_tgt);
                 } else {
                     // try again with the updated n_batch
+                    llama_set_flash_attn_force_vec(ctx_tgt, false);
+                    if (ctx_dft) {
+                        llama_set_flash_attn_force_vec(ctx_dft, false);
+                    }
                     continue;
                 }
             } catch (const std::exception & e) {
+                llama_set_flash_attn_force_vec(ctx_tgt, false);
+                if (ctx_dft) {
+                    llama_set_flash_attn_force_vec(ctx_dft, false);
+                }
                 SRV_ERR("decode() failed: %s\n", e.what());
                 abort_all_slots("decode() failed: " + std::string(e.what()));
                 break; // stop any further processing
@@ -3138,9 +3145,18 @@ private:
                 scoped_timer t(t_post_decode, n_post_decode);
                 post_decode(n_tokens, off, batch_view);
             } catch (const std::exception & e) {
+                llama_set_flash_attn_force_vec(ctx_tgt, false);
+                if (ctx_dft) {
+                    llama_set_flash_attn_force_vec(ctx_dft, false);
+                }
                 SRV_ERR("post_decode() failed: %s\n", e.what());
                 abort_all_slots("post_decode() failed: " + std::string(e.what()));
                 break; // stop any further processing
+            }
+
+            llama_set_flash_attn_force_vec(ctx_tgt, false);
+            if (ctx_dft) {
+                llama_set_flash_attn_force_vec(ctx_dft, false);
             }
         }
     }
@@ -3695,6 +3711,7 @@ private:
                                         n_past = 0;
                                         n_past_common = 0;
                                         sequence_fork_restored_prompt = false;
+                                        slot.fork_restored_prompt.clear_all();
                                         decision = "shadow-restore-failed";
                                         SLT_WRN(slot, "%s", "sequence-fork shadow rollback failed; using full reprocess\n");
                                     }
@@ -3828,7 +3845,7 @@ private:
                             SLT_WRN(slot, "n_past was set to %d\n", n_past);
                         }
 
-                        slot.fork_restored_prompt.clear();
+                        slot.fork_restored_prompt.clear_prompt();
                         if (sequence_fork_restored_prompt && n_past > 0) {
                             const int32_t remaining = slot.task->n_tokens() - n_past;
                             GGML_ASSERT(remaining > 0);
