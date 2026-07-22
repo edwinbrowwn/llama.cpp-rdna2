@@ -3479,6 +3479,7 @@ private:
                         int n_past = 0;
                         int n_past_common = 0;
                         bool sequence_fork_restored_prompt = false;
+                        bool sequence_fork_reuse_committed = false;
 
                         // empty prompt passed -> release the slot and send empty response
                         if (input_tokens.empty()) {
@@ -3684,6 +3685,12 @@ private:
                                     }
                                 }
 
+                                if (sequence_fork_enabled &&
+                                        (strcmp(decision, "active-append") == 0 ||
+                                         strcmp(decision, "active-bounded-rollback") == 0)) {
+                                    sequence_fork_reuse_committed = true;
+                                }
+
                                 if (sequence_fork_enabled && !restore_shadow &&
                                         strncmp(decision, "full-reprocess", strlen("full-reprocess")) == 0) {
                                     // A full reprocess must be an atomic cache transition. Synchronize
@@ -3740,6 +3747,7 @@ private:
                                         slot.prompt.tokens.keep_first(shadow_lcp);
                                         n_past = (int) shadow_lcp;
                                         n_past_common = n_past;
+                                        sequence_fork_reuse_committed = true;
                                         SLT_WRN(slot, "sequence-fork restored shadow seq=%d -> active seq=%d at %zu tokens (rollback=%zu)\n",
                                             slot.fork_shadow_id, slot.id, shadow_lcp, shadow_rollback);
                                     } else {
@@ -3770,7 +3778,7 @@ private:
                             // the largest pos_min required for a checkpoint to be useful
                             const auto pos_min_thold = std::max(0, pos_next - n_swa - (has_new_tokens ? 0 : 1));
 
-                            if (n_past > 0 && n_past <= slot.prompt.n_tokens()) {
+                            if (!sequence_fork_reuse_committed && n_past > 0 && n_past <= slot.prompt.n_tokens()) {
                                 const auto pos_min = llama_memory_seq_pos_min(llama_get_memory(ctx_tgt), slot.id);
                                 if (pos_min == -1) {
                                     SLT_ERR(slot, "n_past = %d, slot.prompt.tokens.size() = %d, seq_id = %d, pos_min = %d\n", n_past, (int) slot.prompt.tokens.size(), slot.id, pos_min);
