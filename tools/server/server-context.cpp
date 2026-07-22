@@ -1251,6 +1251,11 @@ private:
             return false;
         }
 
+        if (ctx_tgt == nullptr) {
+            SRV_ERR("failed to create_context with model '%s'\n", params_base.model.path.c_str());
+            return false;
+        }
+
         vocab = llama_model_get_vocab(model_tgt);
 
         needs_reeval = llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt);
