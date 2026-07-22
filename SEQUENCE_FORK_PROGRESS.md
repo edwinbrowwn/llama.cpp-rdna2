@@ -7,8 +7,8 @@ Last updated: 2026-07-20
 ```text
 Production branch: exp-gpu-sampling @ 1a3578dd6 (safe AMD checkpoint disable)
 Experimental branch: exp-sequence-fork
-Feature source commit: aea3814b8 (bounded shadow rollback)
-Latest recorded result before this checkpoint: 60dd1912b
+Feature source commit: 16565727c (bounded shadow rollback + peer-gather ordering fix)
+Previous diagnostic checkpoint: 0a4a268df
 Experimental worktree: ~/llama-cpp-sequence-fork
 Progress file: ~/llama-cpp-sequence-fork/SEQUENCE_FORK_PROGRESS.md
 ```
@@ -44,30 +44,22 @@ Concurrent dense grammar with `GGML_TP_VOCAB_OUTPUT=1` is fixed by serializing d
 
 Subagent status: a requested three-agent read-only audit on 2026-07-21 failed before launch because the local `pi-subagents` runtime could not resolve `typebox/compile`. No child modified files or produced findings.
 
-## Current Diagnostic Breakpoint
+## Long-Context Fault Resolution
 
-Proven:
+Focused reproducer: `~/ar-bench/run-sequence-fork-long-context-diag.sh` defaults to captured requests 30–33 and exposes only readiness, fork, vocab-output, and diagnostic-sync toggles.
 
-1. 122B requests 30–33 reproduce the illegal access in about 7.5 minutes with sequence forks enabled.
-2. The same requests 30–33 complete without faults when sequence forks are disabled, although clean prompt processing takes about 21.5 minutes.
-3. The enabled run faults during final-request prompt processing after an exact restore at 59,126 tokens; the request has 62,781 input tokens.
-4. HIP reports the error at `ggml_backend_cuda_comm_vocab_top_k` during D2H synchronization. Because execution is asynchronous, this is an observation point, not yet proof that TOP_K caused the illegal access.
-5. The failed `AMD_SERIALIZE_KERNEL=3 AMD_SERIALIZE_COPY=3` attempt never passed the script's 300-second readiness timeout. It produced no fault localization and must not be treated as evidence.
-6. Every failed run cleaned up: no server/KFD process, VRAM returned to ~17 MiB per GPU, SMI remained responsive.
+Proven sequence:
 
-Unknown:
+1. Fork-enabled requests 30–33 reproduced the illegal access deterministically at the D2H read in `ggml_backend_cuda_comm_vocab_top_k` on final-request prompt processing (exact restore at 59,126 tokens; input 62,781).
+2. The same requests completed without forks, ruling out a generic 62k model/FA limit.
+3. An environment-gated diagnostic bracket synchronized streams before local TOP_K, after local TOP_K, and after NCCL all-gather. The reproducer passed, proving an asynchronous ordering/lifetime defect rather than a buffer-size overflow.
+4. Code inspection found that peer NCCL streams were synchronized only *after* rank 0 began reading the gathered buffer to host. On ROCm, rank 0 could reach D2H while peer all-gather work was still completing.
+5. Fix `16565727c` moves the three existing peer synchronizations before the D2H read. It adds no new peer synchronization and removes all broad diagnostic barriers.
+6. The uninstrumented fork-enabled 30–33 reproducer then passed 4/4, including the 62,781-token final request: zero faults/errors, no server/KFD process, and ~17 MiB idle VRAM per GPU.
 
-- whether the originating kernel is vocabulary TOP_K, long-context FlashAttention, unified-KV physical-span handling, or another asynchronous producer;
-- whether vocabulary sharding is necessary for the reproducer;
-- whether a single restored shadow at ~59k is sufficient, independent of earlier history.
+Performance note: the fix reorders existing waits rather than adding a synchronization matrix. Final incremental prompt processing remained normal (3,655 tokens in 21.2 s, 172.6 t/s).
 
-Next focused work — do not start another long matrix:
-
-1. create a 30–33 reproducer script with a configurable server-ready timeout and feature toggles;
-2. add explicit stream synchronization/error checks immediately after candidate kernels in a diagnostic build so the first failing operation is reported;
-3. run one fork-enabled 30–33 diagnostic reproduction;
-4. only after localization, run the single discriminating toggle (for example vocab sharding off if TOP_K remains implicated);
-5. after any GPU fault/timeout, stop and verify process/KFD/VRAM cleanup before another run.
+Next gate is one full 122B captured replay. Do not add further fault toggles unless that exact replay fails.
 
 ## Goal
 
@@ -199,12 +191,11 @@ The first prototype should use these existing operations without server changes.
 - [x] Unified-KV basic contention.
 - [x] First 16 captured Pi requests on 35B.
 - [ ] Full captured sessions and long-context server stress.
-- [ ] 122B full-replay fault isolated to vocabulary-sharded TOP_K comm (`ggml_backend_cuda_comm_vocab_top_k`, hipMemcpyAsync D2H of gathered candidates) at ~62k context. Not caused by the fork lifecycle: fault followed a shadow-exact restore and 30 prior restores succeeded. Next reproducer: vocab top-k at ≥59k context without sequence forks.
+- [x] 122B long-context vocabulary gather fault reproduced with requests 30–33 and fixed by waiting for peer NCCL streams before rank-0 D2H (`16565727c`). The uninstrumented 62,781-token reproducer passes 4/4 with zero faults.
   - 35B full 34-request replay passes with graph replay disabled.
-  - 122B first 16 requests pass, including one deep-branch clean reprocess.
-  - 122B full replay stalled after a two-token shadow rollback; stateful mode is being restricted to exact shadow matches because MTP `pending_h` has no rollback snapshots.
-  - Full 34-request 35B replay reached 12 exact shadow restores, then page-faulted in tile FA on the 13th around 27k.
-  - This used no host checkpoint load or rollback; repeated switch-back is now the focused standalone reproducer target.
+  - 122B requests 0–20 pass with bounded rollback: 19 shadow restores, one clean reprocess, zero faults.
+  - 122B requests 30–33 pass after the peer-gather ordering fix.
+  - Full 122B requests 0–33 replay after the ordering fix remains the next single gate.
 - [x] Multimodal projector loaded for text-only exact shadow restore.
 - [x] Same-image exact shadow restore lifecycle completed without faults.
 - [ ] Image embeddings are still recomputed after restore; shadow memory currently preserves model sequence state, not cached mmproj chunk embeddings.
