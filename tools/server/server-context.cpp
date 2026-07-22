@@ -3426,6 +3426,8 @@ private:
             bool add_ok = true; // false means the batch is full, skip remaining slots
 
             iterate(slots, [&](server_slot & slot) {
+                bool sequence_fork_active_bounded = false;
+
                 if (!add_ok || batch.size() >= n_batch) {
                     return; // batch is full, skip remaining slots
                 }
@@ -3647,41 +3649,26 @@ private:
                                     sequence_fork_plan_reset++;
                                 }
 
-                                if (sequence_fork_enabled && sequence_fork_amd) {
-                                    size_t restored_lcp = 0;
-                                    const bool active_restore = strcmp(decision, "active-bounded-rollback") == 0;
-                                    if (active_restore) {
-                                        restored_lcp = active_lcp;
-                                    } else if (restore_shadow) {
-                                        restored_lcp = shadow_lcp;
-                                    }
-
-                                    if (restored_lcp > 0) {
-                                        const size_t restored_suffix = input_tokens.size() - restored_lcp;
-                                        const bool use_vector = server_sequence_fork_policy::should_use_vector(
-                                            sequence_fork_amd,
-                                            sequence_fork_fa_vec_supported,
-                                            input_tokens.size(),
-                                            restored_lcp);
-                                        if (!use_vector) {
-                                            if (active_restore) {
-                                                GGML_ASSERT(sequence_fork_plan_rollback > 0);
-                                                sequence_fork_plan_rollback--;
-                                            } else {
-                                                GGML_ASSERT(sequence_fork_plan_shadow > 0);
-                                                sequence_fork_plan_shadow--;
-                                            }
-                                            sequence_fork_plan_reset++;
-                                            decision = sequence_fork_fa_vec_supported
-                                                ? "full-reprocess-large-suffix"
-                                                : "full-reprocess-no-vector-fa";
-                                            restore_shadow = false;
-                                            SLT_WRN(slot,
-                                                "sequence-fork restore rejected: suffix=%zu prompt=%zu vector_supported=%d; using clean tile-FA reprocess\n",
-                                                restored_suffix, input_tokens.size(), (int) sequence_fork_fa_vec_supported);
-                                        } else {
-                                            sequence_fork_restored_prompt = true;
-                                        }
+                                if (sequence_fork_enabled && sequence_fork_amd && restore_shadow && shadow_lcp > 0) {
+                                    const size_t restored_suffix = input_tokens.size() - shadow_lcp;
+                                    const bool use_vector = server_sequence_fork_policy::should_use_vector(
+                                        sequence_fork_amd,
+                                        sequence_fork_fa_vec_supported,
+                                        input_tokens.size(),
+                                        shadow_lcp);
+                                    if (!use_vector) {
+                                        GGML_ASSERT(sequence_fork_plan_shadow > 0);
+                                        sequence_fork_plan_shadow--;
+                                        sequence_fork_plan_reset++;
+                                        decision = sequence_fork_fa_vec_supported
+                                            ? "full-reprocess-large-suffix"
+                                            : "full-reprocess-no-vector-fa";
+                                        restore_shadow = false;
+                                        SLT_WRN(slot,
+                                            "sequence-fork shadow restore rejected: suffix=%zu prompt=%zu vector_supported=%d; using clean tile-FA reprocess\n",
+                                            restored_suffix, input_tokens.size(), (int) sequence_fork_fa_vec_supported);
+                                    } else {
+                                        sequence_fork_restored_prompt = true;
                                     }
                                 }
 
@@ -3689,6 +3676,11 @@ private:
                                         (strcmp(decision, "active-append") == 0 ||
                                          strcmp(decision, "active-bounded-rollback") == 0)) {
                                     sequence_fork_reuse_committed = true;
+                                    sequence_fork_active_bounded = strcmp(decision, "active-bounded-rollback") == 0;
+                                    if (sequence_fork_active_bounded && sequence_fork_amd &&
+                                            !slot.fork_restored_prompt.force_vector()) {
+                                        SLT_WRN(slot, "%s", "sequence-fork in-place bounded rollback retains tile FA\n");
+                                    }
                                 }
 
                                 if (sequence_fork_enabled && !restore_shadow &&
@@ -3941,6 +3933,19 @@ private:
                     if (ctx_dft) {
                         if (!llama_memory_seq_rm(llama_get_memory(ctx_dft), slot.id, p0, -1)) {
                             SLT_WRN(slot, "dft: memory_seq_rm [%d, end) failed, continuing\n", p0);
+                        }
+                    }
+
+                    if (sequence_fork_active_bounded) {
+                        const llama_pos expected_pos = p0 - 1;
+                        const llama_pos target_pos = llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), slot.id);
+                        const llama_pos draft_pos = ctx_dft
+                            ? llama_memory_seq_pos_max(llama_get_memory(ctx_dft), slot.id)
+                            : expected_pos;
+                        if (p0 <= 0 || target_pos != expected_pos || draft_pos != expected_pos) {
+                            throw std::runtime_error(string_format(
+                                "sequence-fork active rollback invariant failed: p0=%d expected=%d target=%d draft=%d",
+                                p0, expected_pos, target_pos, draft_pos));
                         }
                     }
 
