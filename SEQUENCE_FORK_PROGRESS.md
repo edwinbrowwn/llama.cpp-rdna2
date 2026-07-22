@@ -7,7 +7,8 @@ Last updated: 2026-07-20
 ```text
 Production branch: exp-gpu-sampling @ 1a3578dd6 (safe AMD checkpoint disable)
 Experimental branch: exp-sequence-fork
-Experimental safety head: f87b17ed9 (atomic full-reprocess transition; GPU-unvalidated)
+Experimental implementation head: 39e238985 (adaptive restored-suffix vector FA; GPU-unvalidated)
+Atomic full-reprocess hardening retained: f87b17ed9
 Peer-gather ordering patch reverted: 049375fbe
 Bounded-shadow source commit retained: aea3814b8
 Previous diagnostic checkpoint: 0a4a268df
@@ -43,6 +44,36 @@ all completed stages returned VRAM to idle
 ```
 
 Concurrent dense grammar with `GGML_TP_VOCAB_OUTPUT=1` is fixed by serializing dense-incompatible slot output groups, eagerly accumulating dense rows while graph tensors are valid, and disabling MTP only for those slots. The compact-compatible parallel/MTP path remains enabled and has a passing regression.
+
+### Restored-suffix vector implementation checkpoint
+
+Commit `39e238985` implements the adaptive policy without process-global environment state:
+
+- force-vector selection is encoded per FA graph operation;
+- both target and MTP draft contexts receive the scoped policy for exactly one restored decode view;
+- per-slot counters track exact restored prompt tokens and split mixed vector/tile views;
+- suffixes over 1/8, unsupported vector shapes, and restore failures use atomic clean tile reprocessing;
+- clean/initial/append/generation work retains normal FA selection;
+- AMD/model capability uses actual per-layer K/V head dimensions, not `embedding_length/head_count`;
+- 35B and 122B GGUF metadata both report K/V head dimension 256 and are eligible;
+- cancellation/release/prompt clear/LoRA/context lifecycle clears the per-slot counter through existing reset paths.
+
+CPU validation:
+
+```text
+test-sequence-fork-policy: PASS
+  scoped FA op-parameter round trip
+  compatible/incompatible/mismatched model head shapes
+  exact 1/8 policy boundaries
+  unsupported/non-AMD fallback
+  counter lifecycle and underflow rejection
+  mixed vector/tile view split boundaries
+64-cycle test-sequence-fork: PASS
+recurrent rollback checkpoint: PASS
+server + HIP backend build: PASS
+```
+
+No GPU workload has run against `39e238985` yet.
 
 Subagent status: a requested three-agent read-only audit on 2026-07-21 failed before launch because the local `pi-subagents` runtime could not resolve `typebox/compile`. No child modified files or produced findings.
 
