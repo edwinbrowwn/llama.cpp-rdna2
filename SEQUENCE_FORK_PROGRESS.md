@@ -7,7 +7,8 @@ Last updated: 2026-07-20
 ```text
 Production branch: exp-gpu-sampling @ 1a3578dd6 (safe AMD checkpoint disable)
 Experimental branch: exp-sequence-fork
-Feature source commit: 16565727c (bounded shadow rollback + peer-gather ordering fix)
+Experimental safety head: 049375fbe (peer-gather ordering patch reverted)
+Bounded-shadow source commit retained: aea3814b8
 Previous diagnostic checkpoint: 0a4a268df
 Experimental worktree: ~/llama-cpp-sequence-fork
 Progress file: ~/llama-cpp-sequence-fork/SEQUENCE_FORK_PROGRESS.md
@@ -44,7 +45,21 @@ Concurrent dense grammar with `GGML_TP_VOCAB_OUTPUT=1` is fixed by serializing d
 
 Subagent status: a requested three-agent read-only audit on 2026-07-21 failed before launch because the local `pi-subagents` runtime could not resolve `typebox/compile`. No child modified files or produced findings.
 
-## Long-Context Fault Resolution
+## STOP: Full-Replay GPU Timeout After Gather-Ordering Patch
+
+The targeted requests 30–33 reproduction passed once with source patch `16565727c`, but the subsequent full 122B requests 0–33 validation caused the GPUs to time out and required the user to shut the server down manually. The command was aborted; no completion result is valid.
+
+Recovered evidence and safety status:
+
+- Host restarted cleanly: no server/KFD process, all GPUs at ~17 MiB, SMI responsive.
+- Requests 0–11 completed. Request 12 (`26,917` input tokens) discarded the unmatched shadow and selected `full-reprocess`; the server log stops immediately after that plan.
+- The prior-boot kernel journal records a `gfxhub` page fault on GPU `43:00.0` from the TCP client, permission fault on a read, for the matching `llama-server` process. There is no TOP_K/D2H error in the server log for this failure.
+- Therefore TOP_K was an asynchronous observation point in the earlier 62k failure, not a proven origin. The focused run passed because synchronization changed timing.
+- Experimental patch `16565727c` was reverted by `049375fbe` before any further workload.
+- Do **not** rerun the full replay. Production branch `exp-gpu-sampling @ 1a3578dd6` was not modified.
+- Next work is offline analysis of the GPU page-faulting TCP read and unified-KV/FA physical layout at the deep full-reprocess transition.
+
+## Long-Context Fault Investigation
 
 Focused reproducer: `~/ar-bench/run-sequence-fork-long-context-diag.sh` defaults to captured requests 30–33 and exposes only readiness, fork, vocab-output, and diagnostic-sync toggles.
 
@@ -54,12 +69,12 @@ Proven sequence:
 2. The same requests completed without forks, ruling out a generic 62k model/FA limit.
 3. An environment-gated diagnostic bracket synchronized streams before local TOP_K, after local TOP_K, and after NCCL all-gather. The reproducer passed, proving an asynchronous ordering/lifetime defect rather than a buffer-size overflow.
 4. Code inspection found that peer NCCL streams were synchronized only *after* rank 0 began reading the gathered buffer to host. On ROCm, rank 0 could reach D2H while peer all-gather work was still completing.
-5. Fix `16565727c` moves the three existing peer synchronizations before the D2H read. It adds no new peer synchronization and removes all broad diagnostic barriers.
-6. The uninstrumented fork-enabled 30–33 reproducer then passed 4/4, including the 62,781-token final request: zero faults/errors, no server/KFD process, and ~17 MiB idle VRAM per GPU.
+5. Experimental patch `16565727c` moved the three existing peer synchronizations before the D2H read and removed the broad diagnostic barriers.
+6. One uninstrumented fork-enabled 30–33 run passed 4/4, including the 62,781-token final request.
+7. The immediately following full 122B replay page-faulted at the request-12 deep full-reprocess transition and required manual shutdown. This disproved the claimed localization: the TOP_K sync point was not the originating operation.
+8. `16565727c` is reverted by `049375fbe`. No GPU validation was run after the revert.
 
-Performance note: the fix reorders existing waits rather than adding a synchronization matrix. Final incremental prompt processing remained normal (3,655 tokens in 21.2 s, 172.6 t/s).
-
-Next gate is one full 122B captured replay. Do not add further fault toggles unless that exact replay fails.
+The correct next action is offline source/layout analysis—not another GPU toggle or replay.
 
 ## Goal
 
@@ -191,11 +206,11 @@ The first prototype should use these existing operations without server changes.
 - [x] Unified-KV basic contention.
 - [x] First 16 captured Pi requests on 35B.
 - [ ] Full captured sessions and long-context server stress.
-- [x] 122B long-context vocabulary gather fault reproduced with requests 30–33 and fixed by waiting for peer NCCL streams before rank-0 D2H (`16565727c`). The uninstrumented 62,781-token reproducer passes 4/4 with zero faults.
+- [ ] 122B GPU page fault remains unresolved. TOP_K was only an asynchronous observation point; a later full run page-faulted on a TCP read immediately after the request-12 deep full-reprocess plan.
   - 35B full 34-request replay passes with graph replay disabled.
-  - 122B requests 0–20 pass with bounded rollback: 19 shadow restores, one clean reprocess, zero faults.
-  - 122B requests 30–33 pass after the peer-gather ordering fix.
-  - Full 122B requests 0–33 replay after the ordering fix remains the next single gate.
+  - 122B requests 0–20 previously passed with bounded rollback: 19 shadow restores, one clean reprocess, zero faults.
+  - Peer-gather ordering experiment `16565727c` is reverted by `049375fbe`.
+  - Do not rerun; analyze unified-KV/FA allocation and physical-span transition offline.
 - [x] Multimodal projector loaded for text-only exact shadow restore.
 - [x] Same-image exact shadow restore lifecycle completed without faults.
 - [ ] Image embeddings are still recomputed after restore; shadow memory currently preserves model sequence state, not cached mmproj chunk embeddings.
