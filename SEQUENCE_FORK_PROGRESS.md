@@ -144,12 +144,25 @@ Treat restored-prompt tile FA as unsupported on AMD hybrid/recurrent models unti
 
 - initial/append-only prompts: normal tile FA;
 - clean full reprocess: atomic reset plus normal tile FA;
-- exact or bounded shadow restore: vector FA for every remaining prompt token;
+- exact or bounded shadow restore with a small suffix (initial conservative threshold: suffix ≤ 1/8 of full prompt): vector FA for every remaining prompt token;
+- larger restored suffix: reject restore and use atomic clean tile-FA full reprocess, which is both safer and faster at that ratio;
 - after the restored suffix is consumed: return to normal kernel selection for generation;
 - if vector FA is not eligible: reject the restore and perform a clean tile-FA full reprocess;
-- keep HIP graph replay disabled for the experimental sequence-fork mode.
+- keep `--flash-attn on` for TP and keep HIP graph replay disabled for the experimental sequence-fork mode. Vector FA is an internal FA kernel selection, not `--flash-attn off`.
 
 This preserves the main benefit: the final failing request evaluates ~3.7k restored suffix tokens instead of ~62.8k clean tokens. It sacrifices tile speed only on the reused suffix. Prior full-suffix vector evidence measured 38.5 t/s for the final suffix and completed the full 122B session.
+
+Retained optimizations: four-GPU tensor splitting, FA enabled, unified KV, MTP, NCCL/RCCL all-reduce, vocabulary-sharded compact TOP_K, dense-grammar serialization/fallback, and compact-compatible parallel batching. Restored/tile batch separation is an additional temporary split only while restored suffix tokens remain; unrelated compact slots retain their fast path.
+
+Measured restored-suffix cost at the final request:
+
+```text
+tile suffix (diagnostic passing runs): 155–173 t/s, ~21–24 s for 3,655 tokens
+full-suffix vector:                     38.5 t/s, ~95 s for 3,659 tokens
+clean full prompt:                     231 t/s, ~272 s for 62,781 tokens
+```
+
+Thus vector is ~4.0–4.5× slower than tile for those suffix tokens (about 75–78% lower suffix PP throughput), but still ~2.9× faster than clean full reprocessing for the complete request and saves about 177 seconds of PP. The theoretical measured break-even is near suffix/full ≈ 1/6; use 1/8 initially for margin.
 
 ### Restored-suffix vector policy considerations
 
