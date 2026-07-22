@@ -11,6 +11,10 @@ namespace server_sequence_fork_policy {
 
 constexpr size_t restored_suffix_ratio_denominator = 12;
 
+inline bool loaded_state_is_restored(size_t prompt_tokens, int64_t seq_pos_max) {
+    return prompt_tokens > 0 && seq_pos_max >= 0;
+}
+
 inline bool cache_types_support_vector(ggml_type type_k, ggml_type type_v) {
     if (type_k != type_v) {
         return false;

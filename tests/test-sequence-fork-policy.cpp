@@ -67,6 +67,11 @@ int main() {
 
     CHECK(!llama_model_supports_flash_attn_force_vec(nullptr));
 
+    CHECK(!loaded_state_is_restored(0, -1));
+    CHECK(!loaded_state_is_restored(10, -1));
+    CHECK(!loaded_state_is_restored(0, 9));
+    CHECK(loaded_state_is_restored(10, 9));
+
     CHECK(cache_types_support_vector(GGML_TYPE_F16, GGML_TYPE_F16));
     CHECK(cache_types_support_vector(GGML_TYPE_Q4_0, GGML_TYPE_Q4_0));
     CHECK(cache_types_support_vector(GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));

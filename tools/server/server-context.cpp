@@ -1849,7 +1849,10 @@ private:
 
                 if (!ret->prompt_load(*prompt_cache, task.tokens)) {
                     ret->prompt_clear();
-                } else if (sequence_fork_enabled && sequence_fork_amd) {
+                } else if (sequence_fork_enabled && sequence_fork_amd &&
+                        server_sequence_fork_policy::loaded_state_is_restored(
+                            ret->prompt.tokens.size(),
+                            llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), ret->id))) {
                     ret->fork_restored_prompt.mark_restored();
                     SLT_WRN(*ret, "%s", "prompt-cache state load marked for vector FA until clean rebuild\n");
                 }
