@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -10,6 +11,15 @@
 namespace server_sequence_fork_policy {
 
 constexpr size_t restored_suffix_ratio_denominator = 12;
+
+inline bool apply_prompt_logit_reeval(int32_t task_tokens, int32_t & n_past, int32_t & n_past_common) {
+    if (n_past != task_tokens || n_past <= 0) {
+        return false;
+    }
+    n_past--;
+    n_past_common = std::min(n_past_common, n_past);
+    return true;
+}
 
 inline bool loaded_state_is_restored(size_t prompt_tokens, int64_t seq_pos_max) {
     return prompt_tokens > 0 && seq_pos_max >= 0;

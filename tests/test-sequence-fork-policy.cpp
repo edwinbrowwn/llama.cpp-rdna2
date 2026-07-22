@@ -67,6 +67,18 @@ int main() {
 
     CHECK(!llama_model_supports_flash_attn_force_vec(nullptr));
 
+    int32_t n_past = 1081;
+    int32_t n_past_common = 1081;
+    CHECK(apply_prompt_logit_reeval(1081, n_past, n_past_common));
+    CHECK(n_past == 1080);
+    CHECK(n_past_common == 1080);
+
+    n_past = 100;
+    n_past_common = 90;
+    CHECK(!apply_prompt_logit_reeval(101, n_past, n_past_common));
+    CHECK(n_past == 100);
+    CHECK(n_past_common == 90);
+
     CHECK(!loaded_state_is_restored(0, -1));
     CHECK(!loaded_state_is_restored(10, -1));
     CHECK(!loaded_state_is_restored(0, 9));

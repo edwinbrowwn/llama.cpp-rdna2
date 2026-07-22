@@ -3884,9 +3884,11 @@ private:
                         }
 
                         // [TAG_PROMPT_LOGITS]
-                        if (n_past == slot.task->n_tokens() && n_past > 0) {
-                            SLT_WRN(slot, "need to evaluate at least 1 token for each active slot (n_past = %d, task.n_tokens() = %d)\n", n_past, slot.task->n_tokens());
-                            n_past--;
+                        const int n_past_before_reeval = n_past;
+                        if (server_sequence_fork_policy::apply_prompt_logit_reeval(
+                                slot.task->n_tokens(), n_past, n_past_common)) {
+                            SLT_WRN(slot, "need to evaluate at least 1 token for each active slot (n_past = %d, task.n_tokens() = %d)\n",
+                                n_past_before_reeval, slot.task->n_tokens());
                             SLT_WRN(slot, "n_past was set to %d\n", n_past);
                         }
 
