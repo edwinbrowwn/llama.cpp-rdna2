@@ -2,12 +2,36 @@
 
 Last updated: 2026-07-20
 
+## STOP: Full Restored-Vector Replay Timed Out GPUs
+
+After the focused 35B, 122B bounded, and 122B requests 30–33 vector gates passed, the subsequent full 122B requests 0–33 replay timed out the GPUs and required manual server shutdown. The command was aborted; no full-run result is valid.
+
+Recovered result:
+
+- Host restarted cleanly: no server/KFD process, all GPUs at ~17 MiB.
+- Failed job PID `24952`; requests 0–10 completed, request 11 did not return.
+- Nine restored prompt suffixes entered and completed vector accounting correctly.
+- Request 11 restored exactly at 26,219, processed all 643 suffix tokens under vector, logged suffix completion, snapshotted boundary 26,862, and entered dense grammar sampling.
+- The log then stops before prompt/generation timings or curl completion. No matching prior-boot kernel record persisted.
+- Therefore the 1/12 large-suffix fallback was not the immediate failing transition. The concrete policy hole was resetting target/draft force-vector flags before `post_decode()` and selecting tile again for subsequent MTP drafting/generation while restored state remained active.
+
+Recovery patch `8f1b64f22`:
+
+- restored provenance persists after the prompt suffix counter reaches zero;
+- target and MTP draft contexts remain vector through post-decode and all generation while restored state is active;
+- task release clears only prompt accounting, not restored provenance;
+- parent/child state copy propagates provenance;
+- only atomic prompt clear/full rebuild clears provenance;
+- unit tests cover counter completion, persistence, copy, and full clear.
+
+`8f1b64f22` is CPU-tested only. Do not start another full replay. Production `exp-gpu-sampling @ 1a3578dd6` remains untouched.
+
 ## Current Handoff
 
 ```text
 Production branch: exp-gpu-sampling @ 1a3578dd6 (safe AMD checkpoint disable)
 Experimental branch: exp-sequence-fork
-Experimental implementation head: 9c7d31c6c (adaptive restored-suffix vector FA, 1/12 threshold)
+Experimental implementation head: 8f1b64f22 (restored state remains vector through generation; GPU-unvalidated)
 Atomic full-reprocess hardening retained: f87b17ed9
 Peer-gather ordering patch reverted: 049375fbe
 Bounded-shadow source commit retained: aea3814b8
@@ -53,10 +77,10 @@ Commit `39e238985` implements the adaptive policy without process-global environ
 - both target and MTP draft contexts receive the scoped policy for exactly one restored decode view;
 - per-slot counters track exact restored prompt tokens and split mixed vector/tile views;
 - suffixes over 1/12, unsupported vector shapes, and restore failures use atomic clean tile reprocessing;
-- clean/initial/append/generation work retains normal FA selection;
+- clean/initial/full-reprocess work retains normal FA selection; once a sequence is restored, vector FA persists through post-decode, generation, task release, and active continuation until atomic clean rebuild;
 - AMD/model capability uses actual per-layer K/V head dimensions, not `embedding_length/head_count`;
 - 35B and 122B GGUF metadata both report K/V head dimension 256 and are eligible;
-- cancellation/release/prompt clear/LoRA/context lifecycle clears the per-slot counter through existing reset paths.
+- cancellation/release clears task-local suffix counting but preserves restored provenance while sequence memory remains; atomic prompt clear/full rebuild clears both.
 
 CPU validation:
 
@@ -88,6 +112,17 @@ Staged GPU validation:
 ```
 
 The focused fault reproduction used no broad synchronization or gather-order experiment.
+
+Full replay attempt with prompt-only vector policy:
+
+```text
+requests 0–10: completed
+request 11: 643-token restored vector suffix completed
+then timeout before generation completion; manual shutdown
+no persisted kernel record for PID 24952
+```
+
+This invalidated the prompt-only policy and led to `8f1b64f22`, which keeps restored state vector through post-decode and generation.
 
 Subagent status: a requested three-agent read-only audit on 2026-07-21 failed before launch because the local `pi-subagents` runtime could not resolve `typebox/compile`. No child modified files or produced findings.
 
