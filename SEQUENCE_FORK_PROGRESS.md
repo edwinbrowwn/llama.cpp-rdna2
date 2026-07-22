@@ -7,7 +7,8 @@ Last updated: 2026-07-20
 ```text
 Production branch: exp-gpu-sampling @ 1a3578dd6 (safe AMD checkpoint disable)
 Experimental branch: exp-sequence-fork
-Experimental safety head: 049375fbe (peer-gather ordering patch reverted)
+Experimental safety head: f87b17ed9 (atomic full-reprocess transition; GPU-unvalidated)
+Peer-gather ordering patch reverted: 049375fbe
 Bounded-shadow source commit retained: aea3814b8
 Previous diagnostic checkpoint: 0a4a268df
 Experimental worktree: ~/llama-cpp-sequence-fork
@@ -57,7 +58,9 @@ Recovered evidence and safety status:
 - Therefore TOP_K was an asynchronous observation point in the earlier 62k failure, not a proven origin. The focused run passed because synchronization changed timing.
 - Experimental patch `16565727c` was reverted by `049375fbe` before any further workload.
 - Do **not** rerun the full replay. Production branch `exp-gpu-sampling @ 1a3578dd6` was not modified.
-- Next work is offline analysis of the GPU page-faulting TCP read and unified-KV/FA physical layout at the deep full-reprocess transition.
+- Offline audit found that `decision=full-reprocess` discarded only the shadow and did not itself force `n_past=0` or clear the active sequence; it depended on later generic checkpoint heuristics. This violated the intended safe-fallback semantics and left shared cells live across the transition.
+- Experimental fix `f87b17ed9` makes full reprocess atomic: synchronize target/draft, clear active and shadow state plus prompt checkpoints, set `n_past=n_past_common=0`, then rebuild. Server build, CPU sequence-fork cycles, and recurrent rollback tests pass.
+- `f87b17ed9` has **not** been GPU-tested. Do not run another full replay without a separately approved, bounded validation plan.
 
 ## Long-Context Fault Investigation
 
@@ -74,7 +77,7 @@ Proven sequence:
 7. The immediately following full 122B replay page-faulted at the request-12 deep full-reprocess transition and required manual shutdown. This disproved the claimed localization: the TOP_K sync point was not the originating operation.
 8. `16565727c` is reverted by `049375fbe`. No GPU validation was run after the revert.
 
-The correct next action is offline source/layout analysis—not another GPU toggle or replay.
+Offline source analysis produced atomic full-reprocess fix `f87b17ed9`. It is CPU-tested but deliberately GPU-unvalidated after the manual-shutdown incident. No further workload should be launched in this iteration.
 
 ## Goal
 
@@ -210,7 +213,7 @@ The first prototype should use these existing operations without server changes.
   - 35B full 34-request replay passes with graph replay disabled.
   - 122B requests 0–20 previously passed with bounded rollback: 19 shadow restores, one clean reprocess, zero faults.
   - Peer-gather ordering experiment `16565727c` is reverted by `049375fbe`.
-  - Do not rerun; analyze unified-KV/FA allocation and physical-span transition offline.
+  - Atomic full-reprocess fix `f87b17ed9` is build/CPU-tested only; GPU validation remains explicitly deferred.
 - [x] Multimodal projector loaded for text-only exact shadow restore.
 - [x] Same-image exact shadow restore lifecycle completed without faults.
 - [ ] Image embeddings are still recomputed after restore; shadow memory currently preserves model sequence state, not cached mmproj chunk embeddings.
