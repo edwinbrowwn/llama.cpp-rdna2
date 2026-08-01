@@ -54,6 +54,7 @@ int main(int argc, char ** argv) {
     auto context_params = llama_context_default_params();
     context_params.n_ctx = 16;
     context_params.n_batch = 16;
+    context_params.embeddings_nextn = true;
     context_params.ctx_other = target_context;
     llama_context * context = llama_init_from_model(model, context_params);
 
@@ -64,6 +65,47 @@ int main(int argc, char ** argv) {
     const bool expected = argc == 3;
     const bool reached_graph = context != nullptr;
     if (reached_graph == expected && expected) {
+        const int32_t n_handoff = 5;
+        const int32_t n_embd_inp = llama_model_n_embd_inp(model);
+        llama_batch enc = llama_batch_init(n_handoff, n_embd_inp, 1);
+        for (int32_t i = 0; i < n_handoff * n_embd_inp; ++i) {
+            enc.embd[i] = (i % 17 - 8) * 0.001f;
+        }
+        enc.n_tokens = n_handoff;
+        if (llama_encode(context, enc) != 0 || llama_get_embeddings_nextn(context) == nullptr) {
+            std::fprintf(stderr, "DSpark encoder handoff failed\n");
+            llama_batch_free(enc);
+            if (context) llama_free(context);
+            if (target_context) llama_free(target_context);
+            if (target_model) llama_model_free(target_model);
+            llama_model_free(model);
+            llama_backend_free();
+            return 1;
+        }
+        llama_batch inject = llama_batch_init(n_handoff, llama_model_n_embd(model), 1);
+        std::memcpy(inject.embd, llama_get_embeddings_nextn(context),
+                (size_t) n_handoff * llama_model_n_embd(model) * sizeof(float));
+        for (int32_t i = 0; i < n_handoff; ++i) {
+            inject.pos[i] = i;
+            inject.n_seq_id[i] = 1;
+            inject.seq_id[i][0] = 0;
+            inject.logits[i] = false;
+        }
+        inject.n_tokens = n_handoff;
+        if (llama_decode(context, inject) != 0) {
+            std::fprintf(stderr, "DSpark injected decoder handoff failed\n");
+            llama_batch_free(inject);
+            llama_batch_free(enc);
+            if (context) llama_free(context);
+            if (target_context) llama_free(target_context);
+            if (target_model) llama_model_free(target_model);
+            llama_model_free(model);
+            llama_backend_free();
+            return 1;
+        }
+        llama_batch_free(inject);
+        llama_batch_free(enc);
+
         constexpr int32_t n_block = 5;
         llama_batch batch = llama_batch_init(n_block, 0, 1);
         const llama_vocab * vocab = llama_model_get_vocab(target_model);
