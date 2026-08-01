@@ -1264,9 +1264,18 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                         break;
                     }
 
+                    if (getenv("LLAMA_DSV4_TRACE")) {
+                        LOG_WRN("DSV4 trace: sample begin seq=%d i=%d idx=%d\n", seq_id, i, idx);
+                    }
                     common_sampler_sample(smpl, ctx_dft, idx, true);
+                    if (getenv("LLAMA_DSV4_TRACE")) {
+                        LOG_WRN("DSV4 trace: sample end seq=%d i=%d\n", seq_id, i);
+                    }
 
                     const auto * cur_p = common_sampler_get_candidates(smpl, true);
+                    if (getenv("LLAMA_DSV4_TRACE")) {
+                        LOG_WRN("DSV4 trace: candidates seq=%d i=%d size=%zu\n", seq_id, i, cur_p ? cur_p->size : 0);
+                    }
 
                     for (int k = 0; k < std::min(3, (int) cur_p->size); ++k) {
                         LOG_DBG(" - seq_id %d, draft candidate %3d, pos %3d: %6d (%8.3f) '%s'\n",
