@@ -63,6 +63,25 @@ int main(int argc, char ** argv) {
     // tensors and its official three-layer recipe.
     const bool expected = argc == 3;
     const bool reached_graph = context != nullptr;
+    if (reached_graph == expected && expected) {
+        llama_batch batch = llama_batch_init(1, 0, 1);
+        batch.token[0] = 0;
+        batch.pos[0] = 0;
+        batch.n_seq_id[0] = 1;
+        batch.seq_id[0][0] = 0;
+        batch.logits[0] = false;
+        const int rc = llama_decode(context, batch);
+        llama_batch_free(batch);
+        if (rc != 0) {
+            std::fprintf(stderr, "DSpark decoder graph execution failed rc=%d\n", rc);
+            if (context) llama_free(context);
+            if (target_context) llama_free(target_context);
+            if (target_model) llama_model_free(target_model);
+            llama_model_free(model);
+            llama_backend_free();
+            return 1;
+        }
+    }
     if (reached_graph != expected) {
         std::fprintf(stderr, "unexpected DSpark graph construction result (got=%d expected=%d)\n",
                 (int) reached_graph, (int) expected);
