@@ -402,6 +402,9 @@ llama_model_deepseek4_dspark_draft::graph<false>::graph(
     ggml_tensor * inpL = ggml_reshape_3d(ctx0, inp, n_embd, 1, n_tokens);
     inpL = ggml_repeat_4d(ctx0, inpL, n_embd, hc, n_tokens, 1);
 
+    const char * pin_env = getenv("GGML_DSPARK_PIN_OUTPUTS");
+    const bool pin_layer_outputs = pin_env != nullptr && pin_env[0] != '0';
+
     for (int il = 0; il < n_layer; ++il) {
         const auto & layer = model.layers[il];
         ggml_tensor * residual = inpL;
@@ -431,13 +434,16 @@ llama_model_deepseek4_dspark_draft::graph<false>::graph(
         cur = dspark_hc_pre(*this, inpL, layer.hc_ffn_fn,
                 layer.hc_ffn_scale, layer.hc_ffn_base, &post, &combine, il);
 
-        // Keep the residual and hyperconnection tensors on the graph explicitly.
-        // Without these roots the scheduler may assign the final layer operation
-        // to the next layer backend, which can hang small GPU batches during
-        // speculative decoder execution.
-        ggml_build_forward_expand(gf, residual);
-        ggml_build_forward_expand(gf, post);
-        ggml_build_forward_expand(gf, combine);
+        // Optionally keep the residual and hyperconnection tensors on the graph
+        // explicitly.  Pinning them as roots was a workaround for a scheduler
+        // hang on small GPU batches, but it forces extra graph splits and
+        // cross-device syncs for a layer-split draft.  Re-enable with
+        // GGML_DSPARK_PIN_OUTPUTS=1 if the hang reappears.
+        if (pin_layer_outputs) {
+            ggml_build_forward_expand(gf, residual);
+            ggml_build_forward_expand(gf, post);
+            ggml_build_forward_expand(gf, combine);
+        }
 
         cur = build_norm(cur, layer.ffn_norm, nullptr, LLM_NORM_RMS, il);
         ggml_tensor * moe = build_moe_ffn(cur, layer.ffn_gate_inp,
