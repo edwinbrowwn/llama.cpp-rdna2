@@ -134,6 +134,12 @@ struct common_sampler {
 
         const llama_model * model = llama_get_model(ctx);
         const llama_vocab * vocab = llama_model_get_vocab(model);
+        // Official DSpark drafts do not carry a vocabulary; their context
+        // shares the target model through ctx_other.
+        if (llama_vocab_n_tokens(vocab) == 0 && llama_get_ctx_other(ctx) != nullptr) {
+            model = llama_get_model(llama_get_ctx_other(ctx));
+            vocab = llama_model_get_vocab(model);
+        }
 
         const int n_vocab = llama_vocab_n_tokens(vocab);
 
