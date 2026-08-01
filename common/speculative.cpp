@@ -2380,7 +2380,7 @@ common_speculative_init_result::common_speculative_init_result(
     // split intact while placing the draft by layers across the same devices;
     // otherwise the whole ~10 GiB draft is mirrored onto one GPU.
     const bool has_dspark = std::find(params.speculative.types.begin(),
-            params.speculative.types.end(), COMMON_SPECULATIVE_TYPE_DSPARK) !=
+            params.speculative.types.end(), COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK) !=
             params.speculative.types.end();
     if (has_dspark && mparams.split_mode == LLAMA_SPLIT_MODE_TENSOR) {
         mparams.split_mode = LLAMA_SPLIT_MODE_LAYER;
