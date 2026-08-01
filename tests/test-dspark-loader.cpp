@@ -70,6 +70,7 @@ int main(int argc, char ** argv) {
         batch.n_seq_id[0] = 1;
         batch.seq_id[0][0] = 0;
         batch.logits[0] = false;
+        batch.n_tokens = 1;
         const int rc = llama_decode(context, batch);
         llama_batch_free(batch);
         if (rc != 0) {
