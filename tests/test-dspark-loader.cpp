@@ -39,8 +39,8 @@ int main(int argc, char ** argv) {
             return 1;
         }
         auto target_params = llama_context_default_params();
-        target_params.n_ctx = 1;
-        target_params.n_batch = 1;
+        target_params.n_ctx = 16;
+        target_params.n_batch = 16;
         target_context = llama_init_from_model(target_model, target_params);
         if (target_context == nullptr) {
             std::fprintf(stderr, "target context initialization failed\n");
@@ -52,8 +52,8 @@ int main(int argc, char ** argv) {
     }
 
     auto context_params = llama_context_default_params();
-    context_params.n_ctx = 1;
-    context_params.n_batch = 1;
+    context_params.n_ctx = 16;
+    context_params.n_batch = 16;
     context_params.ctx_other = target_context;
     llama_context * context = llama_init_from_model(model, context_params);
 
@@ -64,7 +64,8 @@ int main(int argc, char ** argv) {
     const bool expected = argc == 3;
     const bool reached_graph = context != nullptr;
     if (reached_graph == expected && expected) {
-        llama_batch batch = llama_batch_init(1, 0, 1);
+        constexpr int32_t n_block = 5;
+        llama_batch batch = llama_batch_init(n_block, 0, 1);
         const llama_vocab * vocab = llama_model_get_vocab(target_model);
         const llama_token token = llama_vocab_bos(vocab);
         if (token == LLAMA_TOKEN_NULL) {
@@ -77,12 +78,14 @@ int main(int argc, char ** argv) {
             llama_backend_free();
             return 1;
         }
-        batch.token[0] = token;
-        batch.pos[0] = 0;
-        batch.n_seq_id[0] = 1;
-        batch.seq_id[0][0] = 0;
-        batch.logits[0] = false;
-        batch.n_tokens = 1;
+        for (int32_t i = 0; i < n_block; ++i) {
+            batch.token[i] = token;
+            batch.pos[i] = i;
+            batch.n_seq_id[i] = 1;
+            batch.seq_id[i][0] = 0;
+            batch.logits[i] = i == n_block - 1;
+        }
+        batch.n_tokens = n_block;
         const int rc = llama_decode(context, batch);
         llama_batch_free(batch);
         if (rc != 0) {
