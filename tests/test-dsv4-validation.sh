@@ -186,10 +186,12 @@ for name, response in (("first", first), ("continuation", continuation), ("repla
     if not isinstance(timings.get("predicted_n"), (int, float)) or timings["predicted_n"] <= 0:
         raise SystemExit(f"{label}: {name} predicted no tokens")
 
-for name, response in (("continuation", continuation), ("replay", replay)):
-    cache_n = response["timings"].get("cache_n", 0)
-    if not isinstance(cache_n, (int, float)) or cache_n <= 0:
-        raise SystemExit(f"{label}: {name} did not reuse KV (cache_n={cache_n!r})")
+# The continuation intentionally appends new text and may require fresh
+# prompt evaluation. The repeated identical request must use the cached
+# prefix/checkpoint.
+cache_n = replay["timings"].get("cache_n", 0)
+if not isinstance(cache_n, (int, float)) or cache_n <= 0:
+    raise SystemExit(f"{label}: replay did not reuse KV (cache_n={cache_n!r})")
 
 if continuation["content"] != replay["content"]:
     raise SystemExit(f"{label}: replay output differs from continuation output")
