@@ -72,6 +72,10 @@ int main(int argc, char ** argv) {
         for (int32_t i = 0; i < n_handoff * n_embd_inp; ++i) {
             enc.embd[i] = (i % 17 - 8) * 0.001f;
         }
+        for (int32_t i = 0; i < n_handoff; ++i) {
+            enc.n_seq_id[i] = 1;
+            enc.seq_id[i][0] = 0;
+        }
         enc.n_tokens = n_handoff;
         if (llama_encode(context, enc) != 0 || llama_get_embeddings_nextn(context) == nullptr) {
             std::fprintf(stderr, "DSpark encoder handoff failed\n");
