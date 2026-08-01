@@ -25,12 +25,17 @@ void llama_model_deepseek4_dspark_draft::load_hparams(llama_model_loader & ml) {
         !ml.get_key("dspark.markov_rank", markov_rank) || markov_rank == 0) {
         throw std::runtime_error("DeepSeek-V4 DSpark drafter requires dspark.layer_count, dspark.block_size, and dspark.markov_rank");
     }
-    if (!ml.get_arr(LLM_KV_DSPARK_TARGET_LAYER_IDS, target_layer_ids) || target_layer_ids.size() != layer_count) {
-        throw std::runtime_error("DeepSeek-V4 DSpark drafter requires dspark.target_layer_ids matching dspark.layer_count");
+    if (layer_count != 3 || !ml.get_arr(LLM_KV_DSPARK_TARGET_LAYER_IDS, target_layer_ids) ||
+            target_layer_ids.size() != layer_count ||
+            target_layer_ids[0] != 40 || target_layer_ids[1] != 41 || target_layer_ids[2] != 42) {
+        throw std::runtime_error("DeepSeek-V4 DSpark drafter requires target layers [40,41,42]");
     }
 
+    // The official artifact has no embedding vocabulary.  Its encoder input is
+    // the concatenation of the three hidden states captured from the target.
     hparams.n_ctx_train = 1;
     hparams.n_embd = 4096;
+    hparams.n_embd_inp_enc_impl = layer_count * hparams.n_embd;
     hparams.n_layer_all = layer_count;
     hparams.n_expert = 256;
     hparams.n_expert_used = 8;
@@ -133,6 +138,56 @@ void llama_model_deepseek4_dspark_draft::load_arch_tensors(llama_model_loader & 
     }
 }
 
-std::unique_ptr<llm_graph_context> llama_model_deepseek4_dspark_draft::build_arch_graph(const llm_graph_params &) const {
-    throw std::runtime_error("DeepSeek-V4 DSpark drafter graph is not implemented: loader boundary reached after loading dspark.* tensors");
+std::unique_ptr<llm_graph_context> llama_model_deepseek4_dspark_draft::build_arch_graph(const llm_graph_params & params) const {
+    switch (params.gtype) {
+        case LLM_GRAPH_TYPE_ENCODER:
+            return std::make_unique<graph<true>>(*this, params);
+        case LLM_GRAPH_TYPE_DEFAULT:
+        case LLM_GRAPH_TYPE_DECODER:
+            return std::make_unique<graph<false>>(*this, params);
+        default:
+            GGML_ABORT("invalid DeepSeek-V4 DSpark graph type");
+    }
+}
+
+template <>
+ggml_tensor * llama_model_deepseek4_dspark_draft::graph<true>::build_inp_embd_enc() const {
+    // The caller supplies target hidden states in target-layer order [40,41,42],
+    // matching the existing DFlash/EAGLE encoder input convention.
+    auto inp_target = std::make_unique<llm_graph_input_embd>(hparams.n_embd_inp_enc());
+    inp_target->embd = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, hparams.n_embd_inp_enc(), n_tokens);
+    ggml_set_input(inp_target->embd);
+
+    ggml_tensor * cur = inp_target->embd;
+    cb(cur, "dspark_target_hidden", -1);
+    res->add_input(std::move(inp_target));
+    return cur;
+}
+
+template <>
+llama_model_deepseek4_dspark_draft::graph<true>::graph(
+        const llama_model & model, const llm_graph_params & params) : llm_graph_context(params) {
+    ggml_tensor * cur = build_inp_embd_enc();
+
+    // Official DSpark: main_proj [3*4096,4096] followed by main_norm.
+    cur = build_lora_mm(model.fc, cur);
+    cb(cur, "dspark_main_proj", -1);
+    cur = build_norm(cur, model.output_norm_enc, nullptr, LLM_NORM_RMS, -1);
+    cb(cur, "dspark_main_norm", -1);
+
+    ggml_set_output(cur);
+    res->t_h_nextn = cur;
+    ggml_build_forward_expand(gf, cur);
+}
+
+template <>
+llama_model_deepseek4_dspark_draft::graph<false>::graph(
+        const llama_model & model, const llm_graph_params & params) : llm_graph_context(params) {
+    GGML_UNUSED(model);
+    // Do not substitute a Qwen/DFlash decoder here.  The official decoder needs
+    // target-model token/output sharing plus DeepSeek-V4 compressed/raw KV-cache
+    // state for q_a/q_b, wkv, and the three decoder layers.  Until that interface
+    // is available, refusing construction is safer than dropping those weights.
+    throw std::runtime_error(
+            "DeepSeek-V4 DSpark decoder requires target hidden-state and DeepSeek-V4 KV-cache integration");
 }

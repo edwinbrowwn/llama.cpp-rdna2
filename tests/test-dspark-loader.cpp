@@ -1,4 +1,5 @@
 #include "llama.h"
+#include "../src/llama-ext.h"
 
 #include <cstdio>
 
@@ -18,8 +19,20 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    // Loading and tensor namespace mapping must succeed.  Context construction
-    // is the first honest graph boundary for this slice and must fail explicitly.
+    // The official artifact captures exactly these target layers.  This also
+    // proves the loader/data boundary is not silently accepting a different
+    // feature ordering.
+    const int32_t * target_layers = llama_model_target_layer_ids(model);
+    if (llama_model_target_layer_ids_n(model) != 3 || target_layers == nullptr ||
+            target_layers[0] != 40 || target_layers[1] != 41 || target_layers[2] != 42) {
+        std::fprintf(stderr, "DeepSeek-V4 DSpark target-layer boundary mismatch\n");
+        llama_model_free(model);
+        llama_backend_free();
+        return 1;
+    }
+
+    // Decoder construction is intentionally an explicit boundary: target
+    // hidden-state handoff and DeepSeek-V4 KV-cache wiring are not complete.
     auto context_params = llama_context_default_params();
     context_params.n_ctx = 1;
     context_params.n_batch = 1;

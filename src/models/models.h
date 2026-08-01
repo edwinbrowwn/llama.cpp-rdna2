@@ -1271,8 +1271,15 @@ struct llama_model_deepseek4_dspark_draft : public llama_model_base {
     void load_arch_hparams(llama_model_loader & ml) override;
     void load_arch_tensors(llama_model_loader & ml) override;
 
-    // The dedicated loader boundary is complete; the V4 DSpark graph is not yet
-    // implemented and must fail explicitly rather than pretending to infer.
+    // The encoder graph consumes the three target hidden states.  The decoder
+    // remains an explicit boundary until its DeepSeek-V4 cache wiring is in place.
+    template <bool is_enc>
+    struct graph : public llm_graph_context {
+        graph(const llama_model & model, const llm_graph_params & params);
+
+        ggml_tensor * build_inp_embd_enc() const;
+    };
+
     std::unique_ptr<llm_graph_context> build_arch_graph(const llm_graph_params & params) const override;
 };
 
