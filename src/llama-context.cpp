@@ -1737,7 +1737,10 @@ int llama_context::decode(const llama_batch & batch_inp) {
         return -1;
     }
 
-    const auto & vocab   = model.vocab;
+    const llama_vocab & vocab =
+            model.arch == LLM_ARCH_DEEPSEEK4_DSPARK_DRAFT && cparams.ctx_other != nullptr
+            ? llama_get_model(cparams.ctx_other)->vocab
+            : model.vocab;
     const auto & hparams = model.hparams;
 
     const int64_t n_vocab = vocab.n_tokens();
