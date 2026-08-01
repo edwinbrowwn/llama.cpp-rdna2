@@ -989,6 +989,13 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
             this->params.n_max = std::min(this->params.n_max, n_draft_max);
             this->params.n_min = std::min(this->params.n_min, n_draft_max);
         }
+        if (is_dspark && this->params.n_max < n_draft_max) {
+            // The official DSpark artifact always decodes and scores the full
+            // trained block; a smaller n_max discards paid-for draft tokens.
+            LOG_WRN("%s: DSpark drafts cost a full block of %d tokens per round; "
+                    "n_max=%d wastes the remainder -- consider n_max=%d with p_min>0 for confidence pruning\n",
+                    __func__, block_size, this->params.n_max, n_draft_max);
+        }
 
         batch        = llama_batch_init(llama_n_batch(ctx_dft), 0,          n_seq);
         batch_inject = llama_batch_init(llama_n_batch(ctx_dft), n_embd_dec, n_seq);
