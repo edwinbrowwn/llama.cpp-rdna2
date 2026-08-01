@@ -961,15 +961,20 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         n_embd_dec    = llama_model_n_embd(model_dft);
         n_embd_enc    = (int32_t) target_layer_ids_n * n_embd_tgt;
 
-        // read the trained block size from the dflash.block_size metadata key
+        // Read DSpark's official metadata when using the DeepSeek-V4 artifact;
+        // legacy DFlash models keep the dflash.* keys and a tokenizer mask id.
         block_size = 16;
+        mask_token_id = llama_vocab_mask(llama_model_get_vocab(model_dft));
         {
             char buf[32] = {};
-            if (llama_model_meta_val_str(model_dft, "dflash.block_size", buf, sizeof(buf)) >= 0) {
+            const char * key = is_dspark ? "dspark.block_size" : "dflash.block_size";
+            if (llama_model_meta_val_str(model_dft, key, buf, sizeof(buf)) >= 0) {
                 block_size = std::atoi(buf);
             }
+            if (is_dspark && llama_model_meta_val_str(model_dft, "dspark.noise_token_id", buf, sizeof(buf)) >= 0) {
+                mask_token_id = std::atoi(buf);
+            }
         }
-        mask_token_id = llama_vocab_mask(llama_model_get_vocab(model_dft));
 
         LOG_INF("%s: adding speculative implementation '%s'\n", __func__, common_speculative_type_to_str(type).c_str());
         LOG_INF("%s: - n_max=%d, n_min=%d, p_min=%.2f\n", __func__, this->params.n_max, this->params.n_min, this->params.p_min);
@@ -984,6 +989,13 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
             this->params.n_max = std::min(this->params.n_max, n_draft_max);
             this->params.n_min = std::min(this->params.n_min, n_draft_max);
         }
+        if (is_dspark && this->params.n_max < n_draft_max) {
+            // The official DSpark artifact always decodes and scores the full
+            // trained block; a smaller n_max discards paid-for draft tokens.
+            LOG_WRN("%s: DSpark drafts cost a full block of %d tokens per round; "
+                    "n_max=%d wastes the remainder -- consider n_max=%d with p_min>0 for confidence pruning\n",
+                    __func__, block_size, this->params.n_max, n_draft_max);
+        }
 
         batch        = llama_batch_init(llama_n_batch(ctx_dft), 0,          n_seq);
         batch_inject = llama_batch_init(llama_n_batch(ctx_dft), n_embd_dec, n_seq);
@@ -994,7 +1006,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
             sparams.no_perf  = false;
             sparams.top_k    = 10;
             sparams.samplers = { COMMON_SAMPLER_TYPE_TOP_K };
-            s.reset(common_sampler_init(model_dft, sparams));
+            s.reset(common_sampler_init(is_dspark ? model_tgt : model_dft, sparams));
         }
 
         // turn on extraction of the target layers' input embeddings; an id equal
@@ -1177,6 +1189,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         // record where each block starts and its size
         std::vector<int32_t> i_block_beg(n_seq, -1);
         std::vector<int32_t> n_block    (n_seq,  0);
+        std::vector<int32_t> n_sample   (n_seq,  0);
 
         for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
             auto & dp = dparams[seq_id];
@@ -1190,9 +1203,14 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
 
             const int32_t n_draft = params.n_max;
 
-            const int32_t n_block_tokens = n_draft + (is_dspark ? 0 : 1);
+            // The official DSpark Markov head is built over the trained block
+            // size, not over the requested output limit.  Its strided views
+            // use one equal-size block per sequence.  Submit the complete
+            // block and truncate only when sampling the result.
+            const int32_t n_block_tokens = is_dspark ? block_size : n_draft + 1;
             i_block_beg[seq_id] = batch.n_tokens;
             n_block    [seq_id] = n_block_tokens;
+            n_sample   [seq_id] = n_draft;
             for (int32_t i = 0; i < n_block_tokens; ++i) {
                 common_batch_add(batch, i == 0 ? dp.id_last : mask_token_id, n + i, { seq_id }, true);
             }
@@ -1217,6 +1235,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
 
             const int32_t beg            = i_block_beg[seq_id];
             const int32_t n_block_tokens = n_block[seq_id];
+            const int32_t n_draft        = n_sample[seq_id];
 
             auto * smpl = smpls[seq_id].get();
 
@@ -1227,7 +1246,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                 // at the first position below the confidence threshold.
                 const float * conf = params.p_min > 0.0f ? llama_get_embeddings_nextn(ctx_dft) : nullptr;
 
-                for (int32_t i = 0; i < n_block_tokens; ++i) {
+                for (int32_t i = 0; i < n_draft; ++i) {
                     const int32_t idx = beg + i;
 
                     if (conf && conf[(size_t) idx * n_embd_dec] < params.p_min) {
@@ -2360,8 +2379,24 @@ common_speculative_init_result::common_speculative_init_result(
                                     COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params.speculative.types.end();
     GGML_ASSERT(has_draft || spec_mtp);
 
-    auto mparams = common_model_params_to_llama(params);
-    auto cparams = common_context_params_to_llama(params);
+    // Draft placement/cache/device flags live in speculative.draft; build the
+    // draft params from that sub-structure rather than inheriting target-only
+    // tensor overrides and paths.
+    common_params params_dft = common_base_params_to_speculative(params);
+    auto mparams = common_model_params_to_llama(params_dft);
+    auto cparams = common_context_params_to_llama(params_dft);
+
+    // The official DeepSeek-V4 DSpark auxiliary model has three large decoder
+    // layers but no tensor-parallel split metadata.  Keep the target's tensor
+    // split intact while placing the draft by layers across the same devices;
+    // otherwise the whole ~10 GiB draft is mirrored onto one GPU.
+    const bool has_dspark = std::find(params.speculative.types.begin(),
+            params.speculative.types.end(), COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK) !=
+            params.speculative.types.end();
+    if (has_dspark && mparams.split_mode == LLAMA_SPLIT_MODE_TENSOR) {
+        mparams.split_mode = LLAMA_SPLIT_MODE_LAYER;
+        LOG_INF("%s: using layer split for DSpark draft weights while retaining target tensor split\n", __func__);
+    }
 
     if (spec_mtp) {
         cparams.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
@@ -2374,10 +2409,10 @@ common_speculative_init_result::common_speculative_init_result(
 
     std::string model_path;
     if (has_draft) {
-        model_path = params.speculative.draft.mparams.path;
+        model_path = params_dft.model.path;
         LOG_INF("%s: loading draft model '%s'\n", __func__, model_path.c_str());
 
-        llama_model * model_dft = llama_model_load_from_file(params.model.path.c_str(), mparams);
+        llama_model * model_dft = llama_model_load_from_file(model_path.c_str(), mparams);
         if (model_dft == NULL) {
             LOG_ERR("%s: failed to load draft model, '%s'\n", __func__, model_path.c_str());
             return;

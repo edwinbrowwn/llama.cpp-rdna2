@@ -1106,6 +1106,19 @@ llama_model_deepseek4::graph::graph(const llama_model & model, const llm_graph_p
     cb(inpL, "hc_init", -1);
 
     for (int il = 0; il < n_layer; ++il) {
+        // Speculative drafters such as DSpark consume one 4096-wide feature
+        // row per selected target layer.  The target carries four HC streams;
+        // match ds4's reference path by taking their uniform mean rather than
+        // exporting the full [n_embd, hc, tokens] tensor.
+        ggml_tensor * layer_inp = nullptr;
+        for (int64_t ih = 0; ih < hc; ++ih) {
+            ggml_tensor * stream = ggml_view_2d(ctx0, inpL, n_embd, n_tokens,
+                    inpL->nb[2], ih * inpL->nb[1]);
+            stream = ggml_scale(ctx0, stream, 1.0f / (float) hc);
+            layer_inp = layer_inp ? ggml_add(ctx0, layer_inp, stream) : stream;
+        }
+        res->t_layer_inp[il] = layer_inp;
+        ggml_build_forward_expand(gf, layer_inp);
         ggml_tensor * residual = inpL;
         ggml_tensor * post = nullptr;
         ggml_tensor * comb = nullptr;

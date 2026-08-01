@@ -152,7 +152,8 @@ llama_context::llama_context(
         cparams.ctx_other = params.ctx_other;
     }
 
-    if (model.arch == LLM_ARCH_EAGLE3 || model.arch == LLM_ARCH_DFLASH) {
+    if (model.arch == LLM_ARCH_EAGLE3 || model.arch == LLM_ARCH_DFLASH ||
+            model.arch == LLM_ARCH_DEEPSEEK4_DSPARK_DRAFT) {
         if (model.tok_embd == nullptr || model.output == nullptr) {
             if (params.ctx_other == nullptr) {
                 throw std::runtime_error(model.arch_name() + " requires ctx_other to be set (this warning is normal during memory fitting)");
@@ -467,7 +468,11 @@ llama_context::llama_context(
 
     // Initialize the full vocabulary token ids for backend samplers.
     {
-        const int n_vocab = model.vocab.n_tokens();
+        const llama_vocab & vocab =
+                model.arch == LLM_ARCH_DEEPSEEK4_DSPARK_DRAFT && cparams.ctx_other != nullptr
+                ? llama_get_model(cparams.ctx_other)->vocab
+                : model.vocab;
+        const int n_vocab = vocab.n_tokens();
 
         sampling.token_ids_full_vocab.resize(n_vocab);
         for (int i = 0; i < n_vocab; ++i) {
@@ -882,7 +887,11 @@ float * llama_context::get_logits_ith(int32_t i) {
         }
 
         const int64_t j = output_resolve_row(i);
-        return logits.data + j*model.vocab.n_tokens();
+        const llama_vocab & vocab =
+                model.arch == LLM_ARCH_DEEPSEEK4_DSPARK_DRAFT && cparams.ctx_other != nullptr
+                ? llama_get_model(cparams.ctx_other)->vocab
+                : model.vocab;
+        return logits.data + j*vocab.n_tokens();
     } catch (const std::exception & err) {
         LLAMA_LOG_ERROR("%s: invalid logits id %d, reason: %s\n", __func__, i, err.what());
 #ifndef NDEBUG
@@ -1427,10 +1436,14 @@ int llama_context::encode(const llama_batch & batch_inp) {
 
     // eagle3/DFlash: features as encoder input, and non-draft paths fall back to model's input dim
     const int64_t n_embd = hparams.n_embd_inp_enc();
-    const int64_t n_vocab = model.vocab.n_tokens();
+    const llama_vocab & vocab =
+            model.arch == LLM_ARCH_DEEPSEEK4_DSPARK_DRAFT && cparams.ctx_other != nullptr
+            ? llama_get_model(cparams.ctx_other)->vocab
+            : model.vocab;
+    const int64_t n_vocab = vocab.n_tokens();
 
     // note: during encode, we always pass the full sequence starting from pos = 0
-    if (!balloc->init(batch_inp, model.vocab, nullptr, n_embd, cparams.kv_unified ? LLAMA_MAX_SEQ : cparams.n_seq_max, true)) {
+    if (!balloc->init(batch_inp, vocab, nullptr, n_embd, cparams.kv_unified ? LLAMA_MAX_SEQ : cparams.n_seq_max, true)) {
         LLAMA_LOG_ERROR("%s: failed to initialize batch\n", __func__);
         return -1;
     }
@@ -1736,7 +1749,10 @@ int llama_context::decode(const llama_batch & batch_inp) {
         return -1;
     }
 
-    const auto & vocab   = model.vocab;
+    const llama_vocab & vocab =
+            model.arch == LLM_ARCH_DEEPSEEK4_DSPARK_DRAFT && cparams.ctx_other != nullptr
+            ? llama_get_model(cparams.ctx_other)->vocab
+            : model.vocab;
     const auto & hparams = model.hparams;
 
     const int64_t n_vocab = vocab.n_tokens();
@@ -2110,7 +2126,10 @@ int llama_context::decode(const llama_batch & batch_inp) {
 
 uint32_t llama_context::output_reserve(int32_t n_outputs) {
     const auto & hparams = model.hparams;
-    const auto & vocab   = model.vocab;
+    const llama_vocab & vocab =
+            model.arch == LLM_ARCH_DEEPSEEK4_DSPARK_DRAFT && cparams.ctx_other != nullptr
+            ? llama_get_model(cparams.ctx_other)->vocab
+            : model.vocab;
 
     const int64_t n_outputs_max = std::max<int64_t>(n_outputs, n_seq_max());
 
@@ -2299,7 +2318,11 @@ void llama_context::extract_layer_inputs(const llm_graph_result * res, size_t to
 }
 
 void llama_context::output_reorder() {
-    const uint64_t n_vocab = model.vocab.n_tokens();
+    const llama_vocab & vocab =
+            model.arch == LLM_ARCH_DEEPSEEK4_DSPARK_DRAFT && cparams.ctx_other != nullptr
+            ? llama_get_model(cparams.ctx_other)->vocab
+            : model.vocab;
+    const uint64_t n_vocab = vocab.n_tokens();
     const uint64_t n_embd  = model.hparams.n_embd;
 
     for (size_t s = 0; s < output_swaps.size(); ++s) {
@@ -2375,6 +2398,7 @@ uint32_t llama_context::graph_max_nodes(uint32_t n_tokens) const {
         model.arch == LLM_ARCH_QWEN35 ||
         model.arch == LLM_ARCH_QWEN35MOE ||
         model.arch == LLM_ARCH_DEEPSEEK4 ||
+        model.arch == LLM_ARCH_DEEPSEEK4_DSPARK_DRAFT ||
         model.arch == LLM_ARCH_NANBEIGE ||
         model.arch == LLM_ARCH_MINIMAX_M3) {
         return std::max<uint32_t>(n_tokens * 40, 32u * model.n_tensors());
@@ -3577,6 +3601,22 @@ llama_context * llama_init_from_model(
         }
     }
 
+    if ((model->hparams.is_mla() || model->arch == LLM_ARCH_DEEPSEEK4) && params.type_k != params.type_v) {
+        LLAMA_LOG_ERROR("%s: model does not support different K (%s) and V (%s) cache types\n", __func__, ggml_type_name(params.type_k), ggml_type_name(params.type_v));
+        return nullptr;
+    }
+
+    if (ggml_is_quantized(params.type_v) && params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_ENABLED) {
+        if (params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_AUTO) {
+            LLAMA_LOG_INFO("%s: enabling flash_attn since it is required for quantized V cache\n", __func__);
+            params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
+        }
+        if (params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_DISABLED) {
+            LLAMA_LOG_ERROR("%s: quantized V cache requires flash_attn to be enabled\n", __func__);
+            return nullptr;
+        }
+    }
+
     if (params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED && ggml_is_quantized(params.type_k)) {
         const uint32_t blck_size = ggml_blck_size(params.type_k);
         for (uint32_t il = 0; il < model->hparams.n_layer(); ++il) {
@@ -3597,11 +3637,6 @@ llama_context * llama_init_from_model(
                 return nullptr;
             }
         }
-    }
-
-    if (ggml_is_quantized(params.type_v) && params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_DISABLED) {
-        LLAMA_LOG_ERROR("%s: V cache quantization requires flash_attn\n", __func__);
-        return nullptr;
     }
 
     if (params.pooling_type != LLAMA_POOLING_TYPE_UNSPECIFIED &&
