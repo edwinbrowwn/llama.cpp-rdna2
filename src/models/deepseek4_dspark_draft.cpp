@@ -353,6 +353,15 @@ llama_model_deepseek4_dspark_draft::graph<false>::graph(
         residual = inpL;
         cur = dspark_hc_pre(*this, inpL, layer.hc_ffn_fn,
                 layer.hc_ffn_scale, layer.hc_ffn_base, &post, &combine, il);
+
+        // Keep the residual and hyperconnection tensors on the graph explicitly.
+        // Without these roots the scheduler may assign the final layer operation
+        // to the next layer backend, which can hang small GPU batches during
+        // speculative decoder execution.
+        ggml_build_forward_expand(gf, residual);
+        ggml_build_forward_expand(gf, post);
+        ggml_build_forward_expand(gf, combine);
+
         cur = build_norm(cur, layer.ffn_norm, nullptr, LLM_NORM_RMS, il);
         ggml_tensor * moe = build_moe_ffn(cur, layer.ffn_gate_inp,
                 layer.ffn_up_exps, layer.ffn_gate_exps, layer.ffn_down_exps,
@@ -379,6 +388,7 @@ llama_model_deepseek4_dspark_draft::graph<false>::graph(
             return out;
         }();
         inpL = build_cvec(inpL, il);
+        cb(inpL, "l_last", il);
     }
 
     ggml_tensor * flat = ggml_reshape_2d(ctx0, inpL, n_embd * hc, n_tokens);
