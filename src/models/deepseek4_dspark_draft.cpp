@@ -255,8 +255,9 @@ static ggml_tensor * dspark_hc_pre(llm_graph_context & g, ggml_tensor * x,
         ggml_tensor * xh = ggml_view_2d(g.ctx0, x, g.n_embd, nt, x->nb[2], ih * x->nb[1]);
         ggml_tensor * ph = ggml_view_2d(g.ctx0, pre, 1, nt, pre->nb[1], ih * pre->nb[0]);
         ggml_tensor * cur = ggml_mul(g.ctx0, xh, ph);
-        ggml_tensor * cur3 = ggml_reshape_3d(g.ctx0, cur, g.n_embd, 1, nt);
-        out = out ? ggml_concat(g.ctx0, out, cur3, 1) : cur3;
+        // HC pre contracts the stream axis before the transformer block.  The
+        // post/combine path expands the block output back to all streams.
+        out = out ? ggml_add(g.ctx0, out, cur) : cur;
     }
     return out;
 }
