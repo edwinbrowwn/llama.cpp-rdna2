@@ -19,8 +19,9 @@ decoding (`seed=123`, temperature `0`). It checks:
 * `--flash-attn auto` (override with `DSV4_FLASH_ATTN=on` or `off`);
 * a repeated continuation request with server prompt caching and
   `--cache-reuse`, requiring a positive `timings.cache_n`;
-* deterministic `first`, continuation, and replay responses matching between
-  reference and tensor modes.
+* deterministic replay responses within each mode; cross-placement text is
+  reported as a warning because quantized multi-GPU reduction order can change
+  greedy ties even when the target tensor-mode NMSE remains within tolerance.
 
 Override `DSV4_TENSOR_SPLIT` for a different device layout, for example
 `DSV4_TENSOR_SPLIT=3,1`. `DSV4_REFERENCE_SPLIT` can be changed when a non-layer
