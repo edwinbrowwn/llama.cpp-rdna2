@@ -131,7 +131,7 @@ def main() -> int:
 
     imatrix = args.imatrix or args.report.with_suffix(".imatrix.gguf")
     if not imatrix.exists():
-        binary = args.imatrix_bin or args.model.parent.parent.parent / "llama.cpp-rdna2/build/bin/llama-imatrix"
+        binary = args.imatrix_bin or Path(__file__).resolve().parents[1] / "build/bin/llama-imatrix"
         if not binary.exists():
             binary = Path("llama-imatrix")
         command = [str(binary), "-m", str(args.model), "-f", str(args.prompts), "-o", str(imatrix),
