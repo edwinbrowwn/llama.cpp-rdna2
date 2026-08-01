@@ -73,6 +73,7 @@ int main(int argc, char ** argv) {
             enc.embd[i] = (i % 17 - 8) * 0.001f;
         }
         for (int32_t i = 0; i < n_handoff; ++i) {
+            enc.pos[i] = i;
             enc.n_seq_id[i] = 1;
             enc.seq_id[i][0] = 0;
         }
