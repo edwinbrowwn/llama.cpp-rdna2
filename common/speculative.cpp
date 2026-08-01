@@ -1141,7 +1141,13 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                     /*.logits   =*/ nullptr,
                 };
 
+                if (getenv("LLAMA_DSV4_TRACE")) {
+                    LOG_WRN("DSV4 trace: encode begin rows=%d offset=%d\n", (int) n_chunk, (int) offset);
+                }
                 int32_t rc = llama_encode(ctx_dft, enc_batch);
+                if (getenv("LLAMA_DSV4_TRACE")) {
+                    LOG_WRN("DSV4 trace: encode end rc=%d\n", rc);
+                }
                 if (rc != 0) {
                     LOG_ERR("%s: llama_encode(ctx_dft) failed rc=%d (n_tokens=%d, offset=%d)\n",
                             __func__, rc, (int) n_chunk, (int) offset);
@@ -1161,7 +1167,13 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                     batch_inject.seq_id[i][0] = seq_id;
                     batch_inject.logits[i]    = false;
                 }
+                if (getenv("LLAMA_DSV4_TRACE")) {
+                    LOG_WRN("DSV4 trace: inject decode begin rows=%d\n", (int) n_chunk);
+                }
                 rc = llama_decode(ctx_dft, batch_inject);
+                if (getenv("LLAMA_DSV4_TRACE")) {
+                    LOG_WRN("DSV4 trace: inject decode end rc=%d\n", rc);
+                }
                 if (rc != 0) {
                     LOG_ERR("%s: llama_decode(ctx_dft) failed rc=%d (n_tokens=%d, offset=%d)\n",
                             __func__, rc, (int) n_chunk, (int) offset);
@@ -1214,7 +1226,13 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         }
 
         // decode all sequence's noise block in a single batch
+        if (getenv("LLAMA_DSV4_TRACE")) {
+            LOG_WRN("DSV4 trace: draft decode begin rows=%d n_past=%d\n", batch.n_tokens, (int) dparams[0].n_past);
+        }
         int ret = llama_decode(ctx_dft, batch);
+        if (getenv("LLAMA_DSV4_TRACE")) {
+            LOG_WRN("DSV4 trace: draft decode end rc=%d\n", ret);
+        }
         if (ret != 0) {
             LOG_WRN("%s: llama_decode returned %d\n", __func__, ret);
             return;
