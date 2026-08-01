@@ -229,6 +229,24 @@ static ggml_tensor * dspark_hc_pre(llm_graph_context & g, ggml_tensor * x,
                     dspark_view_1d(g.ctx0, base, hc * hc, 2 * hc));
     comb = ggml_reshape_3d(g.ctx0, comb, hc, hc, nt);
     comb = ggml_soft_max(g.ctx0, comb);
+    ggml_tensor * eps = ggml_new_tensor_1d(g.ctx0, GGML_TYPE_F32, 1);
+    eps = ggml_fill(g.ctx0, eps, g.hparams.dsv4_hc_eps);
+    comb = ggml_add(g.ctx0, comb, eps);
+    auto norm_cols = [&]() {
+        ggml_tensor * trans = ggml_cont(g.ctx0, ggml_permute(g.ctx0, comb, 1, 0, 2, 3));
+        ggml_tensor * sum = ggml_add(g.ctx0, ggml_sum_rows(g.ctx0, trans), eps);
+        sum = ggml_permute(g.ctx0, sum, 1, 0, 2, 3);
+        comb = ggml_div(g.ctx0, comb, sum);
+    };
+    auto norm_rows = [&]() {
+        ggml_tensor * sum = ggml_add(g.ctx0, ggml_sum_rows(g.ctx0, comb), eps);
+        comb = ggml_div(g.ctx0, comb, sum);
+    };
+    norm_cols();
+    for (uint32_t i = 1; i < g.hparams.dsv4_hc_sinkhorn_iters; ++i) {
+        norm_rows();
+        norm_cols();
+    }
     *combine = comb;
 
     GGML_ASSERT(fn->ne[1] == mix_dim);
