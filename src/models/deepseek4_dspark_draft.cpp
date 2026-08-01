@@ -386,6 +386,12 @@ llama_model_deepseek4_dspark_draft::graph<false>::graph(
         target_output = target->output;
         GGML_ASSERT(target_output != nullptr && "DSpark decoder requires target output projection");
     }
+    // A tensor-split target exposes a mirrored output projection through the
+    // Meta buffer. The draft scheduler uses concrete device backends, so use
+    // one full mirrored copy rather than passing the Meta wrapper into it.
+    if (target_output->buffer != nullptr && ggml_backend_buffer_is_meta(target_output->buffer)) {
+        target_output = ggml_backend_meta_get_simple_tensor(target_output, 0);
+    }
 
     ggml_tensor * inp = build_inp_embd(target->tok_embd);
     ggml_tensor * pos = build_inp_pos();
