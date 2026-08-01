@@ -3,6 +3,8 @@
 
 #include <cstdio>
 #include <cstring>
+#include <chrono>
+#include <cstdlib>
 
 int main(int argc, char ** argv) {
     if (argc != 2 && argc != 3) {
@@ -137,6 +139,24 @@ int main(int argc, char ** argv) {
         const int rc = llama_decode(context, batch);
         if (rc == 0) {
             llama_synchronize(context);
+            // optional micro-benchmark: DSPARK_BENCH_ITERS block decodes
+            if (const char * it_env = getenv("DSPARK_BENCH_ITERS")) {
+                const int iters = atoi(it_env);
+                if (iters > 0) {
+                    llama_memory_t mem = llama_get_memory(context);
+                    int n_fail = 0;
+                    const auto t0 = std::chrono::steady_clock::now();
+                    for (int it = 0; it < iters; ++it) {
+                        llama_memory_seq_rm(mem, 0, n_handoff, -1);
+                        if (llama_decode(context, batch) != 0) n_fail++;
+                        llama_synchronize(context);
+                    }
+                    const auto t1 = std::chrono::steady_clock::now();
+                    const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+                    std::fprintf(stderr, "DSPARK_BENCH: %d block decodes (%d tokens) in %.1f ms -> %.2f ms/round (%d failed)\n",
+                            iters, n_block, ms, ms / iters, n_fail);
+                }
+            }
             for (int32_t i = 0; i < n_block; ++i) {
                 if (llama_get_logits_ith(context, i) == nullptr) {
                     std::fprintf(stderr, "DSpark decoder produced no logits at row %d\n", i);
