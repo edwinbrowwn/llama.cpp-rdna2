@@ -153,7 +153,7 @@ llama_context::llama_context(
     }
 
     if (model.arch == LLM_ARCH_EAGLE3 || model.arch == LLM_ARCH_DFLASH ||
-            model.arch == LLM_ARCH_DEEPSEEK_V4_FLASH_DSPARK_DRAFT) {
+            model.arch == LLM_ARCH_DEEPSEEK4_DSPARK_DRAFT) {
         if (model.tok_embd == nullptr || model.output == nullptr) {
             if (params.ctx_other == nullptr) {
                 throw std::runtime_error(model.arch_name() + " requires ctx_other to be set (this warning is normal during memory fitting)");
