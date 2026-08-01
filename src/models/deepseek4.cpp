@@ -1118,6 +1118,7 @@ llama_model_deepseek4::graph::graph(const llama_model & model, const llm_graph_p
             layer_inp = layer_inp ? ggml_add(ctx0, layer_inp, stream) : stream;
         }
         res->t_layer_inp[il] = layer_inp;
+        ggml_build_forward_expand(gf, layer_inp);
         ggml_tensor * residual = inpL;
         ggml_tensor * post = nullptr;
         ggml_tensor * comb = nullptr;
