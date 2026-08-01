@@ -1106,6 +1106,9 @@ llama_model_deepseek4::graph::graph(const llama_model & model, const llm_graph_p
     cb(inpL, "hc_init", -1);
 
     for (int il = 0; il < n_layer; ++il) {
+        // Speculative drafters such as DSpark consume the input hidden state
+        // of selected target layers (before that layer's HC/attention block).
+        res->t_layer_inp[il] = inpL;
         ggml_tensor * residual = inpL;
         ggml_tensor * post = nullptr;
         ggml_tensor * comb = nullptr;
