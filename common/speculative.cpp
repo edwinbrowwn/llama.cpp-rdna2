@@ -1182,6 +1182,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         // record where each block starts and its size
         std::vector<int32_t> i_block_beg(n_seq, -1);
         std::vector<int32_t> n_block    (n_seq,  0);
+        std::vector<int32_t> n_sample   (n_seq,  0);
 
         for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
             auto & dp = dparams[seq_id];
@@ -1195,9 +1196,14 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
 
             const int32_t n_draft = params.n_max;
 
-            const int32_t n_block_tokens = n_draft + (is_dspark ? 0 : 1);
+            // The official DSpark Markov head is built over the trained block
+            // size, not over the requested output limit.  Its strided views
+            // use one equal-size block per sequence.  Submit the complete
+            // block and truncate only when sampling the result.
+            const int32_t n_block_tokens = is_dspark ? block_size : n_draft + 1;
             i_block_beg[seq_id] = batch.n_tokens;
             n_block    [seq_id] = n_block_tokens;
+            n_sample   [seq_id] = n_draft;
             for (int32_t i = 0; i < n_block_tokens; ++i) {
                 common_batch_add(batch, i == 0 ? dp.id_last : mask_token_id, n + i, { seq_id }, true);
             }
@@ -1222,6 +1228,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
 
             const int32_t beg            = i_block_beg[seq_id];
             const int32_t n_block_tokens = n_block[seq_id];
+            const int32_t n_draft        = n_sample[seq_id];
 
             auto * smpl = smpls[seq_id].get();
 
@@ -1232,7 +1239,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                 // at the first position below the confidence threshold.
                 const float * conf = params.p_min > 0.0f ? llama_get_embeddings_nextn(ctx_dft) : nullptr;
 
-                for (int32_t i = 0; i < n_block_tokens; ++i) {
+                for (int32_t i = 0; i < n_draft; ++i) {
                     const int32_t idx = beg + i;
 
                     if (conf && conf[(size_t) idx * n_embd_dec] < params.p_min) {

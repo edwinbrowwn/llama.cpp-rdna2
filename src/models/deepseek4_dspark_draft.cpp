@@ -296,6 +296,72 @@ static ggml_tensor * dspark_attn(llm_graph_context & g, const llama_layer & laye
     return g.build_lora_mm(layer.wo_b, oa);
 }
 
+// Apply the official DSpark Markov and confidence heads to the decoder
+// logits.  The heads are block-oriented: each sequence contributes one
+// equal-size block, and the Markov chain conditions each position on the
+// anchor (or the previous greedy position) in that block.
+static void build_dspark_heads(llm_graph_context & g, const llama_model & model,
+        ggml_tensor * tokens, ggml_tensor * hidden) {
+    GGML_ASSERT(model.dspark_markov_w1 && model.dspark_markov_w2 && model.dspark_conf_proj);
+
+    ggml_context * ctx0 = g.ctx0;
+    ggml_tensor * base = g.res->t_logits;
+    const int64_t n_vocab = base->ne[0];
+    const int64_t n_tok   = base->ne[1];
+
+    auto it = model.gguf_kv.find("dspark.block_size");
+    GGML_ASSERT(it != model.gguf_kv.end() && "DSpark requires dspark.block_size metadata");
+    const int64_t block_size = std::stoll(it->second);
+    const int64_t n_blocks = g.ubatch.n_seqs_unq;
+    GGML_ASSERT(block_size > 0 && n_blocks > 0 && n_tok % n_blocks == 0 &&
+            "DSpark Markov head requires equal-size blocks");
+
+    const int64_t block_drafts = n_tok / n_blocks;
+    GGML_ASSERT(block_drafts <= block_size);
+
+    const size_t token_stride = (size_t) block_drafts * tokens->nb[0];
+    const size_t base_stride  = (size_t) block_drafts * base->nb[1];
+    ggml_tensor * prev = ggml_cont_1d(ctx0,
+            ggml_view_2d(ctx0, tokens, 1, n_blocks, token_stride, 0), n_blocks);
+
+    ggml_tensor * logits = nullptr;
+    ggml_tensor * confs = nullptr;
+    const int64_t rank = model.dspark_markov_w1->ne[0];
+    for (int64_t i = 0; i < block_drafts; ++i) {
+        ggml_tensor * w1_prev = ggml_get_rows(ctx0, model.dspark_markov_w1, prev);
+        ggml_tensor * bias = ggml_mul_mat(ctx0, model.dspark_markov_w2, w1_prev);
+        ggml_tensor * base_i = ggml_view_2d(ctx0, base, n_vocab, n_blocks,
+                base_stride, i * base->nb[1]);
+        ggml_tensor * col = ggml_add(ctx0, base_i, bias);
+        logits = logits ? ggml_concat(ctx0, logits, col, 1) : col;
+
+        ggml_tensor * hidden_i = ggml_view_2d(ctx0, hidden, hidden->ne[0], n_blocks,
+                (size_t) block_drafts * hidden->nb[1], i * hidden->nb[1]);
+        ggml_tensor * feat = ggml_concat(ctx0, ggml_cont(ctx0, hidden_i), w1_prev, 0);
+        GGML_ASSERT(feat->ne[0] == g.n_embd + rank);
+        ggml_tensor * conf = ggml_sigmoid(ctx0, ggml_mul_mat(ctx0, model.dspark_conf_proj, feat));
+        confs = confs ? ggml_concat(ctx0, confs, conf, 1) : conf;
+
+        if (i + 1 < block_drafts) {
+            prev = ggml_argmax(ctx0, col);
+        }
+    }
+
+    logits = ggml_reshape_3d(ctx0, logits, n_vocab, n_blocks, block_drafts);
+    logits = ggml_reshape_2d(ctx0,
+            ggml_cont(ctx0, ggml_permute(ctx0, logits, 0, 2, 1, 3)), n_vocab, n_tok);
+    g.res->t_logits = logits;
+    ggml_build_forward_expand(g.gf, logits);
+
+    confs = ggml_reshape_3d(ctx0, confs, 1, n_blocks, block_drafts);
+    confs = ggml_reshape_2d(ctx0,
+            ggml_cont(ctx0, ggml_permute(ctx0, confs, 0, 2, 1, 3)), 1, n_tok);
+    // Reuse the nextn API's fixed hidden-width storage for per-position
+    // confidence, as the generic DFlash implementation does.
+    g.res->t_h_nextn = ggml_repeat(ctx0, confs, hidden);
+    ggml_build_forward_expand(g.gf, g.res->t_h_nextn);
+}
+
 template <>
 llama_model_deepseek4_dspark_draft::graph<false>::graph(
         const llama_model & model, const llm_graph_params & params) : llm_graph_context(params) {
@@ -411,4 +477,13 @@ llama_model_deepseek4_dspark_draft::graph<false>::graph(
     res->t_embd = head;
     res->t_logits = build_lora_mm(const_cast<ggml_tensor *>(target_output), head);
     ggml_build_forward_expand(gf, res->t_logits);
+
+    // The official artifact's Markov/confidence tensors are part of the
+    // decoder contract, rather than optional metadata.  They also require
+    // the complete trained block submitted by common/speculative.cpp.
+    // KV-cache injection supplies hidden embeddings without token ids; do not
+    // feed its uninitialized token input into the Markov get-rows chain.
+    if (ubatch.token != nullptr) {
+        build_dspark_heads(*this, model, res->get_inp_tokens(), head);
+    }
 }
