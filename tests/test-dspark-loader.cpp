@@ -2,6 +2,7 @@
 #include "../src/llama-ext.h"
 
 #include <cstdio>
+#include <cstring>
 
 int main(int argc, char ** argv) {
     if (argc != 2 && argc != 3) {
@@ -54,7 +55,6 @@ int main(int argc, char ** argv) {
     auto context_params = llama_context_default_params();
     context_params.n_ctx = 16;
     context_params.n_batch = 16;
-    context_params.embeddings_nextn = true;
     context_params.ctx_other = target_context;
     llama_context * context = llama_init_from_model(model, context_params);
 
@@ -65,6 +65,7 @@ int main(int argc, char ** argv) {
     const bool expected = argc == 3;
     const bool reached_graph = context != nullptr;
     if (reached_graph == expected && expected) {
+        llama_set_embeddings_nextn(context, true, true);
         const int32_t n_handoff = 5;
         const int32_t n_embd_inp = llama_model_n_embd_inp(model);
         llama_batch enc = llama_batch_init(n_handoff, n_embd_inp, 1);
