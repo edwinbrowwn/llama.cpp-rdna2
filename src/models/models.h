@@ -1271,8 +1271,8 @@ struct llama_model_deepseek4_dspark_draft : public llama_model_base {
     void load_arch_hparams(llama_model_loader & ml) override;
     void load_arch_tensors(llama_model_loader & ml) override;
 
-    // The encoder graph consumes the three target hidden states.  The decoder
-    // remains an explicit boundary until its DeepSeek-V4 cache wiring is in place.
+    // The encoder consumes the three target hidden states; the decoder resolves
+    // token/output tensors from ctx_other because this artifact has no vocab.
     template <bool is_enc>
     struct graph : public llm_graph_context {
         graph(const llama_model & model, const llm_graph_params & params);

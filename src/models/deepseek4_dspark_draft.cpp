@@ -3,6 +3,7 @@
 #include "llama-model-loader.h"
 
 #include <algorithm>
+#include <cmath>
 #include <stdexcept>
 
 void llama_model_deepseek4_dspark_draft::load_hparams(llama_model_loader & ml) {
@@ -51,6 +52,11 @@ void llama_model_deepseek4_dspark_draft::load_hparams(llama_model_loader & ml) {
     hparams.dsv4_o_group_count = 8;
     hparams.dsv4_o_lora_rank = 1024;
     hparams.dsv4_hc_mult = 4;
+    hparams.dsv4_hc_sinkhorn_iters = 4;
+    hparams.dsv4_hc_eps = 1e-6f;
+    hparams.expert_weights_norm = true;
+    hparams.expert_weights_scale = 1.0f;
+    hparams.expert_gating_func = LLAMA_EXPERT_GATING_FUNC_TYPE_SQRT_SOFTPLUS;
     hparams.f_norm_rms_eps = 1e-5f;
     hparams.rope_freq_base_train = 10000.0f;
     hparams.rope_freq_scale_train = 1.0f;
@@ -180,14 +186,200 @@ llama_model_deepseek4_dspark_draft::graph<true>::graph(
     ggml_build_forward_expand(gf, cur);
 }
 
+static size_t dspark_row_offset(const ggml_tensor * t, int64_t row) {
+    return ggml_row_size(t->type, row);
+}
+
+static ggml_tensor * dspark_view_1d(ggml_context * ctx, ggml_tensor * t, int64_t n, int64_t row) {
+    return ggml_view_1d(ctx, t, n, dspark_row_offset(t, row));
+}
+
+static ggml_tensor * dspark_view_2d(ggml_context * ctx, ggml_tensor * t,
+        int64_t ne0, int64_t ne1, int64_t row) {
+    return ggml_view_2d(ctx, t, ne0, ne1, t->nb[1], dspark_row_offset(t, row));
+}
+
+// Keep the official DSpark hyperconnection contract in graph form.  In
+// particular, do not replace this with a plain residual add: the [pre, post,
+// combine] tensors are learned parameters and are part of the drafter recipe.
+static ggml_tensor * dspark_hc_pre(llm_graph_context & g, ggml_tensor * x,
+        ggml_tensor * fn, ggml_tensor * scale, ggml_tensor * base,
+        ggml_tensor ** post, ggml_tensor ** combine, int il) {
+    const int64_t hc = g.hparams.dsv4_hc_mult;
+    const int64_t nt = x->ne[2];
+    const int64_t hc_dim = hc * g.n_embd;
+    const int64_t mix_dim = (2 + hc) * hc;
+
+    ggml_tensor * flat = ggml_reshape_2d(g.ctx0, x, hc_dim, nt);
+    ggml_tensor * mixes = ggml_mul_mat(g.ctx0, fn, ggml_rms_norm(g.ctx0, flat, g.norm_rms_eps));
+    g.cb(mixes, "dspark_hc_mixes", il);
+
+    ggml_tensor * pre = dspark_view_2d(g.ctx0, mixes, hc, nt, 0);
+    pre = ggml_add(g.ctx0, ggml_mul(g.ctx0, pre, dspark_view_1d(g.ctx0, scale, 1, 0)),
+                   dspark_view_1d(g.ctx0, base, hc, 0));
+    pre = ggml_scale_bias(g.ctx0, ggml_sigmoid(g.ctx0, pre), 1.0f, g.hparams.dsv4_hc_eps);
+
+    *post = dspark_view_2d(g.ctx0, mixes, hc, nt, hc);
+    *post = ggml_add(g.ctx0, ggml_mul(g.ctx0, *post, dspark_view_1d(g.ctx0, scale, 1, 1)),
+                     dspark_view_1d(g.ctx0, base, hc, hc));
+    *post = ggml_scale(g.ctx0, ggml_sigmoid(g.ctx0, *post), 2.0f);
+
+    ggml_tensor * comb = dspark_view_2d(g.ctx0, mixes, hc * hc, nt, 2 * hc);
+    comb = ggml_add(g.ctx0, ggml_mul(g.ctx0, comb, dspark_view_1d(g.ctx0, scale, 1, 2)),
+                    dspark_view_1d(g.ctx0, base, hc * hc, 2 * hc));
+    comb = ggml_reshape_3d(g.ctx0, comb, hc, hc, nt);
+    comb = ggml_soft_max(g.ctx0, comb);
+    *combine = comb;
+
+    GGML_ASSERT(fn->ne[1] == mix_dim);
+    ggml_tensor * out = nullptr;
+    for (int64_t ih = 0; ih < hc; ++ih) {
+        ggml_tensor * xh = ggml_view_2d(g.ctx0, x, g.n_embd, nt, x->nb[2], ih * x->nb[1]);
+        ggml_tensor * ph = ggml_view_2d(g.ctx0, pre, 1, nt, pre->nb[1], ih * pre->nb[0]);
+        ggml_tensor * cur = ggml_mul(g.ctx0, xh, ph);
+        ggml_tensor * cur3 = ggml_reshape_3d(g.ctx0, cur, g.n_embd, 1, nt);
+        out = out ? ggml_concat(g.ctx0, out, cur3, 1) : cur3;
+    }
+    return out;
+}
+
+static ggml_tensor * dspark_attn(llm_graph_context & g, const llama_layer & layer,
+        llm_graph_input_attn_kv * inp_attn, ggml_tensor * x, ggml_tensor * pos, int il) {
+    const int64_t head = g.hparams.n_embd_head_k();
+    ggml_tensor * qa = g.build_lora_mm(layer.wq_a, x);
+    qa = g.build_norm(qa, layer.attn_q_a_norm, nullptr, LLM_NORM_RMS, il);
+    ggml_tensor * q = g.build_lora_mm(layer.wq_b, qa);
+    q = ggml_reshape_3d(g.ctx0, q, head, g.n_head, g.n_tokens);
+
+    ggml_tensor * kv = g.build_lora_mm(layer.wkv, x);
+    kv = g.build_norm(kv, layer.attn_kv_norm, nullptr, LLM_NORM_RMS, il);
+    ggml_tensor * k = ggml_reshape_3d(g.ctx0, kv, head, g.n_head_kv, g.n_tokens);
+    ggml_tensor * v = ggml_reshape_3d(g.ctx0, kv, head, g.n_head_kv, g.n_tokens);
+
+    q = ggml_rope_ext(g.ctx0, q, pos, nullptr, g.n_rot, g.rope_type, g.n_ctx_orig,
+            g.freq_base, g.freq_scale, g.ext_factor, g.attn_factor, g.beta_fast, g.beta_slow);
+    k = ggml_rope_ext(g.ctx0, k, pos, nullptr, g.n_rot, g.rope_type, g.n_ctx_orig,
+            g.freq_base, g.freq_scale, g.ext_factor, g.attn_factor, g.beta_fast, g.beta_slow);
+    ggml_tensor * out = g.build_attn(inp_attn, nullptr, nullptr, nullptr, q, k, v,
+            nullptr, layer.attn_sinks, nullptr, 1.0f / sqrtf(float(head)), il);
+
+    // DSpark uses grouped low-rank output projection, matching DeepSeek-V4's
+    // output_a/output_b contract (8 groups, rank 1024).
+    const int64_t groups = g.hparams.dsv4_o_group_count;
+    const int64_t rank = g.hparams.dsv4_o_lora_rank;
+    const int64_t group_dim = head * g.n_head / groups;
+    out = ggml_reshape_3d(g.ctx0, out, group_dim, groups, g.n_tokens);
+    out = ggml_permute(g.ctx0, out, 0, 2, 1, 3);
+    ggml_tensor * oa = ggml_mul_mat(g.ctx0,
+            ggml_reshape_3d(g.ctx0, layer.wo_a, layer.wo_a->ne[0], rank, groups), out);
+    oa = ggml_permute(g.ctx0, oa, 0, 2, 1, 3);
+    oa = ggml_cont_2d(g.ctx0, oa, rank * groups, g.n_tokens);
+    return g.build_lora_mm(layer.wo_b, oa);
+}
+
 template <>
 llama_model_deepseek4_dspark_draft::graph<false>::graph(
         const llama_model & model, const llm_graph_params & params) : llm_graph_context(params) {
-    GGML_UNUSED(model);
-    // Do not substitute a Qwen/DFlash decoder here.  The official decoder needs
-    // target-model token/output sharing plus DeepSeek-V4 compressed/raw KV-cache
-    // state for q_a/q_b, wkv, and the three decoder layers.  Until that interface
-    // is available, refusing construction is safer than dropping those weights.
-    throw std::runtime_error(
-            "DeepSeek-V4 DSpark decoder requires target hidden-state and DeepSeek-V4 KV-cache integration");
+    // The official drafter has no vocabulary.  build_inp_embd needs a real
+    // token matrix, so resolve it from the target context rather than creating
+    // a second (incorrect) vocabulary in the DSpark model.
+    const llama_model * target = &model;
+    if (target->tok_embd == nullptr) {
+        GGML_ASSERT(cparams.ctx_other != nullptr && "DSpark decoder requires ctx_other");
+        target = llama_get_model(cparams.ctx_other);
+        GGML_ASSERT(target != nullptr && target->tok_embd != nullptr &&
+                "DSpark decoder requires target token embeddings");
+    }
+    GGML_ASSERT(cparams.ctx_other != nullptr || model.output != nullptr);
+    const ggml_tensor * target_output = model.output;
+    if (target_output == nullptr) {
+        target_output = target->output;
+        GGML_ASSERT(target_output != nullptr && "DSpark decoder requires target output projection");
+    }
+
+    ggml_tensor * inp = build_inp_embd(target->tok_embd);
+    ggml_tensor * pos = build_inp_pos();
+    llm_graph_input_attn_kv * inp_attn = build_attn_inp_kv();
+    ggml_build_forward_expand(gf, inp_attn->self_kq_mask);
+
+    const int64_t hc = hparams.dsv4_hc_mult;
+    ggml_tensor * inpL = ggml_reshape_3d(ctx0, inp, n_embd, 1, n_tokens);
+    inpL = ggml_repeat_4d(ctx0, inpL, n_embd, hc, n_tokens, 1);
+
+    for (int il = 0; il < n_layer; ++il) {
+        const auto & layer = model.layers[il];
+        ggml_tensor * residual = inpL;
+        ggml_tensor * post = nullptr;
+        ggml_tensor * combine = nullptr;
+        ggml_tensor * cur = dspark_hc_pre(*this, inpL, layer.hc_attn_fn,
+                layer.hc_attn_scale, layer.hc_attn_base, &post, &combine, il);
+        cur = build_norm(cur, layer.attn_norm, nullptr, LLM_NORM_RMS, il);
+        cur = dspark_attn(*this, layer, inp_attn, cur, pos, il);
+        inpL = [&]() {
+            ggml_tensor * out = nullptr;
+            for (int64_t dst = 0; dst < hc; ++dst) {
+                ggml_tensor * p = ggml_view_2d(ctx0, post, 1, n_tokens, post->nb[1], dst * post->nb[0]);
+                ggml_tensor * z = ggml_mul(ctx0, cur, p);
+                for (int64_t src = 0; src < hc; ++src) {
+                    ggml_tensor * r = ggml_view_2d(ctx0, residual, n_embd, n_tokens, residual->nb[2], src * residual->nb[1]);
+                    ggml_tensor * c = ggml_view_2d(ctx0, combine, 1, n_tokens, combine->nb[2], dst * combine->nb[0] + src * combine->nb[1]);
+                    z = ggml_add(ctx0, z, ggml_mul(ctx0, r, c));
+                }
+                z = ggml_reshape_3d(ctx0, z, n_embd, 1, n_tokens);
+                out = out ? ggml_concat(ctx0, out, z, 1) : z;
+            }
+            return out;
+        }();
+
+        residual = inpL;
+        cur = dspark_hc_pre(*this, inpL, layer.hc_ffn_fn,
+                layer.hc_ffn_scale, layer.hc_ffn_base, &post, &combine, il);
+        cur = build_norm(cur, layer.ffn_norm, nullptr, LLM_NORM_RMS, il);
+        ggml_tensor * moe = build_moe_ffn(cur, layer.ffn_gate_inp,
+                layer.ffn_up_exps, layer.ffn_gate_exps, layer.ffn_down_exps,
+                layer.ffn_exp_probs_b, n_expert, n_expert_used, LLM_FFN_SILU,
+                hparams.expert_weights_norm, hparams.expert_weights_scale,
+                (llama_expert_gating_func_type) hparams.expert_gating_func, il);
+        ggml_tensor * shared = build_ffn(cur, layer.ffn_up_shexp, nullptr, nullptr,
+                layer.ffn_gate_shexp, nullptr, nullptr, layer.ffn_down_shexp,
+                nullptr, nullptr, nullptr, LLM_FFN_SILU, LLM_FFN_PAR, il);
+        cur = ggml_add(ctx0, moe, shared);
+        inpL = [&]() {
+            ggml_tensor * out = nullptr;
+            for (int64_t dst = 0; dst < hc; ++dst) {
+                ggml_tensor * p = ggml_view_2d(ctx0, post, 1, n_tokens, post->nb[1], dst * post->nb[0]);
+                ggml_tensor * z = ggml_mul(ctx0, cur, p);
+                for (int64_t src = 0; src < hc; ++src) {
+                    ggml_tensor * r = ggml_view_2d(ctx0, residual, n_embd, n_tokens, residual->nb[2], src * residual->nb[1]);
+                    ggml_tensor * c = ggml_view_2d(ctx0, combine, 1, n_tokens, combine->nb[2], dst * combine->nb[0] + src * combine->nb[1]);
+                    z = ggml_add(ctx0, z, ggml_mul(ctx0, r, c));
+                }
+                z = ggml_reshape_3d(ctx0, z, n_embd, 1, n_tokens);
+                out = out ? ggml_concat(ctx0, out, z, 1) : z;
+            }
+            return out;
+        }();
+        inpL = build_cvec(inpL, il);
+    }
+
+    ggml_tensor * flat = ggml_reshape_2d(ctx0, inpL, n_embd * hc, n_tokens);
+    ggml_tensor * mixes = ggml_mul_mat(ctx0, model.hc_head_fn,
+            ggml_rms_norm(ctx0, flat, norm_rms_eps));
+    ggml_tensor * head_pre = ggml_add(ctx0,
+            ggml_mul(ctx0, mixes, model.hc_head_scale), model.hc_head_base);
+    head_pre = ggml_scale_bias(ctx0, ggml_sigmoid(ctx0, head_pre), 1.0f, hparams.dsv4_hc_eps);
+    ggml_tensor * head = [&]() {
+        ggml_tensor * out = nullptr;
+        for (int64_t ih = 0; ih < hc; ++ih) {
+            ggml_tensor * xh = ggml_view_2d(ctx0, flat, n_embd, n_tokens, flat->nb[1], ih * n_embd);
+            ggml_tensor * wh = ggml_view_2d(ctx0, head_pre, 1, n_tokens, head_pre->nb[1], ih);
+            ggml_tensor * z = ggml_mul(ctx0, xh, wh);
+            out = out ? ggml_add(ctx0, out, z) : z;
+        }
+        return out;
+    }();
+    head = build_norm(head, model.output_norm, nullptr, LLM_NORM_RMS, -1);
+    res->t_embd = head;
+    res->t_logits = build_lora_mm(const_cast<ggml_tensor *>(target_output), head);
+    ggml_build_forward_expand(gf, res->t_logits);
 }
