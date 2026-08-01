@@ -22,6 +22,8 @@ Environment overrides:
   DSV4_PORT               first localhost port (default: 18080)
   DSV4_CTX_SIZE           context size (default: 4096)
   DSV4_N_PREDICT          generated tokens per request (default: 8)
+  DSV4_BATCH_SIZE         logical batch size (default: 32)
+  DSV4_UBATCH_SIZE        physical ubatch size (default: 32)
   DSV4_CACHE_REUSE        minimum cache-reuse chunk (default: 16)
 USAGE
 }
@@ -41,6 +43,8 @@ PARALLEL=${DSV4_PARALLEL:-1}
 BASE_PORT=${DSV4_PORT:-18080}
 CTX_SIZE=${DSV4_CTX_SIZE:-4096}
 N_PREDICT=${DSV4_N_PREDICT:-8}
+BATCH_SIZE=${DSV4_BATCH_SIZE:-32}
+UBATCH_SIZE=${DSV4_UBATCH_SIZE:-32}
 CACHE_REUSE=${DSV4_CACHE_REUSE:-16}
 DRAFT_MODEL=${DSV4_DRAFT_MODEL:-}
 SPEC_TYPE=${DSV4_SPEC_TYPE:-}
@@ -112,6 +116,8 @@ run_mode() {
         --host 127.0.0.1 \
         --port "$port" \
         --ctx-size "$CTX_SIZE" \
+        --batch-size "$BATCH_SIZE" \
+        --ubatch-size "$UBATCH_SIZE" \
         --parallel "$PARALLEL" \
         --seed 123 \
         --temp 0 \
