@@ -961,15 +961,20 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         n_embd_dec    = llama_model_n_embd(model_dft);
         n_embd_enc    = (int32_t) target_layer_ids_n * n_embd_tgt;
 
-        // read the trained block size from the dflash.block_size metadata key
+        // Read DSpark's official metadata when using the DeepSeek-V4 artifact;
+        // legacy DFlash models keep the dflash.* keys and a tokenizer mask id.
         block_size = 16;
+        mask_token_id = llama_vocab_mask(llama_model_get_vocab(model_dft));
         {
             char buf[32] = {};
-            if (llama_model_meta_val_str(model_dft, "dflash.block_size", buf, sizeof(buf)) >= 0) {
+            const char * key = is_dspark ? "dspark.block_size" : "dflash.block_size";
+            if (llama_model_meta_val_str(model_dft, key, buf, sizeof(buf)) >= 0) {
                 block_size = std::atoi(buf);
             }
+            if (is_dspark && llama_model_meta_val_str(model_dft, "dspark.noise_token_id", buf, sizeof(buf)) >= 0) {
+                mask_token_id = std::atoi(buf);
+            }
         }
-        mask_token_id = llama_vocab_mask(llama_model_get_vocab(model_dft));
 
         LOG_INF("%s: adding speculative implementation '%s'\n", __func__, common_speculative_type_to_str(type).c_str());
         LOG_INF("%s: - n_max=%d, n_min=%d, p_min=%.2f\n", __func__, this->params.n_max, this->params.n_min, this->params.p_min);
