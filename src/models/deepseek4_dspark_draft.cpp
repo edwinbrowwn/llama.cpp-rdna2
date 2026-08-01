@@ -317,7 +317,12 @@ static void build_dspark_heads(llm_graph_context & g, const llama_model & model,
             "DSpark Markov head requires equal-size blocks");
 
     const int64_t block_drafts = n_tok / n_blocks;
-    GGML_ASSERT(block_drafts <= block_size);
+    // Reserve graphs may use the full context/batch size rather than the
+    // trained DSpark block.  Keep base logits for that sizing pass; the
+    // Markov/confidence chain is rebuilt when the runtime block is <= block_size.
+    if (block_drafts > block_size) {
+        return;
+    }
 
     const size_t token_stride = (size_t) block_drafts * tokens->nb[0];
     const size_t base_stride  = (size_t) block_drafts * base->nb[1];
