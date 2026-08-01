@@ -454,6 +454,23 @@ static constexpr __host__ __device__ int calc_nwarps(ggml_type type, int ncols_d
                 return 1;
         }
     }
+    if (table_id == MMVQ_PARAMETERS_RDNA2) {
+        // RDNA2 (gfx1030), measured on a Radeon Pro V620 in the VRAM-bound regime
+        // (bench/bench-dsv4-rdna2.cu): Q8_0 and Q6_K gain ~4% from 4-warp blocks
+        // (K >= 2048); every other type performs best (or is untested) at 1 warp.
+        // Small-K matrices are redirected to rows_per_block=nwarps by the small_k
+        // path in should_use_small_k/calc_rows_per_block.
+        if (ncols_dst == 1) {
+            switch (type) {
+                case GGML_TYPE_Q8_0:
+                case GGML_TYPE_Q6_K:
+                    return 4;
+                default:
+                    return 1;
+            }
+        }
+        return 1;
+    }
     return 1;
 }
 
@@ -473,6 +490,10 @@ static constexpr __host__ __device__ int calc_rows_per_block(int ncols_dst, int 
             default:
                 return 1;
         }
+    }
+    if (table_id == MMVQ_PARAMETERS_RDNA2) {
+        // with nwarps > 1, give each warp its own row on small-K matrices
+        return small_k && ncols_dst == 1 ? nwarps : 1;
     }
     return 1;
 }
@@ -895,7 +916,9 @@ static void mul_mat_vec_q_switch_ncols_dst(
             }
         } else if ((ncols_dst == 1 && std::find(iq_slow_other.begin(), iq_slow_other.end(), type) != iq_slow_other.end()) ||
                 (is_nvidia_pascal_older && std::find(slow_pascal.begin(), slow_pascal.end(), type) != slow_pascal.end()) ||
-                GGML_CUDA_CC_IS_RDNA(cc)) {
+                (GGML_CUDA_CC_IS_RDNA(cc) && !GGML_CUDA_CC_IS_RDNA2(cc))) {
+            // RDNA2 opts into small_k: its Q8_0/Q6_K tables use nwarps=4 and small-K
+            // matrices (e.g. DSV4 wo_a/q_b) would otherwise run mostly-idle wide blocks
             use = false;
         }
 
