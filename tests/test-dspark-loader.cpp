@@ -128,7 +128,7 @@ int main(int argc, char ** argv) {
         }
         for (int32_t i = 0; i < n_block; ++i) {
             batch.token[i] = token;
-            batch.pos[i] = i;
+            batch.pos[i] = n_handoff + i;
             batch.n_seq_id[i] = 1;
             batch.seq_id[i][0] = 0;
             batch.logits[i] = i == n_block - 1;
