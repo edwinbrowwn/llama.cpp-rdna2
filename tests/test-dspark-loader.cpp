@@ -131,21 +131,23 @@ int main(int argc, char ** argv) {
             batch.pos[i] = n_handoff + i;
             batch.n_seq_id[i] = 1;
             batch.seq_id[i][0] = 0;
-            batch.logits[i] = i == n_block - 1;
+            batch.logits[i] = true;
         }
         batch.n_tokens = n_block;
         const int rc = llama_decode(context, batch);
         if (rc == 0) {
             llama_synchronize(context);
-            if (llama_get_logits_ith(context, n_block - 1) == nullptr) {
-                std::fprintf(stderr, "DSpark decoder produced no logits\n");
+            for (int32_t i = 0; i < n_block; ++i) {
+                if (llama_get_logits_ith(context, i) == nullptr) {
+                    std::fprintf(stderr, "DSpark decoder produced no logits at row %d\n", i);
                 llama_batch_free(batch);
                 if (context) llama_free(context);
                 if (target_context) llama_free(target_context);
                 if (target_model) llama_model_free(target_model);
                 llama_model_free(model);
                 llama_backend_free();
-                return 1;
+                    return 1;
+                }
             }
         }
         llama_batch_free(batch);
