@@ -887,7 +887,11 @@ float * llama_context::get_logits_ith(int32_t i) {
         }
 
         const int64_t j = output_resolve_row(i);
-        return logits.data + j*model.vocab.n_tokens();
+        const llama_vocab & vocab =
+                model.arch == LLM_ARCH_DEEPSEEK4_DSPARK_DRAFT && cparams.ctx_other != nullptr
+                ? llama_get_model(cparams.ctx_other)->vocab
+                : model.vocab;
+        return logits.data + j*vocab.n_tokens();
     } catch (const std::exception & err) {
         LLAMA_LOG_ERROR("%s: invalid logits id %d, reason: %s\n", __func__, i, err.what());
 #ifndef NDEBUG
