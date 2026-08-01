@@ -87,6 +87,19 @@ int main(int argc, char ** argv) {
         }
         batch.n_tokens = n_block;
         const int rc = llama_decode(context, batch);
+        if (rc == 0) {
+            llama_synchronize(context);
+            if (llama_get_logits_ith(context, n_block - 1) == nullptr) {
+                std::fprintf(stderr, "DSpark decoder produced no logits\n");
+                llama_batch_free(batch);
+                if (context) llama_free(context);
+                if (target_context) llama_free(target_context);
+                if (target_model) llama_model_free(target_model);
+                llama_model_free(model);
+                llama_backend_free();
+                return 1;
+            }
+        }
         llama_batch_free(batch);
         if (rc != 0) {
             std::fprintf(stderr, "DSpark decoder graph execution failed rc=%d\n", rc);
