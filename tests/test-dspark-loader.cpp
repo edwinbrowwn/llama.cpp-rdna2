@@ -65,7 +65,19 @@ int main(int argc, char ** argv) {
     const bool reached_graph = context != nullptr;
     if (reached_graph == expected && expected) {
         llama_batch batch = llama_batch_init(1, 0, 1);
-        batch.token[0] = 0;
+        const llama_vocab * vocab = llama_model_get_vocab(target_model);
+        const llama_token token = llama_vocab_bos(vocab);
+        if (token == LLAMA_TOKEN_NULL) {
+            std::fprintf(stderr, "target vocabulary has no BOS token\n");
+            llama_batch_free(batch);
+            if (context) llama_free(context);
+            if (target_context) llama_free(target_context);
+            if (target_model) llama_model_free(target_model);
+            llama_model_free(model);
+            llama_backend_free();
+            return 1;
+        }
+        batch.token[0] = token;
         batch.pos[0] = 0;
         batch.n_seq_id[0] = 1;
         batch.seq_id[0][0] = 0;
