@@ -2652,6 +2652,91 @@ struct test_rms_norm_mul_rope : public test_case {
     }
 };
 
+// DeepSeek V4 post-projection head path: RMSNorm over the full head,
+// optional norm weight, then rotate only the tail n_rot dimensions and
+// concatenate the unrotated prefix back with the rotated tail.  This mirrors
+// the q/kv layout in src/models/deepseek4.cpp and is intentionally separate
+// from the generic RMS_NORM_MUL_ROPE test above: the RoPE input is a tail view,
+// not the full normalized tensor.
+struct test_dsv4_q_norm_rope : public test_case {
+    const std::array<int64_t, 3> ne;
+    const int n_rot;
+    const float eps;
+    const bool weighted;
+    const int mode;
+
+    std::string op_desc(ggml_tensor * t) override {
+        GGML_UNUSED(t);
+        return "DSV4_Q_NORM_ROPE";
+    }
+
+    bool run_whole_graph() override { return true; }
+
+    std::string vars() override {
+        return VARS_TO_STR5(ne, n_rot, eps, weighted, mode);
+    }
+
+    test_dsv4_q_norm_rope(std::array<int64_t, 3> ne, int n_rot = 64,
+                          float eps = 1e-6f, bool weighted = false,
+                          int mode = GGML_ROPE_TYPE_NORMAL)
+        : ne(ne), n_rot(n_rot), eps(eps), weighted(weighted), mode(mode) {
+        GGML_ASSERT(ne[0] > n_rot && n_rot > 0 && (n_rot % 2) == 0);
+    }
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * a = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, ne[0], ne[1], ne[2]);
+        ggml_set_param(a);
+        ggml_set_name(a, "q_input");
+
+        ggml_tensor * pos = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, ne[2]);
+        ggml_set_name(pos, "q_positions");
+
+        ggml_tensor * norm = ggml_rms_norm(ctx, a, eps);
+        ggml_set_name(norm, "q_norm");
+
+        if (weighted) {
+            // Treat gamma as a model weight (a leaf, not a graph input).  This
+            // matches DSV4 layer norm weights and keeps it out of the compute-node
+            // sequence so the backend can inspect RMS_NORM -> MUL directly.
+            ggml_tensor * gamma = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, ne[0]);
+            ggml_set_name(gamma, "q_norm_weight");
+            norm = ggml_mul(ctx, norm, gamma);
+            ggml_set_name(norm, "q_norm_weighted");
+        }
+
+        const int64_t n_nope = ne[0] - n_rot;
+        ggml_tensor * nope = ggml_view_3d(ctx, norm, n_nope, ne[1], ne[2],
+                norm->nb[1], norm->nb[2], 0);
+        ggml_set_name(nope, "q_nope");
+
+        ggml_tensor * pe = ggml_view_3d(ctx, norm, n_rot, ne[1], ne[2],
+                norm->nb[1], norm->nb[2], ggml_row_size(norm->type, n_nope));
+        ggml_set_name(pe, "q_pe");
+
+        pe = ggml_rope_ext(ctx, pe, pos, nullptr, n_rot, mode, 0,
+                10000.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+        ggml_set_name(pe, "q_pe_rope");
+
+        ggml_tensor * out = ggml_concat(ctx, nope, pe, 0);
+        ggml_set_name(out, "q_norm_rope");
+        return out;
+    }
+
+    void initialize_tensors(ggml_context * ctx) override {
+        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != nullptr; t = ggml_get_next_tensor(ctx, t)) {
+            if (t->type == GGML_TYPE_I32) {
+                std::vector<int32_t> positions(ne[2]);
+                for (int64_t i = 0; i < ne[2]; ++i) {
+                    positions[i] = (int32_t) (i * 3 + 7);
+                }
+                ggml_backend_tensor_set(t, positions.data(), 0, positions.size() * sizeof(int32_t));
+            } else {
+                init_tensor_uniform(t, -2.0f, 2.0f);
+            }
+        }
+    }
+};
+
 // GGML_OP_ARGMAX
 struct test_argmax : public test_case {
     const ggml_type type;
@@ -8741,6 +8826,13 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
             test_cases.emplace_back(new test_rms_norm_mul_add(GGML_TYPE_F32, {n, 1, 1, 1}, 1e-6f, false, multi_add));
         }
         test_cases.emplace_back(new test_add_rms_norm(GGML_TYPE_F32, {n, 1, 1, 1}, 1e-6f, false));
+    }
+
+    for (int64_t nt : {1, 4, 16}) {
+        for (bool weighted : {false, true}) {
+            test_cases.emplace_back(new test_dsv4_q_norm_rope({512, 64, nt}, 64, 1e-6f, weighted, GGML_ROPE_TYPE_NORMAL));
+            test_cases.emplace_back(new test_dsv4_q_norm_rope({512, 1, nt}, 64, 1e-6f, weighted, GGML_ROPE_TYPE_NEOX));
+        }
     }
 
     for (auto multi_add : {false, true}) {
