@@ -240,7 +240,9 @@ void ggml_cuda_op_dsv4_hc_pre(ggml_backend_cuda_context & ctx, ggml_tensor * dst
     const int64_t hc       = x->ne[1];
     const int64_t n_tokens = x->ne[2];
 
-    const int block_size = 256;
+    const char * block_env = getenv("GGML_CUDA_DSV4_HC_PRE_BLOCK");
+    const int block_size = block_env ? atoi(block_env) : 256;
+    GGML_ASSERT(block_size == 128 || block_size == 256 || block_size == 512);
     const int64_t nr = n_embd * n_tokens;
     const dim3 block_dims(block_size, 1, 1);
     const dim3 grid_dims((nr + block_size - 1) / block_size, 1, 1);

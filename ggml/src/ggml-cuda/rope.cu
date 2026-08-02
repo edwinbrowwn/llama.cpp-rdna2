@@ -354,10 +354,11 @@ static void rope_norm_cuda(const T *            x,
                            const float *        freq_factors,
                            const int64_t *      row_indices,
                            const int            set_rows_stride,
+                           const int            block_size,
                            cudaStream_t         stream) {
     GGML_ASSERT(ne00 % 2 == 0);
-    const dim3 block_dims(1, CUDA_ROPE_BLOCK_SIZE, 1);
-    const int  n_blocks_x = (ne00 + 2 * CUDA_ROPE_BLOCK_SIZE - 1) / (2 * CUDA_ROPE_BLOCK_SIZE);
+    const dim3 block_dims(1, block_size, 1);
+    const int  n_blocks_x = (ne00 + 2 * block_size - 1) / (2 * block_size);
     const dim3 block_nums(nr, n_blocks_x, 1);
 
     const float theta_scale = powf(freq_base, -2.0f / n_dims);
@@ -396,10 +397,11 @@ static void rope_neox_cuda(const T *            x,
                            const float *        freq_factors,
                            const int64_t *      row_indices,
                            const int            set_rows_stride,
+                           const int            block_size,
                            cudaStream_t         stream) {
     GGML_ASSERT(ne00 % 2 == 0);
-    const dim3 block_dims(1, CUDA_ROPE_BLOCK_SIZE, 1);
-    const int  n_blocks_x = (ne00 + 2 * CUDA_ROPE_BLOCK_SIZE - 1) / (2 * CUDA_ROPE_BLOCK_SIZE);
+    const dim3 block_dims(1, block_size, 1);
+    const int  n_blocks_x = (ne00 + 2 * block_size - 1) / (2 * block_size);
     const dim3 block_nums(nr, n_blocks_x, 1);
 
     const float theta_scale = powf(freq_base, -2.0f / n_dims);
@@ -572,6 +574,18 @@ void ggml_cuda_op_rope_impl(ggml_backend_cuda_context & ctx,
 
     const bool is_neox = mode & GGML_ROPE_TYPE_NEOX;
     const bool is_mrope = mode & GGML_ROPE_TYPE_MROPE;
+
+    // DSV4 passes a 64-wide RoPE tail view (ne00 == n_dims == 64).  The
+    // generic 256-thread block leaves 224 threads idle in this case.  Keep
+    // the experiment opt-in until it is measured end-to-end.
+    int rope_block_size = CUDA_ROPE_BLOCK_SIZE;
+    if (ne00 == n_dims) {
+        if (const char * env = getenv("GGML_CUDA_DSV4_ROPE_BLOCK")) {
+            rope_block_size = atoi(env);
+            GGML_ASSERT(rope_block_size == 32 || rope_block_size == 64 ||
+                        rope_block_size == 128 || rope_block_size == 256);
+        }
+    }
     const bool is_imrope = mode == GGML_ROPE_TYPE_IMROPE;
     const bool is_vision = mode == GGML_ROPE_TYPE_VISION;
 
@@ -599,17 +613,17 @@ void ggml_cuda_op_rope_impl(ggml_backend_cuda_context & ctx,
             rope_neox_cuda<forward, float, float>((const float *) src0_d, (float *) dst_d, ne00, ne01, ne02, s01, s02,
                                                   s03, s1, s2, s3, n_dims, nr, pos, freq_scale, freq_base,
                                                   ext_factor, attn_factor, corr_dims, freq_factors, row_indices,
-                                                  set_rows_stride, stream);
+                                                  set_rows_stride, rope_block_size, stream);
         } else if (src0->type == GGML_TYPE_F32 && dst_type == GGML_TYPE_F16) {
             rope_neox_cuda<forward, float, half>((const float *) src0_d, (half *) dst_d, ne00, ne01, ne02, s01, s02,
                                                  s03, s1, s2, s3, n_dims, nr, pos, freq_scale, freq_base,
                                                  ext_factor, attn_factor, corr_dims, freq_factors, row_indices,
-                                                 set_rows_stride, stream);
+                                                 set_rows_stride, rope_block_size, stream);
         } else if (src0->type == GGML_TYPE_F16 && dst_type == GGML_TYPE_F16) {
             rope_neox_cuda<forward, half, half>((const half *) src0_d, (half *) dst_d, ne00, ne01, ne02, s01, s02,
                                                 s03, s1, s2, s3, n_dims, nr, pos, freq_scale, freq_base,
                                                 ext_factor, attn_factor, corr_dims, freq_factors, row_indices,
-                                                set_rows_stride, stream);
+                                                set_rows_stride, rope_block_size, stream);
         } else {
             GGML_ABORT("fatal error");
         }
@@ -642,17 +656,17 @@ void ggml_cuda_op_rope_impl(ggml_backend_cuda_context & ctx,
             rope_norm_cuda<forward, float, float>((const float *) src0_d, (float *) dst_d, ne00, ne01, ne02, s01, s02,
                                                   s03, s1, s2, s3, n_dims, nr, pos, freq_scale, freq_base,
                                                   ext_factor, attn_factor, corr_dims, freq_factors, row_indices,
-                                                  set_rows_stride, stream);
+                                                  set_rows_stride, rope_block_size, stream);
         } else if (src0->type == GGML_TYPE_F32 && dst_type == GGML_TYPE_F16) {
             rope_norm_cuda<forward, float, half>((const float *) src0_d, (half *) dst_d, ne00, ne01, ne02, s01, s02,
                                                  s03, s1, s2, s3, n_dims, nr, pos, freq_scale, freq_base,
                                                  ext_factor, attn_factor, corr_dims, freq_factors, row_indices,
-                                                 set_rows_stride, stream);
+                                                 set_rows_stride, rope_block_size, stream);
         } else if (src0->type == GGML_TYPE_F16 && dst_type == GGML_TYPE_F16) {
             rope_norm_cuda<forward, half, half>((const half *) src0_d, (half *) dst_d, ne00, ne01, ne02, s01, s02,
                                                 s03, s1, s2, s3, n_dims, nr, pos, freq_scale, freq_base,
                                                 ext_factor, attn_factor, corr_dims, freq_factors, row_indices,
-                                                set_rows_stride, stream);
+                                                set_rows_stride, rope_block_size, stream);
         } else {
             GGML_ABORT("fatal error");
         }
