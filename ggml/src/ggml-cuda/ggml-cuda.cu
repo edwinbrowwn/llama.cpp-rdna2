@@ -996,7 +996,18 @@ struct ggml_backend_cuda_comm_context {
 // tensors (bandwidth-bound), then converts back to FP32.
 static bool ggml_backend_cuda_comm_allreduce_nccl(
         ggml_backend_cuda_comm_context * comm_ctx, struct ggml_tensor ** tensors) {
+    static const bool trace = std::getenv("GGML_CUDA_TRACE_ALLREDUCE") != nullptr;
+    static int64_t trace_id = 0;
     const int64_t ne = ggml_nelements(tensors[0]);
+    if (trace) {
+        const bool force_fp32 = (tensors[0]->flags & GGML_TENSOR_FLAG_FORCE_FP32_ALLREDUCE) != 0;
+        std::fprintf(stderr, "AR_TRACE id=%lld ne=%lld bytes=%zu force_fp32=%d type=%d compute=",
+                     (long long) trace_id++, (long long) ne, ggml_nbytes(tensors[0]), (int) force_fp32, (int) tensors[0]->type);
+        for (size_t i = 0; i < comm_ctx->backends.size(); ++i) {
+            std::fprintf(stderr, "%d%s", (int) ((tensors[i]->flags & GGML_TENSOR_FLAG_COMPUTE) != 0), i + 1 == comm_ctx->backends.size() ? "" : ",");
+        }
+        std::fprintf(stderr, "\n");
+    }
     // FIXME the input of llm_graph_context::build_in_out_ids can produce a tensor with 0 elements if n_outputs == 0
     // This then causes a crash in this function
     if (ne == 0) {
