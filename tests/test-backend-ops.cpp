@@ -3970,6 +3970,49 @@ struct test_dsv4_hc_pre : public test_dsv4_hc {
     }
 };
 
+// Existing HC_PRE followed by the normal attention/FFN RMSNorm path.  The
+// model weights are leaves so this exercises the same graph adjacency that
+// production DSV4 gets (including the already-supported RMSNorm+weight fuse).
+struct test_dsv4_hc_pre_norm : public test_dsv4_hc {
+    const int64_t n_embd;
+    const int64_t n_tokens;
+
+    std::string op_desc(ggml_tensor * t) override {
+        GGML_UNUSED(t);
+        return "DSV4_HC_PRE_NORM";
+    }
+
+    bool run_whole_graph() override { return true; }
+
+    std::string vars() override {
+        return VARS_TO_STR2(n_embd, n_tokens);
+    }
+
+    test_dsv4_hc_pre_norm(int64_t n_embd = 4096, int64_t n_tokens = 1)
+        : n_embd(n_embd), n_tokens(n_tokens) {}
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * x = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, n_embd, hc, n_tokens);
+        ggml_set_name(x, "x");
+
+        ggml_tensor * weights = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, hc, n_tokens);
+        ggml_set_name(weights, "weights");
+
+        ggml_tensor * gamma = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_embd);
+        ggml_set_name(gamma, "norm_weight");
+
+        ggml_tensor * pre = ggml_dsv4_hc_pre(ctx, x, weights);
+        ggml_set_name(pre, "hc_pre");
+
+        ggml_tensor * norm = ggml_rms_norm(ctx, pre, 1e-6f);
+        ggml_set_name(norm, "norm");
+
+        ggml_tensor * out = ggml_mul(ctx, norm, gamma);
+        ggml_set_name(out, "out");
+        return out;
+    }
+};
+
 struct test_dsv4_hc_post : public test_dsv4_hc {
     const int64_t n_embd;
     const int64_t n_tokens;
@@ -8164,6 +8207,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_dsv4_hc_post(1, 1));
     test_cases.emplace_back(new test_dsv4_hc_post(31, 17));
     test_cases.emplace_back(new test_dsv4_hc_post(128, 257));
+
+    for (int64_t nt : {1, 4, 16}) {
+        test_cases.emplace_back(new test_dsv4_hc_pre_norm(4096, nt));
+    }
 
     // glu ops
     for (ggml_type type : {GGML_TYPE_F16, GGML_TYPE_F32}) {
