@@ -823,7 +823,11 @@ static void mul_mat_vec_q_moe_launch(
         const uint32_t ncols_dst, const uint32_t ids_stride,
         const int warp_size, const int nchannels_dst, cudaStream_t stream) {
 
-    constexpr int rows_per_block = 2; // 2 gives best perf based on tuning
+#ifndef DSV4_MMVQ_MOE_ROWS_PER_BLOCK
+#define DSV4_MMVQ_MOE_ROWS_PER_BLOCK 2
+#endif
+    constexpr int rows_per_block = DSV4_MMVQ_MOE_ROWS_PER_BLOCK;
+    static_assert(rows_per_block == 1 || rows_per_block == 2 || rows_per_block == 4);
     const int64_t nblocks_rows = (nrows_x + rows_per_block - 1) / rows_per_block;
     const dim3 block_nums(nblocks_rows, nchannels_dst);
     const dim3 block_dims(warp_size, ncols_dst);

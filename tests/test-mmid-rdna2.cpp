@@ -76,7 +76,7 @@ struct output_stats {
 void usage(const char * program) {
     std::printf("Synthetic routed quantized MUL_MAT_ID benchmark using the HIP GGML backend graph.\n\n");
     std::printf("usage: %s [options]\n\n", program);
-    std::printf("  --type TYPE             q4_k or q6_k (q4_k)\n");
+    std::printf("  --type TYPE             q4_k, q6_k, iq3_xxs, or iq3_s (q4_k)\n");
     std::printf("  --k N                   input width, divisible by the quant block size (4096)\n");
     std::printf("  --n N                   expert output rows (512)\n");
     std::printf("  --batch N               routed tokens, 1..256 (32)\n");
@@ -101,6 +101,14 @@ bool parse_type(const char * value, ggml_type & type) {
     }
     if (std::strcmp(value, "q6_k") == 0) {
         type = GGML_TYPE_Q6_K;
+        return true;
+    }
+    if (std::strcmp(value, "iq3_xxs") == 0) {
+        type = GGML_TYPE_IQ3_XXS;
+        return true;
+    }
+    if (std::strcmp(value, "iq3_s") == 0) {
+        type = GGML_TYPE_IQ3_S;
         return true;
     }
     return false;
@@ -210,17 +218,19 @@ float deterministic_value(size_t index, float phase) {
 
 void quantize_expert_weights(const params & p, std::vector<uint8_t> & packed) {
     const size_t row_bytes = ggml_row_size(p.type, p.k);
-    std::vector<float> row(static_cast<size_t>(p.k));
 
-    for (int64_t expert = 0; expert < p.experts; ++expert) {
-        for (int64_t out = 0; out < p.n; ++out) {
-            const size_t row_index = static_cast<size_t>(expert * p.n + out);
-            for (int64_t col = 0; col < p.k; ++col) {
-                row[static_cast<size_t>(col)] = deterministic_value(
-                    row_index * static_cast<size_t>(p.k) + static_cast<size_t>(col), 0.13f * static_cast<float>(expert + 1));
-            }
-            ggml_quantize_chunk(p.type, row.data(), packed.data() + row_index * row_bytes, 0, 1, p.k, nullptr);
-        }
+    // The fixture is a dispatch benchmark. Quantize one deterministic row and
+    // replicate its valid packed representation across experts/rows; this
+    // avoids spending minutes in the offline IQ quantizer for a 256-expert
+    // tensor while preserving the exact production tensor shapes and routing.
+    std::vector<float> row(static_cast<size_t>(p.k));
+    for (int64_t col = 0; col < p.k; ++col) {
+        row[static_cast<size_t>(col)] = deterministic_value(static_cast<size_t>(col), 0.13f);
+    }
+    std::vector<uint8_t> packed_row(row_bytes);
+    ggml_quantize_chunk(p.type, row.data(), packed_row.data(), 0, 1, p.k, nullptr);
+    for (size_t row_index = 0; row_index < static_cast<size_t>(p.n * p.experts); ++row_index) {
+        std::memcpy(packed.data() + row_index * row_bytes, packed_row.data(), row_bytes);
     }
 }
 
