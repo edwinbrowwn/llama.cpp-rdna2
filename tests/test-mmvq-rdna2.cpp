@@ -65,7 +65,7 @@ struct output_stats {
 void usage(const char * program) {
     std::printf("Synthetic quantized MMVQ benchmark using the normal HIP GGML backend graph.\n\n");
     std::printf("usage: %s [options]\n\n", program);
-    std::printf("  --type TYPE             q4_0, q4_1, q5_0, q5_1, q8_0, q2_k, q3_k, q4_k, q5_k, q6_k (q4_0)\n");
+    std::printf("  --type TYPE             q4_0, q4_1, q5_0, q5_1, q8_0, q2_k, q3_k, q4_k, q5_k, q6_k, iq2_s, iq3_xxs, iq3_s (q4_0)\n");
     std::printf("  --k N                   input width; must satisfy the quant block size (4096)\n");
     std::printf("  --n N                   output rows (4096)\n");
     std::printf("  --batch N               activation columns, 1..256; 1..8 normally use MMVQ (1)\n");
@@ -97,6 +97,9 @@ bool parse_type(const char * value, ggml_type & type) {
         { "q4_k", GGML_TYPE_Q4_K },
         { "q5_k", GGML_TYPE_Q5_K },
         { "q6_k", GGML_TYPE_Q6_K },
+        { "iq2_s", GGML_TYPE_IQ2_S },
+        { "iq3_xxs", GGML_TYPE_IQ3_XXS },
+        { "iq3_s", GGML_TYPE_IQ3_S },
     };
 
     for (const type_name & candidate : supported) {
@@ -369,16 +372,25 @@ int main(int argc, char ** argv) {
     const size_t weight_elements = static_cast<size_t>(p.k * p.n);
     const size_t activation_elements = static_cast<size_t>(p.k * p.batch);
     const size_t output_elements = static_cast<size_t>(p.n * p.batch);
-    const size_t packed_weight_bytes = ggml_row_size(p.type, p.k) * static_cast<size_t>(p.n);
+    const size_t row_bytes = ggml_row_size(p.type, p.k);
+    const size_t packed_weight_bytes = row_bytes * static_cast<size_t>(p.n);
 
-    std::vector<float> weight_f32(weight_elements);
+    // Quantize one valid deterministic row and replicate it. This keeps the
+    // benchmark focused on the MMVQ dispatch/kernel and avoids repeatedly
+    // running the expensive IQ quantizer for a large synthetic matrix.
+    std::vector<float> weight_row(static_cast<size_t>(p.k));
     std::vector<float> activation_f32(activation_elements);
+    std::vector<uint8_t> weight_row_packed(row_bytes);
     std::vector<uint8_t> weight_packed(packed_weight_bytes);
-    fill_weights(weight_f32);
+    for (int64_t i = 0; i < p.k; ++i) {
+        weight_row[static_cast<size_t>(i)] = deterministic_value(static_cast<size_t>(i), 0.25f);
+    }
     fill_activations(activation_f32);
-    ggml_quantize_chunk(p.type, weight_f32.data(), weight_packed.data(), 0, p.n, p.k, nullptr);
-    weight_f32.clear();
-    weight_f32.shrink_to_fit();
+    ggml_quantize_chunk(p.type, weight_row.data(), weight_row_packed.data(), 0, 1, p.k, nullptr);
+    for (int64_t row = 0; row < p.n; ++row) {
+        std::memcpy(weight_packed.data() + static_cast<size_t>(row) * row_bytes,
+                    weight_row_packed.data(), row_bytes);
+    }
 
     const ggml_init_params init_params = {
         /*.mem_size   =*/ ggml_tensor_overhead() * 8 + ggml_graph_overhead(),

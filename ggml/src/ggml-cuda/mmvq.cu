@@ -5,6 +5,11 @@
 
 #include <cstdint>
 
+#ifndef DSV4_MMVQ_IQ_NWARPS
+#define DSV4_MMVQ_IQ_NWARPS 1
+#endif
+static_assert(DSV4_MMVQ_IQ_NWARPS == 1 || DSV4_MMVQ_IQ_NWARPS == 2 || DSV4_MMVQ_IQ_NWARPS == 4);
+
 typedef float (*vec_dot_q_cuda_t)(const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs);
 
 static constexpr __device__ vec_dot_q_cuda_t get_vec_dot_q_cuda(ggml_type type) {
@@ -380,6 +385,16 @@ static constexpr __host__ __device__ int calc_nwarps(ggml_type type, int ncols_d
             case 8:
             default:
                 return 1;
+        }
+    }
+    if (table_id == MMVQ_PARAMETERS_RDNA2 && ncols_dst == 1) {
+        switch (type) {
+            case GGML_TYPE_IQ2_S:
+            case GGML_TYPE_IQ3_XXS:
+            case GGML_TYPE_IQ3_S:
+                return DSV4_MMVQ_IQ_NWARPS;
+            default:
+                break;
         }
     }
     if (table_id == MMVQ_PARAMETERS_RDNA4) {
