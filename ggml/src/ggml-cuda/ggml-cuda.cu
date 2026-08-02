@@ -1001,8 +1001,8 @@ static bool ggml_backend_cuda_comm_allreduce_nccl(
     const int64_t ne = ggml_nelements(tensors[0]);
     if (trace) {
         const bool force_fp32 = (tensors[0]->flags & GGML_TENSOR_FLAG_FORCE_FP32_ALLREDUCE) != 0;
-        std::fprintf(stderr, "AR_TRACE id=%lld ne=%lld bytes=%zu force_fp32=%d type=%d compute=",
-                     (long long) trace_id++, (long long) ne, ggml_nbytes(tensors[0]), (int) force_fp32, (int) tensors[0]->type);
+        std::fprintf(stderr, "AR_TRACE id=%lld name=%s ne=%lld bytes=%zu force_fp32=%d type=%d compute=",
+                     (long long) trace_id++, tensors[0]->name, (long long) ne, ggml_nbytes(tensors[0]), (int) force_fp32, (int) tensors[0]->type);
         for (size_t i = 0; i < comm_ctx->backends.size(); ++i) {
             std::fprintf(stderr, "%d%s", (int) ((tensors[i]->flags & GGML_TENSOR_FLAG_COMPUTE) != 0), i + 1 == comm_ctx->backends.size() ? "" : ",");
         }
