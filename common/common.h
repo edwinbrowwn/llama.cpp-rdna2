@@ -290,7 +290,8 @@ struct common_params_sampling {
     std::vector<llama_tokens> reasoning_budget_end;            // end tag token sequences; the first tag is used as the forcing sequence
     std::vector<llama_token>  reasoning_budget_forced;         // forced sequence (message + first end tag)
     std::string               reasoning_budget_message;        // message injected before end tag when budget exhausted
-    bool                      reasoning_control = false;       // create the budget sampler on demand so reasoning can be ended at runtime
+    bool                      reasoning_control  = false;      // create the budget sampler on demand so reasoning can be ended at runtime
+    bool                      reasoning_tracking = false;      // create the state tracker for reasoning-aware scheduling
 
     bool backend_sampling = false;
 
@@ -368,6 +369,8 @@ struct common_params_speculative_ngram_cache {
 
 struct common_params_speculative {
     std::vector<enum common_speculative_type> types = { COMMON_SPECULATIVE_TYPE_NONE };
+
+    bool reasoning_pause = false; // keep the speculator synchronized but do not draft inside reasoning blocks
 
     // used by Simple, MTP, Eagle3, etc. - all methods that require some kind of draft model
     common_params_speculative_draft draft;

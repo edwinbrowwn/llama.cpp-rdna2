@@ -253,6 +253,7 @@ For the full list of features, please refer to [server's changelog](https://gith
 | `--spec-draft-cpu-moe, -cmoed, --cpu-moe-draft` | keep all Mixture of Experts (MoE) weights in the CPU for the draft model<br/>(env: LLAMA_ARG_SPEC_DRAFT_CPU_MOE) |
 | `--spec-draft-n-cpu-moe, --spec-draft-ncmoe, -ncmoed, --n-cpu-moe-draft N` | keep the Mixture of Experts (MoE) weights of the first N layers in the CPU for the draft model<br/>(env: LLAMA_ARG_SPEC_DRAFT_N_CPU_MOE) |
 | `--spec-draft-n-max N` | number of tokens to draft for speculative decoding (default: 3)<br/>(env: LLAMA_ARG_SPEC_DRAFT_N_MAX) |
+| `--spec-reasoning-pause, --no-spec-reasoning-pause` | pause speculative drafting inside reasoning blocks while keeping draft state synchronized (default: disabled)<br/>(env: LLAMA_ARG_SPEC_REASONING_PAUSE) |
 | `--spec-draft-n-min N` | minimum number of draft tokens to use for speculative decoding (default: 0)<br/>(env: LLAMA_ARG_SPEC_DRAFT_N_MIN) |
 | `--spec-draft-p-split, --draft-p-split P` | speculative decoding split probability (default: 0.10)<br/>(env: LLAMA_ARG_SPEC_DRAFT_P_SPLIT) |
 | `--spec-draft-p-min, --draft-p-min P` | minimum speculative decoding probability (greedy) (default: 0.00)<br/>(env: LLAMA_ARG_SPEC_DRAFT_P_MIN) |
@@ -463,6 +464,8 @@ By default, this value is set to `0`, meaning no tokens are kept. Use `-1` to re
 `n_cmpl`: Number of completions to generate from the current prompt. If input has multiple prompts, the output will have N prompts times `n_cmpl` entries.
 
 `n_cache_reuse`: Min chunk size to attempt reusing from the cache via KV shifting. For more info, see `--cache-reuse` arg. Default: `0`, which is disabled.
+
+`speculative.reasoning_pause`: When `true`, pause speculative draft creation and verification while generation is inside a model-recognized reasoning block. The draft/MTP/DFlash state remains synchronized and resumes immediately after the reasoning end tag. This is inert when speculation is disabled, the request sets `speculative.n_max` to `0`, or the chat template provides no reasoning start/end tags. While active, the request uses host target sampling so the token-level reasoning tracker can observe accepted tokens; draft-model backend sampling is unaffected. Default: `false` (or the server-wide `--spec-reasoning-pause` setting).
 
 `stream`: Allows receiving each predicted token in real-time instead of waiting for the completion to finish (uses a different response format). To enable this, set to `true`.
 

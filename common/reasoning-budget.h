@@ -43,6 +43,10 @@ struct llama_sampler * common_reasoning_budget_init(
 
 common_reasoning_budget_state common_reasoning_budget_get_state(const struct llama_sampler * smpl);
 
+// True while generation is inside a reasoning block, including UTF-8 completion
+// and forced end-tag emission. A null sampler is inactive.
+bool common_reasoning_budget_is_active(const struct llama_sampler * smpl);
+
 // The end sequence that transitioned the sampler to DONE, or nullptr if none
 // was recorded. Cleared when a new start sequence re-arms the sampler.
 const llama_tokens * common_reasoning_budget_get_end_match(const struct llama_sampler * smpl);

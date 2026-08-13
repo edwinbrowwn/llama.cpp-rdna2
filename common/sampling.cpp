@@ -307,8 +307,9 @@ struct common_sampler * common_sampler_init(
         }
     }
 
-    // reasoning budget sampler (skip when budget is unlimited unless a lazy grammar is active, which needs rbudget for thinking-block suppression)
-    if (!params.reasoning_budget_start.empty() && !params.reasoning_budget_end.empty() && (params.grammar_lazy || params.reasoning_budget_tokens >= 0 || params.reasoning_control)) {
+    // reasoning budget/state sampler (skip unlimited budgets unless another feature needs token-level reasoning state)
+    if (!params.reasoning_budget_start.empty() && !params.reasoning_budget_end.empty() &&
+            (params.grammar_lazy || params.reasoning_budget_tokens >= 0 || params.reasoning_control || params.reasoning_tracking)) {
         rbudget = common_reasoning_budget_init(
             vocab,
             {params.reasoning_budget_start},
@@ -675,11 +676,24 @@ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_co
     return id;
 }
 
-std::vector<llama_token> common_sampler_sample_and_accept_n(struct common_sampler * gsmpl, struct llama_context * ctx, const std::vector<int> & idxs, const llama_tokens & draft, bool grammar_first) {
+template <bool stop_on_reasoning>
+static std::vector<llama_token> common_sampler_sample_and_accept_n_impl(
+        struct common_sampler * gsmpl, struct llama_context * ctx,
+        const std::vector<int> & idxs, const llama_tokens & draft,
+        bool grammar_first) {
     GGML_ASSERT(idxs.size() == draft.size() + 1 && "idxs.size() must be draft.size() + 1");
 
     std::vector<llama_token> result;
     result.reserve(idxs.size());
+
+    // This should normally be prevented by the server scheduler. Keep the
+    // verifier safe if reasoning begins after a draft was already queued.
+    if (stop_on_reasoning && common_sampler_reasoning_is_active(gsmpl)) {
+        const llama_token id = common_sampler_sample(gsmpl, ctx, idxs[0], grammar_first);
+        common_sampler_accept(gsmpl, id, true);
+        result.push_back(id);
+        return result;
+    }
 
     size_t i = 0;
     for (; i < draft.size(); i++) {
@@ -691,6 +705,14 @@ std::vector<llama_token> common_sampler_sample_and_accept_n(struct common_sample
 
         if (draft[i] != id) {
             break;
+        }
+
+        // The matched token may have completed a multi-token reasoning start
+        // tag. Accept that boundary, but do not accept drafted reasoning tokens.
+        if (stop_on_reasoning && common_sampler_reasoning_is_active(gsmpl)) {
+            // Return the completed start tag as the final target-sampled token.
+            // The server will roll back the unused draft suffix.
+            return result;
         }
     }
 
@@ -705,13 +727,29 @@ std::vector<llama_token> common_sampler_sample_and_accept_n(struct common_sample
     return result;
 }
 
+std::vector<llama_token> common_sampler_sample_and_accept_n(
+        struct common_sampler * gsmpl, struct llama_context * ctx,
+        const std::vector<int> & idxs, const llama_tokens & draft, bool grammar_first) {
+    return common_sampler_sample_and_accept_n_impl<false>(gsmpl, ctx, idxs, draft, grammar_first);
+}
+
+std::vector<llama_token> common_sampler_sample_and_accept_n_reasoning_aware(
+        struct common_sampler * gsmpl, struct llama_context * ctx,
+        const std::vector<int> & idxs, const llama_tokens & draft, bool grammar_first) {
+    return common_sampler_sample_and_accept_n_impl<true>(gsmpl, ctx, idxs, draft, grammar_first);
+}
+
 std::vector<llama_token> common_sampler_sample_and_accept_n(struct common_sampler * gsmpl, struct llama_context * ctx, const llama_tokens & draft, bool grammar_first) {
     std::vector<int> idxs(draft.size() + 1);
     for (size_t i = 0; i < idxs.size(); ++i) {
         idxs[i] = i;
     }
 
-    return common_sampler_sample_and_accept_n(gsmpl, ctx, idxs, draft, grammar_first);
+    return common_sampler_sample_and_accept_n_impl<false>(gsmpl, ctx, idxs, draft, grammar_first);
+}
+
+bool common_sampler_reasoning_is_active(const struct common_sampler * gsmpl) {
+    return gsmpl && common_reasoning_budget_is_active(gsmpl->rbudget);
 }
 
 uint32_t common_sampler_get_seed(const struct common_sampler * gsmpl) {

@@ -1,5 +1,6 @@
 #include "server-context.h"
 #include "server-chat.h"
+#include "server-speculative-policy.h"
 #include "server-common.h"
 #include "server-http.h"
 #include "server-task.h"
@@ -474,11 +475,15 @@ struct server_slot {
             n_draft_max = std::min(n_draft_max, n_remaining - 1);
         }
 
-        // Per-request cap; zero keeps the loaded speculator resident but skips it.
-        // An omitted override (-1) preserves the configured speculator defaults.
-        if (task->params.speculative_n_max >= 0) {
-            n_draft_max = std::min(n_draft_max, task->params.speculative_n_max);
-        }
+        // A zero request cap or an active reasoning warm-pause keeps the loaded
+        // speculator resident and synchronized through common_speculative_process(),
+        // but skips draft creation and target verification for this iteration.
+        n_draft_max = server_speculative_draft_limit({
+            n_draft_max,
+            task->params.speculative_n_max,
+            task->params.sampling.reasoning_tracking,
+            task->params.sampling.reasoning_tracking && common_sampler_reasoning_is_active(smpl.get()),
+        });
 
         SLT_DBG(*this, "max possible draft: %d\n", n_draft_max);
 
@@ -3990,7 +3995,11 @@ private:
                 common_sampler_ptr smpl_save(common_sampler_clone(slot.smpl.get()));
 
                 GGML_ASSERT(slot.spec_i_batch.size() == n_draft + 1);
-                auto accepted = common_sampler_sample_and_accept_n(slot.smpl.get(), slot.ctx_tgt, slot.spec_i_batch, slot.spec_draft);
+                auto accepted = slot.task->params.sampling.reasoning_tracking
+                    ? common_sampler_sample_and_accept_n_reasoning_aware(
+                        slot.smpl.get(), slot.ctx_tgt, slot.spec_i_batch, slot.spec_draft)
+                    : common_sampler_sample_and_accept_n(
+                        slot.smpl.get(), slot.ctx_tgt, slot.spec_i_batch, slot.spec_draft);
                 slot.spec_i_batch.clear();
 
                 GGML_ASSERT(accepted.size() >= 1);

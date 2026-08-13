@@ -83,7 +83,21 @@ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_co
 //
 // returns at least 1 token, up to idxs.size()
 //
-std::vector<llama_token> common_sampler_sample_and_accept_n(struct common_sampler * gsmpl, struct llama_context * ctx, const std::vector<int> & idxs, const llama_tokens & draft, bool grammar_first = false);
+std::vector<llama_token> common_sampler_sample_and_accept_n(
+        struct common_sampler * gsmpl, struct llama_context * ctx,
+        const std::vector<int> & idxs, const llama_tokens & draft,
+        bool grammar_first = false);
+
+// Variant used by reasoning warm-pause. It stops speculative acceptance as soon
+// as a complete reasoning start tag is accepted.
+std::vector<llama_token> common_sampler_sample_and_accept_n_reasoning_aware(
+        struct common_sampler * gsmpl, struct llama_context * ctx,
+        const std::vector<int> & idxs, const llama_tokens & draft,
+        bool grammar_first = false);
+
+// True while the configured reasoning start/end token tracker is active.
+// Returns false when no tracker was configured.
+bool common_sampler_reasoning_is_active(const struct common_sampler * gsmpl);
 
 // assume idxs == [ 0, 1, 2, ..., draft.size() ]
 std::vector<llama_token> common_sampler_sample_and_accept_n(struct common_sampler * gsmpl, struct llama_context * ctx, const llama_tokens & draft, bool grammar_first = false);

@@ -200,6 +200,9 @@ std::vector<std::unique_ptr<field>> make_llama_cmpl_schema(const common_params &
         ->set_hard_limits(0, common_speculative_n_max(&params_base.speculative))
         ->set_desc("Maximum draft tokens for this request (0 disables speculation)"));
 
+    add((new field_bool("speculative.reasoning_pause", params.speculative.reasoning_pause))
+        ->set_desc("Pause draft creation inside reasoning blocks while keeping speculative state synchronized"));
+
     // TODO: to keep things simple, other speculative adjustments remain disabled for now
 #if 0
     add((new field_num("speculative.n_min", params.speculative.draft.n_min))
@@ -552,6 +555,23 @@ task_params eval_llama_cmpl_schema(
         // if "reasoning_format" is not provided, its handler will not be called, we will need to handle it here
         auto reasoning_format = params.chat_parser_params.reasoning_format;
         params.chat_parser_params.reasoning_in_content = params.stream && (reasoning_format == COMMON_REASONING_FORMAT_DEEPSEEK_LEGACY);
+
+        // Unlimited reasoning normally avoids creating the budget sampler. Warm
+        // pause still needs its start/end token state, without enabling runtime
+        // reasoning control or changing logits. Keep it fully inert without an
+        // active speculator or model-recognized reasoning boundaries.
+        const int32_t n_spec_max = params.speculative_n_max >= 0
+            ? params.speculative_n_max
+            : common_speculative_n_max(&params.speculative);
+        params.sampling.reasoning_tracking = params.speculative.reasoning_pause &&
+            n_spec_max > 0 &&
+            !params.sampling.reasoning_budget_start.empty() &&
+            !params.sampling.reasoning_budget_end.empty();
+        if (params.sampling.reasoning_tracking) {
+            // Target backend sampling bypasses the separate host-side reasoning
+            // tracker. Draft backend sampling is independent and remains enabled.
+            params.sampling.backend_sampling = false;
+        }
     }
 
     // debugging

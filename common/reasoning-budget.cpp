@@ -275,6 +275,13 @@ common_reasoning_budget_state common_reasoning_budget_get_state(const struct lla
     return ((const common_reasoning_budget_ctx *)smpl->ctx)->state;
 }
 
+bool common_reasoning_budget_is_active(const struct llama_sampler * smpl) {
+    const auto state = common_reasoning_budget_get_state(smpl);
+    return state == REASONING_BUDGET_COUNTING ||
+           state == REASONING_BUDGET_WAITING_UTF8 ||
+           state == REASONING_BUDGET_FORCING;
+}
+
 const llama_tokens * common_reasoning_budget_get_end_match(const struct llama_sampler * smpl) {
     if (!smpl) {
         return nullptr;

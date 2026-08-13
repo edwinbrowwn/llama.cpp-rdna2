@@ -3104,10 +3104,12 @@ static common_chat_params common_chat_params_init_muse_glimmer(const common_chat
                                                                const autoparser::generation_params & inputs) {
     common_chat_params data;
 
-    data.prompt            = common_chat_template_direct_apply_impl(tmpl, inputs);
-    data.generation_prompt = "<|start|>assistant";
-    data.format            = COMMON_CHAT_FORMAT_PEG_NATIVE;
-    data.supports_thinking = true;
+    data.prompt             = common_chat_template_direct_apply_impl(tmpl, inputs);
+    data.generation_prompt  = "<|start|>assistant";
+    data.format             = COMMON_CHAT_FORMAT_PEG_NATIVE;
+    data.supports_thinking  = true;
+    data.thinking_start_tag = "<|start|>assistant to=self<|message|>";
+    data.thinking_end_tags  = {"<|eom|>"};
 
     data.preserved_tokens = {
         "<|start|>", "<|message|>", "<|eom|>", "<|eot|>",

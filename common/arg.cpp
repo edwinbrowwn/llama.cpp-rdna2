@@ -4011,6 +4011,15 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_LOOKUP, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_N_MAX"));
     add_opt(common_arg(
+        {"--spec-reasoning-pause"},
+        {"--no-spec-reasoning-pause"},
+        string_format("pause speculative drafting inside reasoning blocks while keeping draft state synchronized (default: %s)",
+                      params.speculative.reasoning_pause ? "enabled" : "disabled"),
+        [](common_params & params, bool value) {
+            params.speculative.reasoning_pause = value;
+        }
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SPEC_REASONING_PAUSE"));
+    add_opt(common_arg(
         {"--spec-draft-n-min"}, "N",
         string_format("minimum number of draft tokens to use for speculative decoding (default: %d)", params.speculative.draft.n_min),
         [](common_params & params, int value) {

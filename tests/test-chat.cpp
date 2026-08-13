@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <exception>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -2090,6 +2091,94 @@ static void test_lfm2_parser(const std::string & template_path, bool detailed_de
         .expect(simple_assist_msg("", "", "empty_args", "{}"))
         .run();
 
+}
+
+static void test_all_reasoning_templates_have_boundaries() {
+    namespace fs = std::filesystem;
+
+    fs::path template_dir = "models/templates";
+    if (!fs::is_directory(template_dir)) {
+        template_dir = "../models/templates";
+    }
+    if (!fs::is_directory(template_dir)) {
+        throw std::runtime_error("Unable to locate models/templates for reasoning-boundary audit");
+    }
+
+    size_t n_reasoning_templates = 0;
+    for (const auto & entry : fs::directory_iterator(template_dir)) {
+        if (!entry.is_regular_file() || entry.path().extension() != ".jinja") {
+            continue;
+        }
+
+        auto tmpls = read_templates(entry.path().string());
+        common_chat_templates_inputs inputs;
+        common_chat_msg message;
+        message.role = "user";
+        message.content = "Test";
+        inputs.messages = {std::move(message)};
+        inputs.reasoning_format = COMMON_REASONING_FORMAT_AUTO;
+
+        const auto params = common_chat_templates_apply(tmpls.get(), inputs);
+        if (!params.supports_thinking) {
+            continue;
+        }
+
+        n_reasoning_templates++;
+        if (params.thinking_start_tag.empty() || params.thinking_end_tags.empty() ||
+                std::any_of(params.thinking_end_tags.begin(), params.thinking_end_tags.end(),
+                    [](const std::string & tag) { return tag.empty(); })) {
+            throw std::runtime_error("Incomplete reasoning boundaries for template: " + entry.path().string());
+        }
+    }
+
+    if (n_reasoning_templates == 0) {
+        throw std::runtime_error("Reasoning-boundary audit found no thinking templates");
+    }
+}
+
+static void test_reasoning_boundary_metadata() {
+    struct boundary_case {
+        const char * path;
+        const char * start;
+        std::vector<std::string> ends;
+    };
+
+    // Representative explicit-tag, channel, delimiter, and prompt-prefilled
+    // reasoning formats. Warm-pause consumes these template-provided boundaries
+    // without model-specific scheduler logic.
+    const std::vector<boundary_case> cases = {
+        { "models/templates/Apriel-1.6-15b-Thinker-fixed.jinja", "<|begin_assistant|>", { "[BEGIN FINAL RESPONSE]" } },
+        { "models/templates/Cohere2MoE.jinja", "<|START_THINKING|>", { "<|END_THINKING|>" } },
+        { "models/templates/google-gemma-4-31B-it.jinja", "<|channel>thought", { "<channel|>" } },
+        { "models/templates/MiniMax-M3.jinja", "<mm:think>", { "</mm:think>" } },
+        {
+            "models/templates/mistralai-Ministral-3-14B-Reasoning-2512.jinja",
+            "[THINK]",
+            { "[/THINK]" },
+        },
+        { "models/templates/muse-glimmer.jinja", "<|start|>assistant to=self<|message|>", { "<|eom|>" } },
+        { "models/templates/openai-gpt-oss-120b.jinja", "<|channel|>analysis<|message|>", { "<|end|>" } },
+        { "models/templates/Qwen3.5-4B.jinja", "<think>", { "</think>", "<tool_call>" } },
+        { "models/templates/Qwen-Qwen3-0.6B.jinja", "<think>", { "</think>" } },
+    };
+
+    for (const auto & tc : cases) {
+        auto tmpls = read_templates(tc.path);
+        common_chat_templates_inputs inputs;
+        common_chat_msg message;
+        message.role = "user";
+        message.content = "Test";
+        inputs.messages = {std::move(message)};
+        inputs.reasoning_format = COMMON_REASONING_FORMAT_AUTO;
+
+        const auto params = common_chat_templates_apply(tmpls.get(), inputs);
+        assert_equals(true, params.supports_thinking);
+        assert_equals(std::string(tc.start), params.thinking_start_tag);
+        assert_equals(tc.ends.size(), params.thinking_end_tags.size());
+        for (size_t i = 0; i < tc.ends.size(); ++i) {
+            assert_equals(tc.ends[i], params.thinking_end_tags[i]);
+        }
+    }
 }
 
 static void test_template_output_peg_parsers(bool detailed_debug) {
@@ -7116,6 +7205,8 @@ int main(int argc, char ** argv) {
         test_template_generation_prompt();
         test_reasoning_budget_tokens_per_request();
         test_reasoning_budget_message_per_request();
+        test_all_reasoning_templates_have_boundaries();
+        test_reasoning_boundary_metadata();
         test_template_output_peg_parsers(detailed_debug);
         std::cout << "\n[chat] All tests passed!" << '\n';
     }
