@@ -26,7 +26,7 @@ git -C "$ROOT" merge-base --is-ancestor "$REQUIRED_FIX_COMMIT" HEAD || {
 }
 current_commit=$(git -C "$ROOT" rev-parse --short=9 HEAD)
 [[ -z "$(git -C "$ROOT" status --porcelain)" ]] || { echo "source worktree is dirty" >&2; exit 2; }
-"$SERVER" --version | grep -F "($current_commit)"
+"$SERVER" --version 2>&1 | grep -F "($current_commit)"
 
 ulimit -s 8192
 [[ "$(ulimit -s)" == 8192 ]] || { echo "could not enforce 8 MiB stack" >&2; exit 2; }
@@ -40,7 +40,7 @@ export LD_LIBRARY_PATH=/opt/rocm/core-7.14/lib
 (
     cd "$ROOT"
     env LD_LIBRARY_PATH="$ROOT/build/bin:$LD_LIBRARY_PATH" \
-        ctest --test-dir build --output-on-failure -R 'test-(meta-split|tensor-split)'
+        ctest --test-dir build --verbose --output-on-failure -R 'test-(meta-split|tensor-split)'
 ) >"$test_log" 2>&1
 
 env "$SERVER" \
