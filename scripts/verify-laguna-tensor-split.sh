@@ -6,7 +6,7 @@ MODEL="${LAGUNA_MODEL:-/home/edwin/models/laguna/UD-IQ4_XS/Laguna-S-2.1-UD-IQ4_X
 PORT="${LAGUNA_VERIFY_PORT:-19090}"
 TIMEOUT_SECONDS="${LAGUNA_VERIFY_TIMEOUT:-300}"
 ARTIFACT_DIR="${LAGUNA_ARTIFACT_DIR:-/home/edwin/models/laguna/UD-IQ4_XS/diagnostics}"
-EXPECTED_COMMIT="${LAGUNA_EXPECTED_COMMIT:-7eedc897d}"
+REQUIRED_FIX_COMMIT="${LAGUNA_REQUIRED_FIX_COMMIT:-7eedc897d}"
 
 SERVER="$ROOT/build/bin/llama-server"
 TEST_META="$ROOT/build/bin/test-meta-split"
@@ -20,12 +20,13 @@ test_log="$ARTIFACT_DIR/laguna-verify-tests-$stamp.log"
 for path in "$SERVER" "$TEST_META" "$TEST_TENSOR" "$MODEL"; do
     [[ -e "$path" ]] || { echo "missing required artifact: $path" >&2; exit 2; }
 done
-[[ "$(git -C "$ROOT" rev-parse --short=9 HEAD)" == "$EXPECTED_COMMIT" ]] || {
-    echo "unexpected source commit: $(git -C "$ROOT" rev-parse --short=9 HEAD)" >&2
+git -C "$ROOT" merge-base --is-ancestor "$REQUIRED_FIX_COMMIT" HEAD || {
+    echo "required fix commit $REQUIRED_FIX_COMMIT is not an ancestor of HEAD" >&2
     exit 2
 }
+current_commit=$(git -C "$ROOT" rev-parse --short=9 HEAD)
 [[ -z "$(git -C "$ROOT" status --porcelain)" ]] || { echo "source worktree is dirty" >&2; exit 2; }
-"$SERVER" --version | grep -F "($EXPECTED_COMMIT)"
+"$SERVER" --version | grep -F "($current_commit)"
 
 ulimit -s 8192
 [[ "$(ulimit -s)" == 8192 ]] || { echo "could not enforce 8 MiB stack" >&2; exit 2; }
