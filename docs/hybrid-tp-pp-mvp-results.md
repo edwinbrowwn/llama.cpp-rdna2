@@ -167,4 +167,12 @@ Primary preserved evidence is under `/home/edwin/hybrid-tp-pp-evidence/`, especi
 - `performance-mvp/pp4096-tg128-c4-r3-4950a1605/`;
 - `performance-mvp/pp512-tg512-c1c4-r3-447dc0ab7/`.
 
-The final external verifier and complete evidence index are recorded separately in the task completion evidence.
+## Final verifier
+
+From the clean feature worktree, run:
+
+```bash
+./scripts/verify-hybrid-tp-pp-mvp.sh
+```
+
+The verifier checks the clean local/remote feature ref and untouched master ref; validates the immutable model hashes and selected evidence manifests; reruns both device-timeline analyses; regenerates exact build metadata; builds and runs the focused five-test suite; runs a fresh fixed-seed five-topology matrix with strict bounded hybrid MTP equivalence and zero-fallback gates; checks that no server or GPU allocation remains; and preserves a SHA-256 manifest under `hybrid-tp-pp-evidence/final-verifier-runs/`.
