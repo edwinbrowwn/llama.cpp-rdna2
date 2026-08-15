@@ -51,8 +51,18 @@ ulimit -s 8192
 
 verify_manifest() {
     local directory=$1
-    [[ -r "$directory/SHA256SUMS" ]] || { echo "missing manifest: $directory/SHA256SUMS" >&2; return 1; }
-    (cd "$directory" && sha256sum -c SHA256SUMS >/dev/null)
+    local manifest="$directory/SHA256SUMS"
+    [[ -r "$manifest" ]] || { echo "missing manifest: $manifest" >&2; return 1; }
+    # Older manifests intentionally mix absolute evidence paths with paths
+    # relative either to the feature worktree or to the manifest directory.
+    if (cd "$ROOT" && sha256sum -c "$manifest" >/dev/null 2>&1); then
+        :
+    elif (cd "$directory" && sha256sum -c SHA256SUMS >/dev/null 2>&1); then
+        :
+    else
+        echo "evidence hash verification failed: $manifest" >&2
+        return 1
+    fi
     echo "evidence_ok=$directory" >>"$RUN_ROOT/manifest.txt"
 }
 
