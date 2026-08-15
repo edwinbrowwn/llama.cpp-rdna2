@@ -381,6 +381,10 @@ def main():
 
     log_text = log_path.read_text(errors="replace")
     telemetry = parse_meta_telemetry(log_text)
+    meta_backend_ranks = {
+        match.group(1): int(match.group(2))
+        for match in re.finditer(r"parallel: stage \d+ = (.*), tp_ranks=(\d+)", log_text)
+    }
     for group in groups:
         group["gpu"] = summarize_gpu_samples(gpu_samples, *group.pop("gpu_window"))
     result = {
@@ -409,6 +413,7 @@ def main():
         "concurrencies": concurrencies,
         "groups": groups,
         "meta_copy_telemetry": telemetry,
+        "meta_backend_ranks": meta_backend_ranks,
         "speculative_telemetry": parse_speculative_telemetry(log_text),
         "communicator_sizes": [int(value) for value in re.findall(r"RCCL/NCCL AllReduce across (\d+) devices", log_text)],
         "pipeline_stages": [
@@ -437,8 +442,12 @@ def main():
             if row["success"] != row["meta_attempts"] or row["meta_fallback"] != 0 or row["unsupported_state"] != 0:
                 gate_error = f"Meta PP fallback gate failed: {row}"
                 break
-            if row["physical_bytes"] != 2 * row["logical_bytes"]:
-                gate_error = f"unexpected two-rank byte accounting: {row}"
+            rank_count = meta_backend_ranks.get(row["backend"])
+            if rank_count is None:
+                gate_error = f"missing TP rank count for active Meta backend: {row}"
+                break
+            if row["physical_bytes"] != rank_count * row["logical_bytes"]:
+                gate_error = f"unexpected rank-wise byte accounting for {rank_count} ranks: {row}"
                 break
     result["meta_fallback_gate"] = {
         "required": args.require_meta_zero_fallback,
