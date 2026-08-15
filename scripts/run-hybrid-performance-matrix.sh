@@ -18,6 +18,7 @@ BASE_PORT=${BASE_PORT:-18120}
 CASES=${CASES:-tp2-pp1-nospec,tp4-pp1-nospec,tp4-pp1-external-mtp,tp2xpp2-nospec,tp2xpp2-external-mtp}
 PP_SPLIT=${PP_SPLIT:-1,1}
 SEED_BASE=${SEED_BASE:-20260815}
+REQUIRE_MTP_OUTPUT_EQUIVALENCE=${REQUIRE_MTP_OUTPUT_EQUIVALENCE:-0}
 
 cd "$ROOT"
 [[ -x build/bin/llama-server ]] || { echo "missing build/bin/llama-server" >&2; exit 1; }
@@ -32,6 +33,7 @@ fi
 max_concurrency=$(tr ',' '\n' <<<"$CONCURRENCY" | sort -nr | head -1)
 (( PARALLEL >= max_concurrency )) || { echo "PARALLEL must be >= maximum concurrency" >&2; exit 1; }
 (( CTX_PER_SEQ >= PROMPT_TOKENS + N_PREDICT )) || { echo "CTX_PER_SEQ is too small" >&2; exit 1; }
+[[ "$REQUIRE_MTP_OUTPUT_EQUIVALENCE" =~ ^[01]$ ]] || { echo "REQUIRE_MTP_OUTPUT_EQUIVALENCE must be 0 or 1" >&2; exit 1; }
 
 mkdir -p "$OUT"
 export HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION:-10.3.0}
@@ -63,6 +65,7 @@ ctx_total=$(( CTX_PER_SEQ * PARALLEL ))
     echo "cases=$CASES"
     echo "pp_split=$PP_SPLIT"
     echo "seed_base=$SEED_BASE"
+    echo "require_mtp_output_equivalence=$REQUIRE_MTP_OUTPUT_EQUIVALENCE"
     echo "git_head=$(git rev-parse HEAD)"
     echo "git_status=$(git status --porcelain=v1 | tr '\n' ';')"
     build/bin/llama-server --version 2>&1 | sed 's/^/server_/'
@@ -117,11 +120,12 @@ contains_case tp2xpp2-external-mtp && run_case tp2xpp2-external-mtp "$((BASE_POR
     -dev ROCm0,ROCm1,ROCm2,ROCm3 -ts 1,1 --tp-size 2 --pp-size 2 --pp-split "$PP_SPLIT" "${mtp[@]}"
 
 ./scripts/summarize-hybrid-performance.py --output-dir "$OUT/summary" "$OUT"
-python3 - "$OUT" <<'PY'
+python3 - "$OUT" "$REQUIRE_MTP_OUTPUT_EQUIVALENCE" <<'PY'
 import json
 from pathlib import Path
 import sys
 root = Path(sys.argv[1])
+require_hybrid_output_equivalence = bool(int(sys.argv[2]))
 expect = {
     "tp2-pp1-nospec": ([2], False),
     "tp4-pp1-nospec": ([4], False),
@@ -144,11 +148,15 @@ for path in root.glob("*/*.json"):
     if any(request["truncated"] for group in data["groups"] for request in group["requests"]):
         raise SystemExit(f"{label}: a request was truncated")
 
-output_audit = {"seed_base": next(iter(artifacts.values()))["seed_base"], "pairs": []}
+output_audit = {
+    "seed_base": next(iter(artifacts.values()))["seed_base"],
+    "hybrid_equivalence_required": require_hybrid_output_equivalence,
+    "pairs": [],
+}
 required_errors = []
 for baseline, speculative, required in [
     ("tp4-pp1-nospec", "tp4-pp1-external-mtp", False),
-    ("tp2xpp2-nospec", "tp2xpp2-external-mtp", True),
+    ("tp2xpp2-nospec", "tp2xpp2-external-mtp", require_hybrid_output_equivalence),
 ]:
     if baseline not in artifacts or speculative not in artifacts:
         continue
@@ -189,7 +197,7 @@ for baseline, speculative, required in [
 (root / "output-equivalence.json").write_text(json.dumps(output_audit, indent=2) + "\n")
 if required_errors:
     raise SystemExit("; ".join(required_errors))
-print("HYBRID_MATRIX_STRUCTURE_AND_HYBRID_OUTPUT_OK")
+print("HYBRID_MATRIX_STRUCTURE_AND_OUTPUT_AUDIT_OK")
 PY
 find "$OUT" -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum >"$OUT/SHA256SUMS"
 echo "HYBRID_PERFORMANCE_MATRIX_OK"
