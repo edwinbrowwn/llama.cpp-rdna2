@@ -17,6 +17,7 @@ UBATCH=${UBATCH:-512}
 BASE_PORT=${BASE_PORT:-18120}
 CASES=${CASES:-tp2-pp1-nospec,tp4-pp1-nospec,tp4-pp1-external-mtp,tp2xpp2-nospec,tp2xpp2-external-mtp}
 PP_SPLIT=${PP_SPLIT:-1,1}
+SEED_BASE=${SEED_BASE:-20260815}
 
 cd "$ROOT"
 [[ -x build/bin/llama-server ]] || { echo "missing build/bin/llama-server" >&2; exit 1; }
@@ -61,6 +62,7 @@ ctx_total=$(( CTX_PER_SEQ * PARALLEL ))
     echo "ubatch=$UBATCH"
     echo "cases=$CASES"
     echo "pp_split=$PP_SPLIT"
+    echo "seed_base=$SEED_BASE"
     echo "git_head=$(git rev-parse HEAD)"
     echo "git_status=$(git status --porcelain=v1 | tr '\n' ';')"
     build/bin/llama-server --version 2>&1 | sed 's/^/server_/'
@@ -97,7 +99,7 @@ run_case() {
     timeout 3600s ./scripts/benchmark-hybrid-server.py \
         --label "$label" --output-dir "$case_out" --port "$port" \
         --concurrency "$CONCURRENCY" --prompt-tokens "$PROMPT_TOKENS" \
-        --n-predict "$N_PREDICT" --repeats "$REPEATS" "${gate[@]}" -- \
+        --n-predict "$N_PREDICT" --repeats "$REPEATS" --seed-base "$SEED_BASE" "${gate[@]}" -- \
         ./build/bin/llama-server "${common[@]}" "$@" \
         2>&1 | tee "$case_out/harness.stdout"
     sha256sum "$case_out/$label.json" "$case_out/$label.server.log" >"$case_out/SHA256SUMS"
@@ -127,11 +129,13 @@ expect = {
     "tp2xpp2-nospec": ([2, 2], True),
     "tp2xpp2-external-mtp": ([2, 2, 2], True),
 }
+artifacts = {}
 for path in root.glob("*/*.json"):
     data = json.loads(path.read_text())
     label = data.get("label")
     if label not in expect:
         continue
+    artifacts[label] = data
     communicators, pipeline = expect[label]
     if data["communicator_sizes"] != communicators:
         raise SystemExit(f"{label}: communicator sizes {data['communicator_sizes']} != {communicators}")
@@ -139,7 +143,32 @@ for path in root.glob("*/*.json"):
         raise SystemExit(f"{label}: pipeline flag {data['pipeline_parallel_enabled']} != {pipeline}")
     if any(request["truncated"] for group in data["groups"] for request in group["requests"]):
         raise SystemExit(f"{label}: a request was truncated")
-print("HYBRID_MATRIX_STRUCTURE_OK")
+
+for baseline, speculative in [
+    ("tp4-pp1-nospec", "tp4-pp1-external-mtp"),
+    ("tp2xpp2-nospec", "tp2xpp2-external-mtp"),
+]:
+    if baseline not in artifacts or speculative not in artifacts:
+        continue
+    baseline_groups = {
+        (group["concurrency"], group["repeat"]): group for group in artifacts[baseline]["groups"]
+    }
+    speculative_groups = {
+        (group["concurrency"], group["repeat"]): group for group in artifacts[speculative]["groups"]
+    }
+    if baseline_groups.keys() != speculative_groups.keys():
+        raise SystemExit(f"{baseline}/{speculative}: workload groups differ")
+    for key in baseline_groups:
+        lhs = baseline_groups[key]["requests"]
+        rhs = speculative_groups[key]["requests"]
+        if len(lhs) != len(rhs):
+            raise SystemExit(f"{baseline}/{speculative} {key}: request counts differ")
+        for index, (request_lhs, request_rhs) in enumerate(zip(lhs, rhs)):
+            if request_lhs["tokens"] != request_rhs["tokens"]:
+                raise SystemExit(
+                    f"{baseline}/{speculative} {key} request {index}: fixed-seed output tokens differ"
+                )
+print("HYBRID_MATRIX_STRUCTURE_AND_OUTPUT_OK")
 PY
 find "$OUT" -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum >"$OUT/SHA256SUMS"
 echo "HYBRID_PERFORMANCE_MATRIX_OK"

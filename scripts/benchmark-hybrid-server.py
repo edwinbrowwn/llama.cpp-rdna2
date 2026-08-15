@@ -248,6 +248,7 @@ def main():
     parser.add_argument("--startup-timeout", type=float, default=240.0)
     parser.add_argument("--request-timeout", type=float, default=900.0)
     parser.add_argument("--gpu-sample-interval", type=float, default=0.25)
+    parser.add_argument("--seed-base", type=int, default=20260815)
     parser.add_argument("--require-meta-zero-fallback", action="store_true")
     parser.add_argument("server_command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
@@ -306,6 +307,7 @@ def main():
                     "prompt": warm_tokens,
                     "n_predict": min(8, args.n_predict),
                     "temperature": 0,
+                    "seed": args.seed_base - 1,
                     "ignore_eos": True,
                     "cache_prompt": False,
                     "stream": True,
@@ -328,6 +330,7 @@ def main():
                                     "prompt": prompts[concurrency][index],
                                     "n_predict": args.n_predict,
                                     "temperature": 0,
+                                    "seed": args.seed_base + index,
                                     "ignore_eos": True,
                                     "cache_prompt": False,
                                     "stream": True,
@@ -399,6 +402,7 @@ def main():
         },
         "prompt_tokens": args.prompt_tokens,
         "n_predict": args.n_predict,
+        "seed_base": args.seed_base,
         "health": health,
         "server_version": server_version,
         "repeats": args.repeats,
