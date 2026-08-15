@@ -24,6 +24,7 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -153,9 +154,6 @@ int64_t llama_time_us(void) {
 
 // returns true on success
 static bool llama_prepare_model_devices(const llama_model_params & params, llama_model * model) {
-    // Fail closed while the topology/configuration seam is introduced. The next
-    // implementation step replaces this guard with explicit Meta-group creation;
-    // legacy PP1 execution never enters this branch.
     if (params.pp_size > 1) {
         if (params.split_mode != LLAMA_SPLIT_MODE_TENSOR) {
             LLAMA_LOG_ERROR("%s: hybrid TP x PP requires LLAMA_SPLIT_MODE_TENSOR\n", __func__);
@@ -178,12 +176,39 @@ static bool llama_prepare_model_devices(const llama_model_params & params, llama
             LLAMA_LOG_ERROR("%s: invalid hybrid TP x PP topology: %s\n", __func__, error.c_str());
             return false;
         }
-        LLAMA_LOG_ERROR("%s: hybrid TP x PP topology validated but execution is not enabled in this scaffold commit\n", __func__);
-        return false;
-    }
 
-    // create list of devices to use with this model
-    if (params.devices) {
+        model->parallel = std::move(topology);
+        model->parallel_split_state_ud.reserve(model->parallel.groups.size());
+        LLAMA_LOG_INFO("parallel: mode=hybrid tp=%u pp=%u physical=%zu logical=%zu\n",
+                model->parallel.tp_size, model->parallel.pp_size,
+                physical_devices.size(), model->parallel.groups.size());
+
+        for (auto & group : model->parallel.groups) {
+            auto split_ud = std::make_unique<llama_meta_device_get_split_state_userdata>();
+            split_ud->n_devices = group.physical_devices.size();
+            split_ud->model     = model;
+            split_ud->pp_stage  = group.stage_index;
+            split_ud->tp_split  = group.tp_split;
+
+            group.meta_device = ggml_backend_meta_device(
+                    group.physical_devices.data(), group.physical_devices.size(),
+                    llama_meta_device_get_split_state, split_ud.get());
+            if (group.meta_device == nullptr) {
+                LLAMA_LOG_ERROR("%s: failed to create Meta device for PP stage %u\n", __func__, group.stage_index);
+                return false;
+            }
+
+            LLAMA_LOG_INFO("parallel: stage %u = %s, tp_ranks=%zu\n",
+                    group.stage_index, ggml_backend_dev_name(group.meta_device), group.physical_devices.size());
+            for (size_t rank = 0; rank < group.physical_devices.size(); ++rank) {
+                LLAMA_LOG_INFO("parallel: - stage %u rank %zu: %s, tp_weight=%.6f\n",
+                        group.stage_index, rank, ggml_backend_dev_name(group.physical_devices[rank]), group.tp_split[rank]);
+            }
+
+            model->parallel_split_state_ud.push_back(std::move(split_ud));
+            model->devices.push_back({true, group.meta_device});
+        }
+    } else if (params.devices) {
         if (params.split_mode == LLAMA_SPLIT_MODE_TENSOR) {
             size_t n_devs = 0;
             while (params.devices[n_devs]) {

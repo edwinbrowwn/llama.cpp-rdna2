@@ -15,6 +15,11 @@ struct llama_parallel_group {
     std::vector<ggml_backend_dev_t> physical_devices;
     std::vector<float> tp_split;
 
+    // Logical Meta device created from physical_devices. Populated only by
+    // explicit hybrid model initialization; pure topology construction leaves
+    // it null.
+    ggml_backend_dev_t meta_device = nullptr;
+
     // Half-open transformer-layer range. Populated by
     // llama_parallel_topology_assign_layers().
     uint32_t layer_begin = 0;

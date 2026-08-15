@@ -5,6 +5,7 @@
 #include "llama-graph.h"
 #include "llama-hparams.h"
 #include "llama-memory.h"
+#include "llama-parallel.h"
 #include "llama-vocab.h"
 
 #include <map>
@@ -562,10 +563,16 @@ struct llama_device {
 };
 
 struct llama_meta_device_get_split_state_userdata {
-    size_t                     n_devices;
-    const struct llama_model * model;
+    size_t                     n_devices = 0;
+    const struct llama_model * model     = nullptr;
+    uint32_t                   pp_stage  = 0;
+
+    // Non-empty only for an explicit hybrid TP group. Legacy PP1 continues to
+    // read the model-owned tensor_split through model.
+    std::vector<float> tp_split;
 };
 
+const float * llama_meta_device_get_tp_split(const struct llama_meta_device_get_split_state_userdata & userdata);
 struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const struct ggml_tensor * tensor, void * userdata);
 
 bool llama_tensor_split_is_valid(
@@ -666,8 +673,12 @@ struct llama_model {
     // for keeping track of associated LoRA adapters
     std::unordered_set<llama_adapter_lora *> loras;
 
-    // statically allocated context for assigning
+    // Statically located legacy PP1 callback context. Explicit hybrid groups
+    // use individually heap-allocated callback contexts so Meta device identity
+    // retains stable userdata addresses.
     struct llama_meta_device_get_split_state_userdata get_split_state_ud;
+    std::vector<std::unique_ptr<llama_meta_device_get_split_state_userdata>> parallel_split_state_ud;
+    llama_parallel_topology parallel;
 
     int64_t t_load_us  = 0;
     int64_t t_start_us = 0;
@@ -689,6 +700,9 @@ struct llama_model {
 
     uint32_t n_gpu_layers() const;
     llama_split_mode split_mode() const;
+
+    bool is_hybrid_parallel() const;
+    const llama_parallel_topology & parallel_topology() const;
 
     bool is_tensor_parallel_output_head(const ggml_tensor * tensor) const;
     bool is_tensor_parallel_output_head_vocab_sharded(const ggml_tensor * tensor) const;

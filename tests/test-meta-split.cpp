@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <vector>
 
 struct split_ud {
@@ -137,6 +138,13 @@ int main() {
 
     split_ud ud{simple_devs.size()};
     ggml_backend_dev_t meta_dev = ggml_backend_meta_device(simple_devs.data(), simple_devs.size(), split_state_callback, &ud);
+    const std::string meta_name = ggml_backend_dev_name(meta_dev);
+    for (ggml_backend_dev_t simple_dev : simple_devs) {
+        if (meta_name.find(ggml_backend_dev_name(simple_dev)) == std::string::npos) {
+            std::fprintf(stderr, "Meta device name '%s' omits child '%s'\n", meta_name.c_str(), ggml_backend_dev_name(simple_dev));
+            return 1;
+        }
+    }
     ggml_backend_ptr backend(ggml_backend_dev_init(meta_dev, nullptr));
     if (!backend) {
         std::fprintf(stderr, "failed to initialize meta backend\n");
@@ -178,6 +186,14 @@ int main() {
     if (!buffer) {
         std::fprintf(stderr, "failed to allocate meta tensors\n");
         return 1;
+    }
+    const std::string meta_buft_name = ggml_backend_buffer_name(buffer.get());
+    for (ggml_backend_dev_t simple_dev : simple_devs) {
+        const char * child_buft_name = ggml_backend_buft_name(ggml_backend_dev_buffer_type(simple_dev));
+        if (meta_buft_name.find(child_buft_name) == std::string::npos) {
+            std::fprintf(stderr, "Meta buffer name '%s' omits child buffer '%s'\n", meta_buft_name.c_str(), child_buft_name);
+            return 1;
+        }
     }
 
     const size_t nbytes = ggml_nbytes(root);

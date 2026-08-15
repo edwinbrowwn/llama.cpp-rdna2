@@ -361,6 +361,15 @@ llama_model * llama_model_create(llama_model_loader & ml, const llama_model_para
     return llama_model_create(arch, params);
 }
 
+const float * llama_meta_device_get_tp_split(const llama_meta_device_get_split_state_userdata & userdata) {
+    if (!userdata.tp_split.empty()) {
+        GGML_ASSERT(userdata.tp_split.size() == userdata.n_devices);
+        return userdata.tp_split.data();
+    }
+    GGML_ASSERT(userdata.model != nullptr);
+    return userdata.model->tensor_split();
+}
+
 struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const struct ggml_tensor * tensor, void * userdata) {
     const llama_meta_device_get_split_state_userdata * ud = (const llama_meta_device_get_split_state_userdata *) userdata;
     const llama_hparams & hparams = ud->model->hparams;
@@ -757,7 +766,7 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
     split_state.axis = tc.axis;
     if (split_state.axis >= 0 && split_state.axis < GGML_MAX_DIMS) {
         const int64_t blck_size = ggml_blck_size(tc.tensor_axis_0->type);
-        const float * tensor_split = ud->model->tensor_split();
+        const float * tensor_split = llama_meta_device_get_tp_split(*ud);
         std::vector<float> tensor_split_scan;
         tensor_split_scan.reserve(ud->n_devices);
         for (size_t j = 0; j < ud->n_devices; j++) {
@@ -1383,43 +1392,74 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
         throw std::runtime_error(format("%s: no CPU backend found", __func__));
     }
 
-    // calculate the split points
-    bool all_zero = tensor_split == nullptr || std::all_of(tensor_split, tensor_split + n_devices(), [](float x) { return x == 0.0f; });
-    std::vector<float> splits(n_devices());
-    if (all_zero) {
-        // default split, by free memory
-        for (size_t i = 0; i < n_devices(); ++i) {
-            ggml_backend_dev_t dev = devices[i].dev;
-            size_t total;
-            size_t free;
-            ggml_backend_dev_memory(dev, &free, &total);
+    // Legacy placement keeps using tensor_split over model devices. Explicit
+    // hybrid placement instead assigns complete transformer layers with the
+    // independently normalized PP split stored in parallel.
+    std::vector<float> splits;
+    if (!is_hybrid_parallel()) {
+        bool all_zero = tensor_split == nullptr || std::all_of(tensor_split, tensor_split + n_devices(), [](float x) { return x == 0.0f; });
+        splits.resize(n_devices());
+        if (all_zero) {
+            // default split, by free memory
+            for (size_t i = 0; i < n_devices(); ++i) {
+                ggml_backend_dev_t dev = devices[i].dev;
+                size_t total;
+                size_t free;
+                ggml_backend_dev_memory(dev, &free, &total);
 
-            // devices can return 0 bytes for free and total memory if they do not
-            // have any to report. in this case, we will use the host memory as a fallback
-            // fixes: https://github.com/ggml-org/llama.cpp/issues/18577
-            if (free == 0 && total == 0) {
-                ggml_backend_dev_memory(cpu_dev, &free, &total);
+                // devices can return 0 bytes for free and total memory if they do not
+                // have any to report. in this case, we will use the host memory as a fallback
+                // fixes: https://github.com/ggml-org/llama.cpp/issues/18577
+                if (free == 0 && total == 0) {
+                    ggml_backend_dev_memory(cpu_dev, &free, &total);
+                }
+                splits[i] = free;
             }
-            splits[i] = free;
+        } else {
+            std::copy(tensor_split, tensor_split + n_devices(), splits.begin());
+        }
+
+        // sum and normalize the splits to get the split points
+        float split_sum = 0.0f;
+        for (size_t i = 0; i < n_devices(); ++i) {
+            split_sum += splits[i];
+            splits[i] = split_sum;
+        }
+        for (size_t i = 0; i < n_devices(); ++i) {
+            splits[i] /= split_sum;
         }
     } else {
-        std::copy(tensor_split, tensor_split + n_devices(), splits.begin());
-    }
-
-    // sum and normalize the splits to get the split points
-    float split_sum = 0.0f;
-    for (size_t i = 0; i < n_devices(); ++i) {
-        split_sum += splits[i];
-        splits[i] = split_sum;
-    }
-    for (size_t i = 0; i < n_devices(); ++i) {
-        splits[i] /= split_sum;
+        if (n_gpu_layers <= n_layer_all) {
+            throw std::runtime_error("hybrid TP x PP requires full model GPU offload");
+        }
+        std::string error;
+        const uint32_t n_layer_main = hparams.n_layer();
+        if (!llama_parallel_topology_assign_layers(parallel, n_layer_main, error)) {
+            throw std::runtime_error("invalid hybrid TP x PP layer placement: " + error);
+        }
+        for (const auto & group : parallel.groups) {
+            LLAMA_LOG_INFO("parallel: stage %u = %s, transformer layers %u..%u%s\n",
+                    group.stage_index, ggml_backend_dev_name(group.meta_device),
+                    group.layer_begin, group.layer_end - 1,
+                    group.stage_index + 1 == parallel.pp_size ? " + auxiliary/NextN + output" : "");
+        }
     }
 
     const int i_gpu_start = std::max(n_layer_all + 1 - n_gpu_layers, 0);
     const int act_gpu_layers = devices.empty() ? 0 : std::min(n_gpu_layers, n_layer_all + 1);
     auto get_layer_buft_list = [&](int il) -> llama_model::impl::layer_dev {
         const bool is_swa = il < n_layer_all && hparams.is_swa(il);
+        if (is_hybrid_parallel()) {
+            const llama_parallel_group * group = il >= (int) hparams.n_layer() ?
+                parallel.group_for_stage(parallel.pp_size - 1) : parallel.group_for_layer(il);
+            if (group == nullptr || group->meta_device == nullptr) {
+                throw std::runtime_error(format("hybrid TP x PP has no owning stage for layer %d", il));
+            }
+            auto * dev = group->meta_device;
+            LLAMA_LOG_DEBUG("load_tensors: layer %3d assigned to hybrid stage %u (%s), is_swa = %d\n",
+                    il, group->stage_index, ggml_backend_dev_name(dev), is_swa);
+            return {dev, &pimpl->gpu_buft_list.at(dev)};
+        }
         if (il < i_gpu_start || (il - i_gpu_start) >= act_gpu_layers) {
             LLAMA_LOG_DEBUG("load_tensors: layer %3d assigned to device %s, is_swa = %d\n", il, ggml_backend_dev_name(cpu_dev), is_swa);
             return {cpu_dev, &pimpl->cpu_buft_list};
@@ -1912,6 +1952,14 @@ uint32_t llama_model::n_gpu_layers() const {
 
 llama_split_mode llama_model::split_mode() const {
     return params.split_mode;
+}
+
+bool llama_model::is_hybrid_parallel() const {
+    return parallel.hybrid();
+}
+
+const llama_parallel_topology & llama_model::parallel_topology() const {
+    return parallel;
 }
 
 bool llama_tensor_split_is_valid(

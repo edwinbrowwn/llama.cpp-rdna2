@@ -12,6 +12,20 @@ static void expect(bool condition, const char * message) {
 }
 
 int main() {
+    llama_meta_device_get_split_state_userdata group0;
+    group0.n_devices = 2;
+    group0.pp_stage = 0;
+    group0.tp_split = {1.0f, 3.0f};
+    llama_meta_device_get_split_state_userdata group1;
+    group1.n_devices = 2;
+    group1.pp_stage = 1;
+    group1.tp_split = {3.0f, 1.0f};
+    const float * split0 = llama_meta_device_get_tp_split(group0);
+    const float * split1 = llama_meta_device_get_tp_split(group1);
+    expect(split0[0] == 1.0f && split0[1] == 3.0f, "stage 0 uses group-local TP split");
+    expect(split1[0] == 3.0f && split1[1] == 1.0f, "stage 1 uses group-local TP split");
+    expect(split0 != split1, "TP group userdata owns independent split storage");
+
     const float equal4[] = {1, 1, 1, 1};
     expect(llama_tensor_split_is_valid(2048, 256, equal4, 4, 0), "equal split rotation 0");
     expect(llama_tensor_split_is_valid(2048, 256, equal4, 4, 1), "equal split rotation 1");
