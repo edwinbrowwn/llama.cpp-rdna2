@@ -1,6 +1,7 @@
 #include "ggml.h"
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
+#include "ggml-backend-impl.h"
 #include "ggml-cpp.h"
 
 #include <cmath>
@@ -47,6 +48,157 @@ static ggml_backend_meta_split_state split_state_callback(const ggml_tensor * te
         }
     }
     return state;
+}
+
+struct fake_event_device_context {
+    const char * name;
+    bool fail_event_new;
+    int created = 0;
+    int freed   = 0;
+};
+
+static const char * fake_event_device_name(ggml_backend_dev_t dev) {
+    return ((fake_event_device_context *) dev->context)->name;
+}
+
+static const char * fake_event_device_description(ggml_backend_dev_t dev) {
+    return fake_event_device_name(dev);
+}
+
+static void fake_event_device_memory(ggml_backend_dev_t, size_t * free, size_t * total) {
+    *free = 0;
+    *total = 0;
+}
+
+static enum ggml_backend_dev_type fake_event_device_type(ggml_backend_dev_t) {
+    return GGML_BACKEND_DEVICE_TYPE_GPU;
+}
+
+static void fake_event_device_props(ggml_backend_dev_t dev, ggml_backend_dev_props * props) {
+    auto * ctx = (fake_event_device_context *) dev->context;
+    *props = {};
+    props->name        = ctx->name;
+    props->description = ctx->name;
+    props->type        = GGML_BACKEND_DEVICE_TYPE_GPU;
+    props->caps.async  = true;
+    props->caps.events = true;
+}
+
+static bool fake_event_device_supports_op(ggml_backend_dev_t, const ggml_tensor *) {
+    return false;
+}
+
+static bool fake_event_device_supports_buft(ggml_backend_dev_t, ggml_backend_buffer_type_t) {
+    return false;
+}
+
+static ggml_backend_event_t fake_event_new(ggml_backend_dev_t dev) {
+    auto * ctx = (fake_event_device_context *) dev->context;
+    ctx->created++;
+    if (ctx->fail_event_new) {
+        return nullptr;
+    }
+    return new ggml_backend_event {
+        /* .device  = */ dev,
+        /* .context = */ nullptr,
+    };
+}
+
+static void fake_event_free(ggml_backend_dev_t dev, ggml_backend_event_t event) {
+    ((fake_event_device_context *) dev->context)->freed++;
+    delete event;
+}
+
+static void fake_event_synchronize(ggml_backend_dev_t, ggml_backend_event_t) {
+}
+
+static const ggml_backend_device_i fake_event_device_iface = {
+    /* .get_name             = */ fake_event_device_name,
+    /* .get_description      = */ fake_event_device_description,
+    /* .get_memory           = */ fake_event_device_memory,
+    /* .get_type             = */ fake_event_device_type,
+    /* .get_props            = */ fake_event_device_props,
+    /* .init_backend         = */ nullptr,
+    /* .get_buffer_type      = */ nullptr,
+    /* .get_host_buffer_type = */ nullptr,
+    /* .buffer_from_host_ptr = */ nullptr,
+    /* .supports_op          = */ fake_event_device_supports_op,
+    /* .supports_buft        = */ fake_event_device_supports_buft,
+    /* .offload_op           = */ nullptr,
+    /* .event_new            = */ fake_event_new,
+    /* .event_free           = */ fake_event_free,
+    /* .event_synchronize    = */ fake_event_synchronize,
+};
+
+static bool test_meta_events(ggml_backend_dev_t meta_dev, ggml_backend_t backend) {
+    ggml_backend_dev_props props;
+    ggml_backend_dev_get_props(meta_dev, &props);
+    if (!props.caps.events) {
+        std::fprintf(stderr, "Meta device did not advertise child-composite events\n");
+        return false;
+    }
+
+    std::vector<ggml_backend_event_t> events;
+    for (size_t i = 0; i < 4; ++i) {
+        ggml_backend_event_t event = ggml_backend_event_new(meta_dev);
+        if (event == nullptr) {
+            std::fprintf(stderr, "failed to create Meta event %zu\n", i);
+            for (ggml_backend_event_t allocated : events) {
+                ggml_backend_event_free(allocated);
+            }
+            return false;
+        }
+        events.push_back(event);
+    }
+    for (ggml_backend_event_t event : events) {
+        ggml_backend_event_record(event, backend);
+        ggml_backend_event_wait(backend, event);
+    }
+    for (ggml_backend_event_t event : events) {
+        ggml_backend_event_synchronize(event);
+        ggml_backend_event_free(event);
+    }
+
+    ggml_backend_dev_t cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
+    ggml_backend_ptr cpu_backend(cpu_dev ? ggml_backend_dev_init(cpu_dev, nullptr) : nullptr);
+    if (!cpu_backend) {
+        std::fprintf(stderr, "failed to initialize CPU backend for scheduler event-slot test\n");
+        return false;
+    }
+    ggml_backend_t sched_backends[] = {backend, cpu_backend.get()};
+    ggml_backend_buffer_type_t sched_bufts[] = {
+        ggml_backend_get_default_buffer_type(backend),
+        ggml_backend_get_default_buffer_type(cpu_backend.get()),
+    };
+    ggml_backend_sched_ptr sched(ggml_backend_sched_new(
+            sched_backends, sched_bufts, 2, 1024, /*parallel =*/ true, /*op_offload =*/ false));
+    if (!sched || ggml_backend_sched_get_n_copies(sched.get()) != 4) {
+        std::fprintf(stderr, "Meta scheduler did not create four event-protected copy slots\n");
+        return false;
+    }
+    return true;
+}
+
+static bool test_meta_event_partial_cleanup() {
+    fake_event_device_context ok_ctx   = {"FakeEventOK",   false};
+    fake_event_device_context fail_ctx = {"FakeEventFail", true};
+    ggml_backend_device ok_dev   = {fake_event_device_iface, nullptr, &ok_ctx};
+    ggml_backend_device fail_dev = {fake_event_device_iface, nullptr, &fail_ctx};
+    ggml_backend_dev_t children[] = {&ok_dev, &fail_dev};
+    split_ud ud{2};
+    ggml_backend_dev_t meta_dev = ggml_backend_meta_device(children, 2, split_state_callback, &ud);
+    ggml_backend_event_t event = ggml_backend_event_new(meta_dev);
+    if (event != nullptr) {
+        std::fprintf(stderr, "Meta event creation unexpectedly survived a child allocation failure\n");
+        ggml_backend_event_free(event);
+        return false;
+    }
+    if (ok_ctx.created != 1 || ok_ctx.freed != 1 || fail_ctx.created != 1 || fail_ctx.freed != 0) {
+        std::fprintf(stderr, "partial Meta event cleanup mismatch: ok=%d/%d fail=%d/%d\n",
+                ok_ctx.created, ok_ctx.freed, fail_ctx.created, fail_ctx.freed);
+        return false;
+    }
+    return true;
 }
 
 static bool test_deep_meta_graph(ggml_backend_t backend) {
@@ -149,6 +301,24 @@ int main() {
     if (!backend) {
         std::fprintf(stderr, "failed to initialize meta backend\n");
         return 1;
+    }
+    if (!test_meta_events(meta_dev, backend.get())) {
+        return 1;
+    }
+
+    ggml_backend_dev_t cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
+    if (cpu_dev != nullptr) {
+        ggml_backend_dev_t mixed_children[] = {simple_devs.front(), cpu_dev};
+        split_ud mixed_ud{2};
+        ggml_backend_dev_t mixed_meta = ggml_backend_meta_device(mixed_children, 2, split_state_callback, &mixed_ud);
+        ggml_backend_dev_props mixed_props;
+        ggml_backend_dev_get_props(mixed_meta, &mixed_props);
+        ggml_backend_event_t mixed_event = ggml_backend_event_new(mixed_meta);
+        if (mixed_props.caps.events || mixed_event != nullptr) {
+            std::fprintf(stderr, "Meta device advertised events with an unsupported child\n");
+            ggml_backend_event_free(mixed_event);
+            return 1;
+        }
     }
 
     ggml_init_params params = {
@@ -322,7 +492,10 @@ int main() {
     if (!test_deep_meta_graph(backend.get())) {
         return 1;
     }
+    if (!test_meta_event_partial_cleanup()) {
+        return 1;
+    }
 
-    std::puts("meta split axis-2, axis-3, mirrored, partial, and multi-segment readback passed");
+    std::puts("meta split/event axis-2, axis-3, mirrored, partial, and multi-segment tests passed");
     return 0;
 }
