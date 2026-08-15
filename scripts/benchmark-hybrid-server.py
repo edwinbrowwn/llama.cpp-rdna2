@@ -407,6 +407,19 @@ def main():
         "meta_copy_telemetry": telemetry,
         "speculative_telemetry": parse_speculative_telemetry(log_text),
         "communicator_sizes": [int(value) for value in re.findall(r"RCCL/NCCL AllReduce across (\d+) devices", log_text)],
+        "pipeline_stages": [
+            {
+                "stage": int(match.group(1)),
+                "backend": match.group(2),
+                "first_layer": int(match.group(3)),
+                "last_layer": int(match.group(4)),
+                "owns_auxiliary_and_output": "+ auxiliary/NextN + output" in match.group(5),
+            }
+            for match in re.finditer(
+                r"parallel: stage (\d+) = (.*?), transformer layers (\d+)\.\.(\d+)(.*)",
+                log_text,
+            )
+        ],
         "pipeline_parallel_enabled": "pipeline parallelism enabled" in log_text,
         "gpu_samples": gpu_samples,
     }

@@ -16,6 +16,7 @@ BATCH=${BATCH:-1024}
 UBATCH=${UBATCH:-512}
 BASE_PORT=${BASE_PORT:-18120}
 CASES=${CASES:-tp2-pp1-nospec,tp4-pp1-nospec,tp4-pp1-external-mtp,tp2xpp2-nospec,tp2xpp2-external-mtp}
+PP_SPLIT=${PP_SPLIT:-1,1}
 
 cd "$ROOT"
 [[ -x build/bin/llama-server ]] || { echo "missing build/bin/llama-server" >&2; exit 1; }
@@ -59,6 +60,7 @@ ctx_total=$(( CTX_PER_SEQ * PARALLEL ))
     echo "batch=$BATCH"
     echo "ubatch=$UBATCH"
     echo "cases=$CASES"
+    echo "pp_split=$PP_SPLIT"
     echo "git_head=$(git rev-parse HEAD)"
     echo "git_status=$(git status --porcelain=v1 | tr '\n' ';')"
     build/bin/llama-server --version 2>&1 | sed 's/^/server_/'
@@ -108,9 +110,9 @@ contains_case tp4-pp1-nospec && run_case tp4-pp1-nospec "$((BASE_PORT + 1))" 0 \
 contains_case tp4-pp1-external-mtp && run_case tp4-pp1-external-mtp "$((BASE_PORT + 2))" 0 \
     -dev ROCm0,ROCm1,ROCm2,ROCm3 -ts 1,1,1,1 "${mtp[@]}"
 contains_case tp2xpp2-nospec && run_case tp2xpp2-nospec "$((BASE_PORT + 3))" 1 \
-    -dev ROCm0,ROCm1,ROCm2,ROCm3 -ts 1,1 --tp-size 2 --pp-size 2 --pp-split 1,1 --spec-type none
+    -dev ROCm0,ROCm1,ROCm2,ROCm3 -ts 1,1 --tp-size 2 --pp-size 2 --pp-split "$PP_SPLIT" --spec-type none
 contains_case tp2xpp2-external-mtp && run_case tp2xpp2-external-mtp "$((BASE_PORT + 4))" 1 \
-    -dev ROCm0,ROCm1,ROCm2,ROCm3 -ts 1,1 --tp-size 2 --pp-size 2 --pp-split 1,1 "${mtp[@]}"
+    -dev ROCm0,ROCm1,ROCm2,ROCm3 -ts 1,1 --tp-size 2 --pp-size 2 --pp-split "$PP_SPLIT" "${mtp[@]}"
 
 ./scripts/summarize-hybrid-performance.py --output-dir "$OUT/summary" "$OUT"
 python3 - "$OUT" <<'PY'
