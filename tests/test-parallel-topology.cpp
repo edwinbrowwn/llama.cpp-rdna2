@@ -49,6 +49,11 @@ int main() {
     assert(topology.group_for_stage(0) == &topology.groups[0]);
     assert(topology.group_for_device(devs[3]) == &topology.groups[1]);
     assert(topology.group_for_device(fake_dev(9)) == nullptr);
+    topology.groups[0].meta_device = fake_dev(10);
+    topology.groups[1].meta_device = fake_dev(11);
+    assert(topology.group_for_meta_device(fake_dev(10)) == &topology.groups[0]);
+    assert(topology.group_for_meta_device(fake_dev(11)) == &topology.groups[1]);
+    assert(topology.group_for_meta_device(fake_dev(12)) == nullptr);
 
     assert(llama_parallel_topology_assign_layers(topology, 40, error));
     assert(topology.groups[0].layer_begin == 0);

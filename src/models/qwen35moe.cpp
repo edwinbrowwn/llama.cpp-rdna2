@@ -46,8 +46,9 @@ void llama_model_qwen35moe::load_arch_tensors(llama_model_loader & ml) {
     int mtp_flags = !ml.load_mtp ? TENSOR_SKIP : 0;
 
     const int64_t model_n_ff_exp = hparams.n_ff_exp ? hparams.n_ff_exp : n_ff / n_expert_used;
-    const bool tensor_parallel = split_mode() == LLAMA_SPLIT_MODE_TENSOR &&
-        devices.size() == 1 && devices[0].is_meta;
+    const auto * tp_group = tensor_parallel_default_group();
+    const bool tensor_parallel = split_mode() == LLAMA_SPLIT_MODE_TENSOR && tp_group != nullptr &&
+        (is_hybrid_parallel() || (devices.size() == 1 && devices[0].is_meta));
     const bool layer_split = split_mode() == LLAMA_SPLIT_MODE_LAYER && devices.size() == 4 &&
         !devices[0].is_meta && !devices[1].is_meta && !devices[2].is_meta && !devices[3].is_meta;
     const qwen35moe_mmq_model_config mmq_config = {
@@ -59,8 +60,8 @@ void llama_model_qwen35moe::load_arch_tensors(llama_model_loader & ml) {
         /*.n_expert_used   =*/ n_expert_used,
         /*.tensor_parallel =*/ tensor_parallel,
         /*.layer_split     =*/ layer_split,
-        /*.n_devices       =*/ tensor_parallel ? get_split_state_ud.n_devices : devices.size(),
-        /*.tensor_split    =*/ tensor_split(),
+        /*.n_devices       =*/ tensor_parallel ? tp_group->n_devices : devices.size(),
+        /*.tensor_split    =*/ tensor_parallel ? llama_meta_device_get_tp_split(*tp_group) : tensor_split(),
     };
     const bool qwen36_35b_layer_mmvq_batch6 = mmq_config.is_35b_a3b &&
         qwen35moe_use_auto_rdna2_q4_k_j16(mmq_config);

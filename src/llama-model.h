@@ -703,6 +703,9 @@ struct llama_model {
 
     bool is_hybrid_parallel() const;
     const llama_parallel_topology & parallel_topology() const;
+    const llama_meta_device_get_split_state_userdata * tensor_parallel_group_for_device(ggml_backend_dev_t dev) const;
+    const llama_meta_device_get_split_state_userdata * tensor_parallel_group_for_layer(int il) const;
+    const llama_meta_device_get_split_state_userdata * tensor_parallel_default_group() const;
 
     bool is_tensor_parallel_output_head(const ggml_tensor * tensor) const;
     bool is_tensor_parallel_output_head_vocab_sharded(const ggml_tensor * tensor) const;

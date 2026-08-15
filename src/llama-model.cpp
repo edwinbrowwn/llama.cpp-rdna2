@@ -1962,6 +1962,28 @@ const llama_parallel_topology & llama_model::parallel_topology() const {
     return parallel;
 }
 
+const llama_meta_device_get_split_state_userdata * llama_model::tensor_parallel_group_for_device(ggml_backend_dev_t dev) const {
+    if (!is_hybrid_parallel()) {
+        return get_split_state_ud.n_devices > 0 ? &get_split_state_ud : nullptr;
+    }
+    const llama_parallel_group * group = parallel.group_for_meta_device(dev);
+    if (group == nullptr || group->stage_index >= parallel_split_state_ud.size()) {
+        return nullptr;
+    }
+    return parallel_split_state_ud[group->stage_index].get();
+}
+
+const llama_meta_device_get_split_state_userdata * llama_model::tensor_parallel_group_for_layer(int il) const {
+    return tensor_parallel_group_for_device(dev_layer(il));
+}
+
+const llama_meta_device_get_split_state_userdata * llama_model::tensor_parallel_default_group() const {
+    if (!is_hybrid_parallel()) {
+        return get_split_state_ud.n_devices > 0 ? &get_split_state_ud : nullptr;
+    }
+    return parallel_split_state_ud.empty() ? nullptr : parallel_split_state_ud.front().get();
+}
+
 bool llama_tensor_split_is_valid(
         int64_t n, int64_t granularity, const float * split, size_t n_devices, size_t rotation) {
     if (n <= 0 || granularity <= 0 || n_devices < 2 || n % granularity != 0) {
@@ -2008,31 +2030,51 @@ bool llama_model::is_tensor_parallel_output_head(const ggml_tensor * tensor) con
         if (requested && params.no_tp_output_head_sharding && arch == LLM_ARCH_DEEPSEEK4) {
             LLAMA_LOG_WARN("%s: keeping the DeepSeek V4 output head mirrored because an external draft model shares it\n", __func__);
         } else if (requested && params.split_mode == LLAMA_SPLIT_MODE_TENSOR && supported_arch) {
-            const size_t ndev = get_split_state_ud.n_devices;
-            auto valid_split = [&](const ggml_tensor * head, size_t rotation) {
-                if (head == nullptr || head == tok_embd || ggml_n_dims(head) != 2 ||
-                        head->ne[1] != (int64_t) vocab.n_tokens() || ndev < 2) {
+            auto valid_split = [&](const ggml_tensor * head, size_t rotation,
+                                   const llama_meta_device_get_split_state_userdata * group) {
+                if (head == nullptr || head == tok_embd || group == nullptr ||
+                        ggml_n_dims(head) != 2 || head->ne[1] != (int64_t) vocab.n_tokens() ||
+                        group->n_devices < 2) {
                     return false;
                 }
                 const int64_t granularity = std::lcm((int64_t) ggml_blck_size(head->type), (int64_t) 128);
                 const int split_axis = vocab_sharded_output && head == output ? 1 : 0;
-                return llama_tensor_split_is_valid(head->ne[split_axis], granularity, tensor_split(), ndev, rotation);
+                return llama_tensor_split_is_valid(
+                        head->ne[split_axis], granularity, llama_meta_device_get_tp_split(*group),
+                        group->n_devices, rotation);
+            };
+            auto register_head = [&](const ggml_tensor * head, size_t rotation,
+                                     const llama_meta_device_get_split_state_userdata * group) {
+                if (!valid_split(head, rotation, group)) {
+                    return;
+                }
+                tp_sharded_output_heads.insert(head);
+                if (is_hybrid_parallel()) {
+                    LLAMA_LOG_WARN("%s: experimental sharded tensor-parallel LM head %s in PP stage %u across %zu devices\n",
+                            __func__, head->name, group->pp_stage, group->n_devices);
+                } else {
+                    LLAMA_LOG_WARN("%s: experimental sharded tensor-parallel LM head %s across %zu devices\n",
+                            __func__, head->name, group->n_devices);
+                }
             };
 
-            if (valid_split(output, hparams.n_layer() % ndev)) tp_sharded_output_heads.insert(output);
+            const auto * output_group = is_hybrid_parallel() ?
+                tensor_parallel_group_for_device(dev_output()) : tensor_parallel_default_group();
+            if (output_group != nullptr) {
+                register_head(output, hparams.n_layer() % output_group->n_devices, output_group);
+            }
             for (size_t il = 0; il < layers.size(); ++il) {
+                const auto * layer_group = is_hybrid_parallel() ?
+                    tensor_parallel_group_for_layer(il) : tensor_parallel_default_group();
+                if (layer_group == nullptr) {
+                    continue;
+                }
                 size_t il_eff = 0;
                 for (size_t il_prev = 0; il_prev < il; ++il_prev) {
                     il_eff += hparams.is_recr(il_prev) == hparams.is_recr(il) &&
                               hparams.is_swa (il_prev) == hparams.is_swa (il);
                 }
-                if (valid_split(layers[il].nextn.shared_head_head, il_eff % ndev)) {
-                    tp_sharded_output_heads.insert(layers[il].nextn.shared_head_head);
-                }
-            }
-            for (const ggml_tensor * head : tp_sharded_output_heads) {
-                LLAMA_LOG_WARN("%s: experimental sharded tensor-parallel LM head %s across %zu devices\n",
-                    __func__, head->name, ndev);
+                register_head(layers[il].nextn.shared_head_head, il_eff % layer_group->n_devices, layer_group);
             }
         }
     }

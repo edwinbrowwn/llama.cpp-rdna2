@@ -30,6 +30,15 @@ const llama_parallel_group * llama_parallel_topology::group_for_device(ggml_back
     return nullptr;
 }
 
+const llama_parallel_group * llama_parallel_topology::group_for_meta_device(ggml_backend_dev_t dev) const {
+    for (const auto & group : groups) {
+        if (group.meta_device == dev) {
+            return &group;
+        }
+    }
+    return nullptr;
+}
+
 const llama_parallel_group * llama_parallel_topology::group_for_layer(uint32_t il) const {
     for (const auto & group : groups) {
         if (il >= group.layer_begin && il < group.layer_end) {

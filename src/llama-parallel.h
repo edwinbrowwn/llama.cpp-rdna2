@@ -40,6 +40,7 @@ struct llama_parallel_topology {
 
     const llama_parallel_group * group_for_stage(uint32_t stage) const;
     const llama_parallel_group * group_for_device(ggml_backend_dev_t dev) const;
+    const llama_parallel_group * group_for_meta_device(ggml_backend_dev_t dev) const;
     const llama_parallel_group * group_for_layer(uint32_t il) const;
 };
 

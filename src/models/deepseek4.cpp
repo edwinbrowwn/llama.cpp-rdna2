@@ -95,15 +95,18 @@ void llama_model_deepseek4::load_arch_tensors(llama_model_loader & ml) {
     const int trunk_flags = mtp_only    ? TENSOR_NOT_REQUIRED : 0;
     const int mtp_flags   = ml.load_mtp ? 0 : TENSOR_SKIP;
 
+    const auto * tp_group = tensor_parallel_default_group();
+    const bool tensor_parallel = split_mode() == LLAMA_SPLIT_MODE_TENSOR && tp_group != nullptr &&
+        (is_hybrid_parallel() || (devices.size() == 1 && devices[0].is_meta));
     const deepseek4_mmq_model_config mmq_config = {
         /*.n_layer         =*/ hparams.n_layer(),
         /*.n_embd          =*/ n_embd,
         /*.n_ff_exp        =*/ n_ff_exp,
         /*.n_expert        =*/ n_expert,
         /*.n_expert_used   =*/ n_expert_used,
-        /*.tensor_parallel =*/ split_mode() == LLAMA_SPLIT_MODE_TENSOR && devices.size() == 1 && devices[0].is_meta,
-        /*.n_devices       =*/ get_split_state_ud.n_devices,
-        /*.tensor_split    =*/ tensor_split(),
+        /*.tensor_parallel =*/ tensor_parallel,
+        /*.n_devices       =*/ tensor_parallel ? tp_group->n_devices : devices.size(),
+        /*.tensor_split    =*/ tensor_parallel ? llama_meta_device_get_tp_split(*tp_group) : tensor_split(),
     };
     const bool auto_rdna2_mmq_j16 = deepseek4_use_auto_rdna2_mmq_j16(mmq_config);
 
