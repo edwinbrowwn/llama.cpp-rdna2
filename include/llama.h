@@ -340,6 +340,12 @@ extern "C" {
         bool no_alloc;        // only load metadata and simulate memory allocations
         bool load_mtp;        // whether to load MTP layers
         bool no_tp_output_head_sharding; // keep a shared output head mirrored for an external draft context
+
+        // Explicit hybrid tensor x pipeline topology. [EXPERIMENTAL]
+        // pp_size <= 1 preserves the legacy split-mode behavior exactly.
+        uint32_t tp_size;       // 0 = derive/default legacy behavior
+        uint32_t pp_size;       // 0/1 = no hybrid pipeline stages
+        const float * pp_split; // optional stage weights, length pp_size
     };
 
     struct llama_sampler_seq_config {

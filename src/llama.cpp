@@ -9,6 +9,7 @@
 #include "llama-model-loader.h"
 #include "llama-model-saver.h"
 #include "llama-model.h"
+#include "llama-parallel.h"
 
 #include "ggml.h"
 #include "ggml-cpp.h"
@@ -24,6 +25,7 @@
 #include <cstring>
 #include <ctime>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #if defined(_MSC_VER)
@@ -151,6 +153,35 @@ int64_t llama_time_us(void) {
 
 // returns true on success
 static bool llama_prepare_model_devices(const llama_model_params & params, llama_model * model) {
+    // Fail closed while the topology/configuration seam is introduced. The next
+    // implementation step replaces this guard with explicit Meta-group creation;
+    // legacy PP1 execution never enters this branch.
+    if (params.pp_size > 1) {
+        if (params.split_mode != LLAMA_SPLIT_MODE_TENSOR) {
+            LLAMA_LOG_ERROR("%s: hybrid TP x PP requires LLAMA_SPLIT_MODE_TENSOR\n", __func__);
+            return false;
+        }
+        if (params.devices == nullptr) {
+            LLAMA_LOG_ERROR("%s: hybrid TP x PP requires an explicit device list\n", __func__);
+            return false;
+        }
+
+        std::vector<ggml_backend_dev_t> physical_devices;
+        for (ggml_backend_dev_t * dev = params.devices; *dev; ++dev) {
+            physical_devices.push_back(*dev);
+        }
+        llama_parallel_topology topology;
+        std::string error;
+        if (!llama_parallel_topology_build(
+                    physical_devices, params.tp_size, params.pp_size,
+                    params.tensor_split, params.pp_split, topology, error)) {
+            LLAMA_LOG_ERROR("%s: invalid hybrid TP x PP topology: %s\n", __func__, error.c_str());
+            return false;
+        }
+        LLAMA_LOG_ERROR("%s: hybrid TP x PP topology validated but execution is not enabled in this scaffold commit\n", __func__);
+        return false;
+    }
+
     // create list of devices to use with this model
     if (params.devices) {
         if (params.split_mode == LLAMA_SPLIT_MODE_TENSOR) {

@@ -38,10 +38,23 @@ static void test(void) {
         common_params base;
         base.n_parallel = 4;
         base.n_outputs_max_per_seq = 8;
+        base.tp_size = 2;
+        base.pp_size = 2;
+        base.pp_split[0] = 1.0f;
+        base.pp_split[1] = 1.0f;
 
-        const auto draft = common_base_params_to_speculative(base);
-        assert(draft.n_outputs_max == 4);
-        assert(draft.n_outputs_max_per_seq == 1);
+        const auto same_model = common_base_params_to_speculative(base);
+        assert(same_model.n_outputs_max == 4);
+        assert(same_model.n_outputs_max_per_seq == 1);
+        assert(same_model.tp_size == 2);
+        assert(same_model.pp_size == 2);
+
+        base.speculative.draft.mparams.path = "external-draft.gguf";
+        const auto external_draft = common_base_params_to_speculative(base);
+        assert(external_draft.tp_size == 0);
+        assert(external_draft.pp_size == 1);
+        assert(external_draft.pp_split[0] == 0.0f);
+        assert(external_draft.pp_split[1] == 0.0f);
     }
 
     printf("test-arg-parser: make sure there is no duplicated arguments in any examples\n\n");
@@ -129,6 +142,12 @@ static void test(void) {
     argv = {"binary_name", "-sm", "hello"};
     assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
 
+    argv = {"binary_name", "--tp-size", "-1"};
+    assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
+
+    argv = {"binary_name", "--pp-size", "0"};
+    assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
+
     {
         common_params penalty_params;
         assert(penalty_params.sampling.penalty_last_n == 64);
@@ -191,6 +210,14 @@ static void test(void) {
     assert(params.model.path == "abc.gguf");
     assert(params.n_predict == 6789);
     assert(params.n_batch == 9090);
+
+    argv = {"binary_name", "--tp-size", "2", "--pp-size", "2", "--pp-split", "18,22"};
+    assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
+    assert(params.tp_size == 2);
+    assert(params.pp_size == 2);
+    assert(params.pp_split[0] == 18.0f);
+    assert(params.pp_split[1] == 22.0f);
+    assert(params.pp_split[2] == 0.0f);
 
     // --draft cannot be used outside llama-speculative
     argv = {"binary_name", "--spec-draft-n-max", "123"};

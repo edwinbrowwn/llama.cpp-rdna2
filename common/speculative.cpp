@@ -2303,6 +2303,14 @@ common_params common_base_params_to_speculative(const common_params & params) {
         result.n_gpu_layers          = params_spec.n_gpu_layers;
         result.tensor_buft_overrides = params_spec.tensor_buft_overrides;
 
+        // External draft topology is independent from the target. Until draft-
+        // specific TP x PP controls exist, preserve the draft's established
+        // placement policy instead of inheriting target hybrid fields through
+        // the common_params copy above.
+        result.tp_size = 0;
+        result.pp_size = 1;
+        std::fill(result.pp_split, result.pp_split + llama_max_devices(), 0.0f);
+
         if (params_spec.cpuparams.n_threads > 0) {
             result.cpuparams.n_threads       = params_spec.cpuparams.n_threads;
             result.cpuparams_batch.n_threads = params_spec.cpuparams_batch.n_threads;

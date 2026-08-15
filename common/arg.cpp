@@ -2752,6 +2752,43 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_TENSOR_SPLIT"));
     add_opt(common_arg(
+        {"--tp-size"}, "N",
+        "uniform tensor-parallel group size for explicit hybrid TP x PP (0 preserves legacy behavior)",
+        [](common_params & params, int value) {
+            if (value < 0) {
+                throw std::invalid_argument("--tp-size must be non-negative");
+            }
+            params.tp_size = value;
+        }
+    ).set_env("LLAMA_ARG_TP_SIZE"));
+    add_opt(common_arg(
+        {"--pp-size"}, "N",
+        "number of explicit pipeline stages (1 preserves legacy behavior)",
+        [](common_params & params, int value) {
+            if (value < 1) {
+                throw std::invalid_argument("--pp-size must be at least 1");
+            }
+            params.pp_size = value;
+        }
+    ).set_env("LLAMA_ARG_PP_SIZE"));
+    add_opt(common_arg(
+        {"--pp-split"}, "N0,N1,N2,...",
+        "complete-layer distribution among explicit pipeline stages, e.g. 1,1",
+        [](common_params & params, const std::string & value) {
+            const std::regex regex{ R"([,/]+)" };
+            std::sregex_token_iterator it{ value.begin(), value.end(), regex, -1 };
+            std::vector<std::string> split_arg{ it, {} };
+            if (split_arg.empty() || split_arg.size() >= llama_max_devices()) {
+                throw std::invalid_argument(
+                    string_format("got %zu PP split values, but system supports fewer than %zu", split_arg.size(), llama_max_devices())
+                );
+            }
+            for (size_t i = 0; i < llama_max_devices(); ++i) {
+                params.pp_split[i] = i < split_arg.size() ? std::stof(split_arg[i]) : 0.0f;
+            }
+        }
+    ).set_env("LLAMA_ARG_PP_SPLIT"));
+    add_opt(common_arg(
         {"-mg", "--main-gpu"}, "INDEX",
         string_format("the GPU to use for the model (with split-mode = none), or for intermediate results and KV (with split-mode = row) (default: %d)", params.main_gpu),
         [](common_params & params, int value) {

@@ -2741,6 +2741,9 @@ llama_model_params llama_model_default_params() {
         /*.no_alloc                    =*/ false,
         /*.load_mtp                    =*/ false,
         /*.no_tp_output_head_sharding =*/ false,
+        /*.tp_size                     =*/ 0,
+        /*.pp_size                     =*/ 1,
+        /*.pp_split                    =*/ nullptr,
     };
 
     return result;

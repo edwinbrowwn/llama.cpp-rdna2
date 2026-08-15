@@ -1233,6 +1233,11 @@ struct common_init_result::impl {
 
 common_init_result::common_init_result(common_params & params, bool model_only) :
     pimpl(new impl{}) {
+    if (params.pp_size > 1 && params.fit_params) {
+        COM_ERR("%s", "hybrid TP x PP requires --fit off until memory fitting is topology-aware\n");
+        return;
+    }
+
     auto mparams = common_model_params_to_llama(params);
     auto cparams = common_context_params_to_llama(params);
 
@@ -1606,6 +1611,9 @@ struct llama_model_params common_model_params_to_llama(common_params & params) {
     mparams.split_mode      = params.split_mode;
     mparams.load_mode       = params.load_mode;
     mparams.tensor_split    = params.tensor_split;
+    mparams.tp_size         = params.tp_size;
+    mparams.pp_size         = params.pp_size;
+    mparams.pp_split        = params.pp_split;
     mparams.check_tensors   = params.check_tensors;
     mparams.use_extra_bufts = !params.no_extra_bufts;
     mparams.no_host         = params.no_host;
