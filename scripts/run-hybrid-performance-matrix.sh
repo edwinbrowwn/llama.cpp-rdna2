@@ -144,9 +144,11 @@ for path in root.glob("*/*.json"):
     if any(request["truncated"] for group in data["groups"] for request in group["requests"]):
         raise SystemExit(f"{label}: a request was truncated")
 
-for baseline, speculative in [
-    ("tp4-pp1-nospec", "tp4-pp1-external-mtp"),
-    ("tp2xpp2-nospec", "tp2xpp2-external-mtp"),
+output_audit = {"seed_base": next(iter(artifacts.values()))["seed_base"], "pairs": []}
+required_errors = []
+for baseline, speculative, required in [
+    ("tp4-pp1-nospec", "tp4-pp1-external-mtp", False),
+    ("tp2xpp2-nospec", "tp2xpp2-external-mtp", True),
 ]:
     if baseline not in artifacts or speculative not in artifacts:
         continue
@@ -158,17 +160,36 @@ for baseline, speculative in [
     }
     if baseline_groups.keys() != speculative_groups.keys():
         raise SystemExit(f"{baseline}/{speculative}: workload groups differ")
+    mismatches = []
+    n_requests = 0
     for key in baseline_groups:
         lhs = baseline_groups[key]["requests"]
         rhs = speculative_groups[key]["requests"]
         if len(lhs) != len(rhs):
             raise SystemExit(f"{baseline}/{speculative} {key}: request counts differ")
         for index, (request_lhs, request_rhs) in enumerate(zip(lhs, rhs)):
+            n_requests += 1
             if request_lhs["tokens"] != request_rhs["tokens"]:
-                raise SystemExit(
-                    f"{baseline}/{speculative} {key} request {index}: fixed-seed output tokens differ"
+                first = next(
+                    (position for position, pair in enumerate(zip(request_lhs["tokens"], request_rhs["tokens"])) if pair[0] != pair[1]),
+                    min(len(request_lhs["tokens"]), len(request_rhs["tokens"])),
                 )
-print("HYBRID_MATRIX_STRUCTURE_AND_OUTPUT_OK")
+                mismatches.append({"concurrency": key[0], "repeat": key[1], "request": index, "first_difference": first})
+    output_audit["pairs"].append(
+        {
+            "baseline": baseline,
+            "speculative": speculative,
+            "required": required,
+            "requests": n_requests,
+            "mismatches": mismatches,
+        }
+    )
+    if required and mismatches:
+        required_errors.append(f"{baseline}/{speculative}: {len(mismatches)}/{n_requests} fixed-seed outputs differ")
+(root / "output-equivalence.json").write_text(json.dumps(output_audit, indent=2) + "\n")
+if required_errors:
+    raise SystemExit("; ".join(required_errors))
+print("HYBRID_MATRIX_STRUCTURE_AND_HYBRID_OUTPUT_OK")
 PY
 find "$OUT" -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum >"$OUT/SHA256SUMS"
 echo "HYBRID_PERFORMANCE_MATRIX_OK"
