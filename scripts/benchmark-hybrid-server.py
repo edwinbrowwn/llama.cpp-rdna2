@@ -282,7 +282,12 @@ def main():
         process = subprocess.Popen(command, stdout=log_file, stderr=subprocess.STDOUT)
         try:
             health = wait_for_server(base_url, process, args.startup_timeout)
-            server_version = http_json(base_url + "/version", timeout=10)
+            try:
+                server_version = http_json(base_url + "/version", timeout=10)
+            except urllib.error.HTTPError as error:
+                if error.code != 404:
+                    raise
+                server_version = None
             prompts = {
                 concurrency: [
                     make_prompt_tokens(base_url, args.prompt_tokens, index)
