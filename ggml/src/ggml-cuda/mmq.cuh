@@ -1,9 +1,12 @@
 #pragma once
 
 #include "common.cuh"
+#include "mmq-auto-config.h"
 
 #include <climits>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 
 #define MMQ_DP4A_MAX_BATCH_SIZE 64 // Max. batch size to use for dp4a MMQ kernels when FP16 tensor cores are available.
 #define MMQ_ITER_K             256
@@ -170,12 +173,13 @@ struct ggml_cuda_mmq_config {
     int                       J;           // SRAM tile width in src1->ne[1]/dst->ne[1] direction.
     ggml_cuda_mmq_sram_layout sram_layout; // SRAM tile length in src0->ne[0]/src1->ne[0] direction (physical 32 bit elements).
     int                       K_vram;      // VRAM tile length in src0->ne[0]/src1->ne[0] direction (logical elements).
+    bool                      use_typical_moe_ncols;
     bool                      stream_k;    // Whether or not to use stream-k decomposition.
     bool                      fallback;    // Whether a fallback for out-of-bounds check in src0->ne[1] direction is needed.
 
     constexpr __host__ __device__ ggml_cuda_mmq_config(
-            ggml_type type, int nthreads, int occupancy, int I, int J, ggml_cuda_mmq_sram_layout sram_layout, int K_vram, bool stream_k, bool fallback) :
-        type(type), nthreads(nthreads), occupancy(occupancy), I(I), J(J), sram_layout(sram_layout), K_vram(K_vram), stream_k(stream_k), fallback(fallback) {}
+            ggml_type type, int nthreads, int occupancy, int I, int J, ggml_cuda_mmq_sram_layout sram_layout, int K_vram, bool use_typical_moe_ncols, bool stream_k, bool fallback) :
+        type(type), nthreads(nthreads), occupancy(occupancy), I(I), J(J), sram_layout(sram_layout), K_vram(K_vram), use_typical_moe_ncols(use_typical_moe_ncols), stream_k(stream_k), fallback(fallback) {}
 
     constexpr __device__ int rows_per_warp() const {
 #if defined(AMD_MFMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
@@ -210,7 +214,7 @@ struct ggml_cuda_mmq_config {
         static_assert((I_)        %  32 == 0,                             "bad I");                                                       \
         static_assert((J_)        %   8 == 0,                             "bad J");                                                       \
         static_assert((K_vram_)   % 256 == 0,                             "bad K_vram");                                                  \
-        return ggml_cuda_mmq_config((type_), (nthreads_), (occupancy_), (I_), (J_), (sram_layout_), (K_vram_), (stream_k_), (fallback_)); \
+        return ggml_cuda_mmq_config((type_), (nthreads_), (occupancy_), (I_), (J_), (sram_layout_), (K_vram_), use_typical_moe_ncols, (stream_k_), (fallback_)); \
     }                                                                                                                                     \
 
 #include "mmq-config-pascal.cuh"
@@ -1465,7 +1469,10 @@ struct mmq_args {
     int64_t nchannels_x; int64_t nchannels_y; int64_t stride_channel_x; int64_t stride_channel_y; int64_t stride_channel_dst;
     int64_t nsamples_x; int64_t nsamples_y; int64_t stride_sample_x; int64_t stride_sample_y; int64_t stride_sample_dst;
     int64_t ncols_max;
+    int J_hint;
 };
+
+void ggml_cuda_rdna2_mmq_attest_auto(const mmq_args & args, int cc);
 
 static size_t mmq_get_nbytes_shared(const ggml_cuda_mmq_config & config, const int cc) {
     const size_t nbs_ids = config.J*sizeof(int);
@@ -1592,11 +1599,89 @@ static void launch_mul_mat_q(ggml_backend_cuda_context & ctx, const mmq_args & a
          ntx_fd);
 }
 
+static ggml_cuda_mmq_J_setting ggml_cuda_rdna2_mmq_J_load_setting(const char * env_name) {
+#if defined(GGML_USE_HIP)
+    const char * env = std::getenv(env_name);
+    const ggml_cuda_mmq_J_setting setting = ggml_cuda_mmq_parse_J_setting(env);
+    if (setting.state == ggml_cuda_mmq_J_setting::mode::invalid) {
+        fprintf(stderr, "%s must be 'default', 0, or a multiple of 8 in [8, 128] (got '%s')\n",
+                env_name, env ? env : "<unset>");
+        GGML_ABORT("invalid RDNA2 MMQ J setting");
+    }
+    return setting;
+#else
+    GGML_UNUSED(env_name);
+    return {ggml_cuda_mmq_J_setting::mode::absent, 0};
+#endif
+}
+
+struct ggml_cuda_rdna2_mmq_J_selection {
+    int J;
+    bool automatic;
+};
+
+static ggml_cuda_rdna2_mmq_J_selection ggml_cuda_rdna2_mmq_J_select(
+        ggml_type type, const mmq_args & args, int cc) {
+#if defined(GGML_USE_HIP)
+    static const ggml_cuda_mmq_J_setting global =
+        ggml_cuda_rdna2_mmq_J_load_setting("GGML_HIP_RDNA2_MMQ_J");
+    static const ggml_cuda_mmq_J_setting q4_k =
+        ggml_cuda_rdna2_mmq_J_load_setting("GGML_HIP_RDNA2_MMQ_J_Q4_K");
+    if (global.state != ggml_cuda_mmq_J_setting::mode::absent &&
+            q4_k.state != ggml_cuda_mmq_J_setting::mode::absent) {
+        GGML_ABORT("GGML_HIP_RDNA2_MMQ_J and GGML_HIP_RDNA2_MMQ_J_Q4_K are mutually exclusive");
+    }
+    if (global.state != ggml_cuda_mmq_J_setting::mode::absent) {
+        return {global.value, false};
+    }
+    if (type == GGML_TYPE_Q4_K && q4_k.state != ggml_cuda_mmq_J_setting::mode::absent) {
+        return {q4_k.value, false};
+    }
+
+    const ggml_cuda_mmq_auto_J_input input = {
+        /*.hint_j16      =*/ args.J_hint == 16,
+        /*.rdna2         =*/ GGML_CUDA_CC_IS_RDNA2(cc),
+        /*.q4_k          =*/ type == GGML_TYPE_Q4_K,
+        /*.routed_ids    =*/ args.ids_dst != nullptr,
+        /*.routed_bounds =*/ args.expert_bounds != nullptr,
+        /*.ncols_x       =*/ args.ncols_x,
+        /*.nrows_x       =*/ args.nrows_x,
+        /*.ncols_dst     =*/ args.ncols_dst,
+        /*.nchannels_x   =*/ args.nchannels_x,
+        /*.nchannels_y   =*/ args.nchannels_y,
+        /*.nsamples_x    =*/ args.nsamples_x,
+        /*.nsamples_y    =*/ args.nsamples_y,
+        /*.ncols_max     =*/ args.ncols_max,
+    };
+    const int automatic_J = ggml_cuda_mmq_auto_J(input);
+    return {automatic_J, automatic_J != 0};
+#else
+    GGML_UNUSED(type);
+    GGML_UNUSED(args);
+    GGML_UNUSED(cc);
+    return {0, false};
+#endif
+}
+
 template <ggml_type type, bool fallback>
 void mul_mat_q_switch_J(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream) {
     const int    id    = ggml_cuda_get_device();
     const int    cc    = ggml_cuda_info().devices[id].cc;
     const size_t smpbo = ggml_cuda_info().devices[id].smpbo;
+
+    int64_t ncols_picker = args.ncols_max;
+    if (args.expert_bounds != nullptr && args.nchannels_x > 0) {
+        const int J_max = ggml_cuda_mmq_get_J_max(type, fallback, cc, 128);
+        const ggml_cuda_mmq_config config_max = ggml_cuda_mmq_get_config(type, J_max, fallback, cc);
+        if (config_max.use_typical_moe_ncols) {
+            // Select tiles from the typical routed expert width while retaining
+            // the worst-case launch grid for complete output coverage.
+            const int64_t ncols_typical = (args.ncols_dst + args.nchannels_x - 1) / args.nchannels_x;
+            if (ncols_typical >= 1 && ncols_typical < J_max && ncols_typical < ncols_picker) {
+                ncols_picker = ncols_typical;
+            }
+        }
+    }
 
     int J_best        = 0;
     int ntiles_J_best = INT_MAX;
@@ -1611,11 +1696,25 @@ void mul_mat_q_switch_J(ggml_backend_cuda_context & ctx, const mmq_args & args, 
             continue;
         }
 
-        const int ntiles_x = (args.ncols_max + config.J - 1) / config.J;
+        const int ntiles_x = (ncols_picker + config.J - 1) / config.J;
 
         if (ntiles_x < ntiles_J_best) {
             J_best = J;
             ntiles_J_best = ntiles_x;
+        }
+    }
+
+    const ggml_cuda_rdna2_mmq_J_selection selection = ggml_cuda_rdna2_mmq_J_select(type, args, cc);
+    if (selection.J && GGML_CUDA_CC_IS_RDNA2(cc) && args.ids_dst) {
+        const ggml_cuda_mmq_config config = ggml_cuda_mmq_get_config(type, selection.J, fallback, cc);
+        if (config.type == GGML_TYPE_COUNT || mmq_get_nbytes_shared(config, cc) > smpbo) {
+            fprintf(stderr, "RDNA2 MMQ J selection=%d is unsupported for type=%d fallback=%d\n",
+                    selection.J, int(type), int(fallback));
+            GGML_ABORT("unsupported RDNA2 MMQ J selection");
+        }
+        J_best = selection.J;
+        if (selection.automatic) {
+            ggml_cuda_rdna2_mmq_attest_auto(args, cc);
         }
     }
 
@@ -1718,6 +1817,7 @@ extern DECL_MMQ_CASE(GGML_TYPE_NVFP4);
 // -------------------------------------------------------------------------------------------------------------------------
 
 void ggml_cuda_mul_mat_q(
-        ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * ids, ggml_tensor * dst);
+        ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * ids, ggml_tensor * dst,
+        const ggml_tensor * swiglu_gate = nullptr, const ggml_tensor * swiglu_up = nullptr);
 
 bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11, int64_t n_experts);

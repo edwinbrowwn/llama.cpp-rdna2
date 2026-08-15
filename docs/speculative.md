@@ -117,12 +117,14 @@ llama-server -m Qwen3-4B.gguf -md Qwen3-4B-DSpark.gguf \
 `--spec-draft-conf-min P` truncates each drafted block at the first position whose predicted
 acceptance (from the draft's confidence head, if present) falls below `P` (default 0 = disabled).
 
-Currently only drafts with a Qwen3 backbone are supported; support for other backbones
-(e.g. Gemma4) is planned.
+Drafts with a Qwen3 backbone and drafts with a DeepSeek-V4 backbone (MLA + MoE +
+hyper-connections, as used by DeepSeek-V4-Flash-DSpark) are supported; support for other
+backbones (e.g. Gemma4) is planned.
 
 See:
 
 - #25173
+- #25683
 
 ### n-gram Cache (`ngram-cache`)
 
@@ -215,6 +217,12 @@ Example Video:
 ## Command-Line Options
 
 If a draft model is combined with a draftless decoding the draftless decoding has higher precedence.
+
+### Backend Sampling
+
+Use `--backend-sampling` to run supported target-model samplers on the model backend. Draft-model sampling uses the backend by default and can be controlled with `--spec-draft-backend-sampling` and `--no-spec-draft-backend-sampling`.
+
+Unsupported samplers and device layouts fall back to CPU sampling. Tensor split mode does not support backend sampling. A fixed seed produces repeatable random draws, but stochastic CPU and backend sampling can still select different tokens because floating-point operations can differ between implementations and devices. Use greedy sampling when exact output matching is required.
 
 ### General Speculative Parameters
 

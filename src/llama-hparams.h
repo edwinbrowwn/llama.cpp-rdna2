@@ -53,6 +53,10 @@ struct llama_hparams {
     uint32_t n_embd;
     uint32_t n_layer_all;
     uint32_t n_layer_nextn = 0;
+
+    // granite-switch: index of the single-head "router" KV layer that encodes
+    // per-token adapter selection. -1 when the model has no such layer.
+    int32_t  router_layer = -1;
     uint32_t n_expert = 0;
     uint32_t n_expert_used = 0;
     uint32_t n_rel_attn_bkts = 0;
@@ -230,8 +234,6 @@ struct llama_hparams {
     // MSA
     uint32_t indexer_block_size  = 0;
     uint32_t indexer_local_blocks = 0;
-    // MSA stores its indexer keys in the main KV cache (k_idx tensors);
-    bool indexer_kv = false;
 
     // Indexer is "full" (1) or "shared" (0)
     // Shared indexers reuse top-k from previous full layer
@@ -246,6 +248,10 @@ struct llama_hparams {
     float    dsv4_compress_rope_base   = 0.0f;
     float    dsv4_hc_eps               = 0.0f;
     std::array<uint32_t, LLAMA_MAX_LAYERS> dsv4_compress_ratios;
+
+    // true when a DFlash drafter uses a DeepSeek-V4 backbone (MLA + MoE + hyper-connections)
+    // instead of the original dense Qwen3-style backbone.
+    bool dflash_dsv4_backbone = false;
 
     // qwen3vl deepstack
     // When parsed from GGUF, this implies the first N layers consume the first
@@ -356,9 +362,6 @@ struct llama_hparams {
     uint32_t n_embd_k_gqa_max() const;
     uint32_t n_embd_v_gqa_max() const;
 
-    // dimension of the single-head MSA indexer key stream
-    uint32_t n_embd_k_idx(uint32_t il = 0) const;
-
     // dimension of the rolling state embeddings
     // corresponds to Mamba's conv_states size or RWKV's token_shift states size
     uint32_t n_embd_r() const;
@@ -375,6 +378,8 @@ struct llama_hparams {
     uint32_t n_embd_head_v_mla() const;
 
     bool has_kv(uint32_t il) const;
+
+    bool has_rope(uint32_t il) const;
 
     // number of effective layers (excludes nextn layers)
     uint32_t n_layer() const;

@@ -654,6 +654,8 @@ extern "C" {
         GGML_TENSOR_FLAG_LOSS                =  8, // ...defines loss for numerical optimization (multiple loss tensors add up)
         GGML_TENSOR_FLAG_COMPUTE             = 16, // ...must be computed
         GGML_TENSOR_FLAG_FORCE_FP32_ALLREDUCE = 32, // ...must not use a reduced-precision collective
+        GGML_TENSOR_FLAG_MUL_MAT_ID_MMQ_J16   = 64, // advisory backend hint; mathematical semantics are unchanged
+        GGML_TENSOR_FLAG_MUL_MAT_ID_MMVQ_BATCH6 = 128, // advisory validated RDNA2 routed MMVQ six-row override
     };
 
     enum ggml_tri_type {
@@ -2786,6 +2788,12 @@ extern "C" {
             int                   idx);
 
     GGML_API void ggml_build_forward_expand(
+            struct ggml_cgraph * cgraph,
+            struct ggml_tensor * tensor);
+
+    // add the tensor and its parents to the graph without marking them for compute
+    // the flag is set later, when the tensor is reached from a node that computes
+    GGML_API void ggml_build_forward_order(
             struct ggml_cgraph * cgraph,
             struct ggml_tensor * tensor);
 
