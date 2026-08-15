@@ -71,9 +71,9 @@ contains_case() {
 }
 
 common=(
-    # Info level is required for Meta summary and MTP acceptance telemetry;
-    # debug-level per-token server logging remains disabled.
-    -lv 3 -m "$MODEL" -c "$ctx_total" -b "$BATCH" -ub "$UBATCH"
+    # The common logger maps low-level GGML Meta INFO records at verbosity 5.
+    # This retains the required copy summary and MTP acceptance telemetry.
+    -lv 5 -m "$MODEL" -c "$ctx_total" -b "$BATCH" -ub "$UBATCH"
     --parallel "$PARALLEL" --no-warmup --ctx-checkpoints 0
     -ngl all --split-mode tensor --fit off -fa on
 )
