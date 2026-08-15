@@ -1564,7 +1564,9 @@ static bool ggml_backend_sched_alloc_splits(ggml_backend_sched_t sched) {
     }
 
     // allocate graph
-    if (backend_ids_changed || !ggml_gallocr_alloc_graph(sched->galloc, &sched->graph)) {
+    const int64_t alloc_begin_us = sched->trace ? ggml_time_us() : 0;
+    const bool fast_alloc = !backend_ids_changed && ggml_gallocr_alloc_graph(sched->galloc, &sched->graph);
+    if (!fast_alloc) {
 #ifndef NDEBUG
         GGML_LOG_DEBUG("%s: failed to allocate graph, reserving (backend_ids_changed = %d)\n", __func__, backend_ids_changed);
 #endif
@@ -1582,15 +1584,27 @@ static bool ggml_backend_sched_alloc_splits(ggml_backend_sched_t sched) {
 
         // the re-allocation may cause the split inputs to be moved to a different address
         // synchronize without ggml_backend_sched_synchronize to avoid changing cur_copy
+        const int64_t sync_begin_us = sched->trace ? ggml_time_us() : 0;
         for (int i = 0; i < sched->n_backends; i++) {
             ggml_backend_synchronize(sched->backends[i]);
         }
+        const int64_t sync_end_us = sched->trace ? ggml_time_us() : 0;
 
         ggml_gallocr_reserve_n(sched->galloc, &sched->graph, sched->node_backend_ids, sched->leaf_backend_ids);
         if (!ggml_gallocr_alloc_graph(sched->galloc, &sched->graph)) {
             GGML_LOG_ERROR("%s: failed to allocate graph\n", __func__);
             return false;
         }
+        if (sched->trace) {
+            GGML_LOG_INFO("SCHED_TRACE alloc_graph next_dispatch=%llu slot=%d fast=0 backend_ids_changed=%d sync_us=%lld total_us=%lld ts_us=%lld\n",
+                    (unsigned long long) (sched->dispatch_count + 1), sched->cur_copy, backend_ids_changed ? 1 : 0,
+                    (long long) (sync_end_us - sync_begin_us), (long long) (ggml_time_us() - alloc_begin_us),
+                    (long long) ggml_time_us());
+        }
+    } else if (sched->trace) {
+        GGML_LOG_INFO("SCHED_TRACE alloc_graph next_dispatch=%llu slot=%d fast=1 backend_ids_changed=0 sync_us=0 total_us=%lld ts_us=%lld\n",
+                (unsigned long long) (sched->dispatch_count + 1), sched->cur_copy,
+                (long long) (ggml_time_us() - alloc_begin_us), (long long) ggml_time_us());
     }
 
     return true;

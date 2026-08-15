@@ -2319,6 +2319,7 @@ struct ggml_backend_meta_context {
     std::atomic<uint64_t> async_copy_logical_bytes     {0};
     std::atomic<uint64_t> async_copy_physical_bytes    {0};
     bool async_copy_debug = false;
+    bool trace_graph_compute = false;
 
     // Shard registrations for the compute tensors and external views of the
     // graphs this instance executes. Double-buffered so the previous build's
@@ -2335,6 +2336,8 @@ struct ggml_backend_meta_context {
         const size_t n_devs = ggml_backend_meta_dev_n_devs(meta_dev);
         const char * copy_debug = getenv("GGML_META_COPY_DEBUG");
         async_copy_debug = copy_debug != nullptr && atoi(copy_debug) != 0;
+        const char * graph_trace = getenv("GGML_META_TRACE");
+        trace_graph_compute = graph_trace != nullptr && atoi(graph_trace) != 0;
         {
             const ggml_init_params stc_params = {
                 /*.mem_size   =*/ 64*1024*ggml_tensor_overhead(),
@@ -2737,6 +2740,8 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend, 
     ggml_backend_meta_context * backend_ctx = (ggml_backend_meta_context *) backend->context;
 
     // If the previous cgraph had a defined UID it can be used to skip rebuilding the subgraphs per simple backend.
+    const int64_t graph_begin_us = backend_ctx->trace_graph_compute ? ggml_time_us() : 0;
+    const uint64_t previous_uid = backend_ctx->uid;
     const bool needs_rebuild = (cgraph->uid == 0) || (cgraph->uid != backend_ctx->uid);
 
     bool max_nnodes_raised = false;
@@ -3024,6 +3029,14 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend, 
         }
     }
 
+    const int64_t rebuild_end_us = backend_ctx->trace_graph_compute ? ggml_time_us() : 0;
+    if (backend_ctx->trace_graph_compute) {
+        GGML_LOG_INFO("META_TRACE graph backend=%s uid=%llu previous_uid=%llu rebuild=%d rebuild_us=%lld nodes=%d subgraphs=%zu\n",
+                backend_ctx->name.c_str(), (unsigned long long) cgraph->uid, (unsigned long long) previous_uid,
+                needs_rebuild ? 1 : 0, (long long) (rebuild_end_us - graph_begin_us),
+                cgraph->n_nodes, backend_ctx->n_subgraphs);
+    }
+
     size_t iga = 0; // i graph aux
     size_t ina = 0; // i node aux
 
@@ -3203,6 +3216,11 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend, 
                 }
             }
         }
+    }
+    if (backend_ctx->trace_graph_compute) {
+        GGML_LOG_INFO("META_TRACE enqueue backend=%s uid=%llu rebuild=%d enqueue_us=%lld total_us=%lld\n",
+                backend_ctx->name.c_str(), (unsigned long long) cgraph->uid, needs_rebuild ? 1 : 0,
+                (long long) (ggml_time_us() - rebuild_end_us), (long long) (ggml_time_us() - graph_begin_us));
     }
     return GGML_STATUS_SUCCESS;
 }
