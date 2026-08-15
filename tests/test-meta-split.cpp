@@ -201,6 +201,154 @@ static bool test_meta_event_partial_cleanup() {
     return true;
 }
 
+static bool test_meta_async_copy(const std::vector<ggml_backend_dev_t> & simple_devs) {
+    static split_ud src_ud{2};
+    static split_ud dst_ud{2};
+    static split_ud mismatch_ud{1};
+
+    ggml_backend_dev_t src_children[] = {simple_devs[0], simple_devs[1]};
+    ggml_backend_dev_t dst_children[] = {
+        simple_devs.size() >= 4 ? simple_devs[2] : simple_devs[0],
+        simple_devs.size() >= 4 ? simple_devs[3] : simple_devs[1],
+    };
+    ggml_backend_dev_t src_dev = ggml_backend_meta_device(src_children, 2, split_state_callback, &src_ud);
+    ggml_backend_dev_t dst_dev = ggml_backend_meta_device(dst_children, 2, split_state_callback, &dst_ud);
+    ggml_backend_dev_t mismatch_dev = ggml_backend_meta_device(dst_children, 1, split_state_callback, &mismatch_ud);
+    ggml_backend_ptr src_backend(ggml_backend_dev_init(src_dev, nullptr));
+    ggml_backend_ptr dst_backend(ggml_backend_dev_init(dst_dev, nullptr));
+    ggml_backend_ptr mismatch_backend(ggml_backend_dev_init(mismatch_dev, nullptr));
+    if (!src_backend || !dst_backend || !mismatch_backend) {
+        std::fprintf(stderr, "failed to initialize Meta async-copy test backends\n");
+        return false;
+    }
+
+    const ggml_init_params params = {
+        /*.mem_size   =*/ 1024*1024,
+        /*.mem_buffer =*/ nullptr,
+        /*.no_alloc   =*/ true,
+    };
+    ggml_context_ptr src_ctx(ggml_init(params));
+    ggml_context_ptr dst_ctx(ggml_init(params));
+    ggml_context_ptr mismatch_ctx(ggml_init(params));
+    if (!src_ctx || !dst_ctx || !mismatch_ctx) {
+        std::fprintf(stderr, "failed to initialize Meta async-copy test contexts\n");
+        return false;
+    }
+
+    ggml_tensor * src_mirror = ggml_new_tensor_4d(src_ctx.get(), GGML_TYPE_F32, 4, 4, 8, 1);
+    ggml_tensor * src_partial = ggml_new_tensor_4d(src_ctx.get(), GGML_TYPE_F32, 4, 4, 8, 1);
+    ggml_tensor * dst_mirror = ggml_new_tensor_4d(dst_ctx.get(), GGML_TYPE_F32, 4, 4, 8, 1);
+    ggml_tensor * dst_partial = ggml_new_tensor_4d(dst_ctx.get(), GGML_TYPE_F32, 4, 4, 8, 1);
+    ggml_tensor * mismatch_mirror = ggml_new_tensor_4d(mismatch_ctx.get(), GGML_TYPE_F32, 4, 4, 8, 1);
+    ggml_set_name(src_mirror, "copy-mirror");
+    ggml_set_name(dst_mirror, "copy-mirror");
+    ggml_set_name(mismatch_mirror, "copy-mirror");
+    ggml_set_name(src_partial, "partial");
+    ggml_set_name(dst_partial, "partial");
+
+    ggml_backend_buffer_ptr src_buffer(ggml_backend_alloc_ctx_tensors(src_ctx.get(), src_backend.get()));
+    ggml_backend_buffer_ptr dst_buffer(ggml_backend_alloc_ctx_tensors(dst_ctx.get(), dst_backend.get()));
+    ggml_backend_buffer_ptr mismatch_buffer(ggml_backend_alloc_ctx_tensors(mismatch_ctx.get(), mismatch_backend.get()));
+    if (!src_buffer || !dst_buffer || !mismatch_buffer) {
+        std::fprintf(stderr, "failed to allocate Meta async-copy test tensors\n");
+        return false;
+    }
+
+    const size_t nbytes = ggml_nbytes(src_mirror);
+    std::vector<float> expected(nbytes / sizeof(float));
+    std::vector<float> sentinel(expected.size(), -17.0f);
+    std::vector<float> actual(expected.size(), 0.0f);
+    for (size_t i = 0; i < expected.size(); ++i) {
+        expected[i] = (float) i + 0.5f;
+    }
+    ggml_backend_tensor_set(src_mirror, expected.data(), 0, nbytes);
+    ggml_backend_tensor_set(dst_mirror, sentinel.data(), 0, nbytes);
+
+    if (dst_backend->iface.cpy_tensor_async == nullptr ||
+            !dst_backend->iface.cpy_tensor_async(src_backend.get(), dst_backend.get(), src_mirror, dst_mirror)) {
+        std::fprintf(stderr, "mirrored Meta async copy was not accepted\n");
+        return false;
+    }
+    ggml_backend_synchronize(src_backend.get());
+    ggml_backend_synchronize(dst_backend.get());
+    ggml_backend_tensor_get(dst_mirror, actual.data(), 0, nbytes);
+    if (actual != expected) {
+        std::fprintf(stderr, "mirrored Meta async copy mismatch\n");
+        return false;
+    }
+
+    // PARTIAL is not a complete PP boundary. It must fail before any child
+    // copy is enqueued, leaving the destination unchanged.
+    ggml_backend_tensor_set(src_partial, expected.data(), 0, nbytes);
+    ggml_backend_tensor_set(dst_partial, sentinel.data(), 0, nbytes);
+    if (dst_backend->iface.cpy_tensor_async(src_backend.get(), dst_backend.get(), src_partial, dst_partial)) {
+        std::fprintf(stderr, "PARTIAL Meta async copy was unexpectedly accepted\n");
+        return false;
+    }
+    ggml_backend_synchronize(dst_backend.get());
+    std::fill(actual.begin(), actual.end(), 0.0f);
+    ggml_backend_tensor_get(dst_partial, actual.data(), 0, nbytes);
+    if (actual != sentinel) {
+        std::fprintf(stderr, "rejected PARTIAL Meta async copy modified the destination\n");
+        return false;
+    }
+
+    // Cardinality mismatch must likewise fail before destination mutation.
+    ggml_backend_tensor_set(mismatch_mirror, sentinel.data(), 0, nbytes);
+    if (mismatch_backend->iface.cpy_tensor_async(
+                src_backend.get(), mismatch_backend.get(), src_mirror, mismatch_mirror)) {
+        std::fprintf(stderr, "cardinality-mismatched Meta async copy was unexpectedly accepted\n");
+        return false;
+    }
+    ggml_backend_synchronize(mismatch_backend.get());
+    std::fill(actual.begin(), actual.end(), 0.0f);
+    ggml_backend_tensor_get(mismatch_mirror, actual.data(), 0, nbytes);
+    if (actual != sentinel) {
+        std::fprintf(stderr, "rejected cardinality mismatch modified the destination\n");
+        return false;
+    }
+
+    ggml_backend_meta_async_copy_stats stats{};
+    ggml_backend_meta_async_copy_stats mismatch_stats{};
+    if (!ggml_backend_meta_get_async_copy_stats(dst_backend.get(), &stats) ||
+            !ggml_backend_meta_get_async_copy_stats(mismatch_backend.get(), &mismatch_stats) ||
+            stats.attempts != 2 || stats.meta_attempts != 2 || stats.success != 1 ||
+            stats.fallback != 1 || stats.meta_fallback != 1 || stats.unsupported_state != 1 ||
+            stats.logical_bytes != nbytes || stats.physical_bytes != 2*nbytes ||
+            mismatch_stats.attempts != 1 || mismatch_stats.meta_attempts != 1 ||
+            mismatch_stats.success != 0 || mismatch_stats.fallback != 1 ||
+            mismatch_stats.meta_fallback != 1 || mismatch_stats.unsupported_state != 0) {
+        std::fprintf(stderr,
+                "Meta async-copy telemetry mismatch: main=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu mismatch=%llu/%llu/%llu/%llu/%llu/%llu\n",
+                (unsigned long long) stats.attempts,
+                (unsigned long long) stats.meta_attempts,
+                (unsigned long long) stats.success,
+                (unsigned long long) stats.fallback,
+                (unsigned long long) stats.meta_fallback,
+                (unsigned long long) stats.unsupported_state,
+                (unsigned long long) stats.logical_bytes,
+                (unsigned long long) stats.physical_bytes,
+                (unsigned long long) mismatch_stats.attempts,
+                (unsigned long long) mismatch_stats.meta_attempts,
+                (unsigned long long) mismatch_stats.success,
+                (unsigned long long) mismatch_stats.fallback,
+                (unsigned long long) mismatch_stats.meta_fallback,
+                (unsigned long long) mismatch_stats.unsupported_state);
+        return false;
+    }
+
+    std::printf("Meta async copy passed: attempts=%llu meta_attempts=%llu success=%llu fallback=%llu meta_fallback=%llu unsupported_state=%llu logical_bytes=%llu physical_bytes=%llu\n",
+            (unsigned long long) stats.attempts,
+            (unsigned long long) stats.meta_attempts,
+            (unsigned long long) stats.success,
+            (unsigned long long) stats.fallback,
+            (unsigned long long) stats.meta_fallback,
+            (unsigned long long) stats.unsupported_state,
+            (unsigned long long) stats.logical_bytes,
+            (unsigned long long) stats.physical_bytes);
+    return true;
+}
+
 static bool test_deep_meta_graph(ggml_backend_t backend) {
     static constexpr size_t depth = 2048;
     const ggml_init_params params = {
@@ -303,6 +451,9 @@ int main() {
         return 1;
     }
     if (!test_meta_events(meta_dev, backend.get())) {
+        return 1;
+    }
+    if (!test_meta_async_copy(simple_devs)) {
         return 1;
     }
 
@@ -496,6 +647,6 @@ int main() {
         return 1;
     }
 
-    std::puts("meta split/event axis-2, axis-3, mirrored, partial, and multi-segment tests passed");
+    std::puts("meta split/event/async-copy axis-2, axis-3, mirrored, partial, and multi-segment tests passed");
     return 0;
 }

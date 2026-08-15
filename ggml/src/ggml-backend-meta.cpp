@@ -6,6 +6,7 @@
 #include "ggml-cpp.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <cmath>
 #include <cstddef>
@@ -2309,6 +2310,16 @@ struct ggml_backend_meta_context {
     size_t                      n_subgraphs   = 0;
     uint64_t                    uid           = 0;
 
+    std::atomic<uint64_t> async_copy_attempts          {0};
+    std::atomic<uint64_t> async_copy_meta_attempts     {0};
+    std::atomic<uint64_t> async_copy_success           {0};
+    std::atomic<uint64_t> async_copy_fallback          {0};
+    std::atomic<uint64_t> async_copy_meta_fallback     {0};
+    std::atomic<uint64_t> async_copy_unsupported_state {0};
+    std::atomic<uint64_t> async_copy_logical_bytes     {0};
+    std::atomic<uint64_t> async_copy_physical_bytes    {0};
+    bool async_copy_debug = false;
+
     // Shard registrations for the compute tensors and external views of the
     // graphs this instance executes. Double-buffered so the previous build's
     // structs survive one rebuild; flipped and reset only by this instance's
@@ -2322,6 +2333,8 @@ struct ggml_backend_meta_context {
 
     ggml_backend_meta_context(ggml_backend_dev_t meta_dev, const char * params) {
         const size_t n_devs = ggml_backend_meta_dev_n_devs(meta_dev);
+        const char * copy_debug = getenv("GGML_META_COPY_DEBUG");
+        async_copy_debug = copy_debug != nullptr && atoi(copy_debug) != 0;
         {
             const ggml_init_params stc_params = {
                 /*.mem_size   =*/ 64*1024*ggml_tensor_overhead(),
@@ -2363,6 +2376,18 @@ struct ggml_backend_meta_context {
     }
 
     ~ggml_backend_meta_context() {
+        if (async_copy_debug) {
+            GGML_LOG_INFO("META_COPY summary backend=%s attempts=%llu meta_attempts=%llu success=%llu fallback=%llu meta_fallback=%llu unsupported_state=%llu logical_bytes=%llu physical_bytes=%llu\n",
+                    name.c_str(),
+                    (unsigned long long) async_copy_attempts.load(std::memory_order_relaxed),
+                    (unsigned long long) async_copy_meta_attempts.load(std::memory_order_relaxed),
+                    (unsigned long long) async_copy_success.load(std::memory_order_relaxed),
+                    (unsigned long long) async_copy_fallback.load(std::memory_order_relaxed),
+                    (unsigned long long) async_copy_meta_fallback.load(std::memory_order_relaxed),
+                    (unsigned long long) async_copy_unsupported_state.load(std::memory_order_relaxed),
+                    (unsigned long long) async_copy_logical_bytes.load(std::memory_order_relaxed),
+                    (unsigned long long) async_copy_physical_bytes.load(std::memory_order_relaxed));
+        }
         if (comm_ctx != nullptr) {
             ggml_backend_comm_free_t comm_free = (ggml_backend_comm_free_t) ggml_backend_reg_get_proc_address(
                 ggml_backend_dev_backend_reg(ggml_backend_get_device(backend_configs[0].backend)), "ggml_backend_comm_free");
@@ -2555,6 +2580,119 @@ static void ggml_backend_meta_get_tensor_async(ggml_backend_t backend, const ggm
             GGML_ABORT("fatal error");
         }
     }
+}
+
+static bool ggml_backend_meta_copy_tensor_async(
+        ggml_backend_t backend_src, ggml_backend_t backend_dst,
+        const ggml_tensor * src, ggml_tensor * dst) {
+    GGML_ASSERT(ggml_backend_is_meta(backend_dst));
+    auto * dst_ctx = (ggml_backend_meta_context *) backend_dst->context;
+    dst_ctx->async_copy_attempts.fetch_add(1, std::memory_order_relaxed);
+
+    const bool is_meta_attempt = ggml_backend_is_meta(backend_src);
+    if (is_meta_attempt) {
+        dst_ctx->async_copy_meta_attempts.fetch_add(1, std::memory_order_relaxed);
+    }
+    auto fallback = [&](bool unsupported_state, const char * reason) {
+        dst_ctx->async_copy_fallback.fetch_add(1, std::memory_order_relaxed);
+        if (is_meta_attempt) {
+            dst_ctx->async_copy_meta_fallback.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (unsupported_state) {
+            dst_ctx->async_copy_unsupported_state.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (dst_ctx->async_copy_debug) {
+            GGML_LOG_INFO("META_COPY fallback tensor='%s' type=%s bytes=%zu reason=%s\n",
+                    src != nullptr ? src->name : "<null>",
+                    src != nullptr ? ggml_type_name(src->type) : "<null>",
+                    src != nullptr ? ggml_nbytes(src) : 0, reason);
+        }
+        return false;
+    };
+
+    if (!ggml_backend_is_meta(backend_src) || src == nullptr || dst == nullptr ||
+            src->buffer == nullptr || dst->buffer == nullptr ||
+            !ggml_backend_buffer_is_meta(src->buffer) || !ggml_backend_buffer_is_meta(dst->buffer) ||
+            !ggml_are_same_layout(src, dst)) {
+        return fallback(false, "non-Meta endpoint or incompatible logical layout");
+    }
+
+    const size_t n_src = ggml_backend_meta_n_backends(backend_src);
+    const size_t n_dst = ggml_backend_meta_n_backends(backend_dst);
+    if (n_src == 0 || n_src != n_dst) {
+        return fallback(false, "TP cardinality mismatch");
+    }
+
+    const ggml_backend_meta_split_state src_state = ggml_backend_meta_get_split_state(src, /*assume_sync =*/ true);
+    const ggml_backend_meta_split_state dst_state = ggml_backend_meta_get_split_state(dst, /*assume_sync =*/ true);
+    if (src_state.axis != GGML_BACKEND_SPLIT_AXIS_MIRRORED ||
+            dst_state.axis != GGML_BACKEND_SPLIT_AXIS_MIRRORED ||
+            src_state.n_segments != 1 || dst_state.n_segments != 1 ||
+            src_state.nr[0] != 1 || dst_state.nr[0] != 1) {
+        return fallback(true, "only complete MIRRORED to MIRRORED is supported");
+    }
+
+    // Resolve and validate every rank before enqueueing rank zero. Unsupported
+    // cardinalities, split states, layouts, buffers, and child backend pairs
+    // therefore fail as one logical operation and use the scheduler fallback.
+    ggml_backend_meta_scratch_shards src_scratch(n_src);
+    ggml_backend_meta_scratch_shards dst_scratch(n_dst);
+    std::vector<const ggml_tensor *> src_shards(n_src);
+    std::vector<ggml_tensor *> dst_shards(n_dst);
+    std::vector<ggml_backend_t> src_backends(n_src);
+    std::vector<ggml_backend_t> dst_backends(n_dst);
+    for (size_t rank = 0; rank < n_src; ++rank) {
+        src_shards[rank]   = src_scratch.get(src, rank);
+        dst_shards[rank]   = dst_scratch.get(dst, rank);
+        src_backends[rank] = ggml_backend_meta_simple_backend(backend_src, rank);
+        dst_backends[rank] = ggml_backend_meta_simple_backend(backend_dst, rank);
+        if (src_shards[rank] == nullptr || dst_shards[rank] == nullptr ||
+                !ggml_are_same_layout(src_shards[rank], dst_shards[rank]) ||
+                ggml_nbytes(src_shards[rank]) != ggml_nbytes(src) ||
+                ggml_nbytes(dst_shards[rank]) != ggml_nbytes(dst) ||
+                src_shards[rank]->data == nullptr || dst_shards[rank]->data == nullptr) {
+            return fallback(false, "child tensor or layout unsupported");
+        }
+
+        ggml_backend_buffer_t src_buf = src_shards[rank]->view_src != nullptr ?
+            src_shards[rank]->view_src->buffer : src_shards[rank]->buffer;
+        ggml_backend_buffer_t dst_buf = dst_shards[rank]->view_src != nullptr ?
+            dst_shards[rank]->view_src->buffer : dst_shards[rank]->buffer;
+        if (src_buf == nullptr || dst_buf == nullptr ||
+                ggml_backend_buft_get_device(ggml_backend_buffer_get_type(src_buf)) !=
+                    ggml_backend_get_device(src_backends[rank]) ||
+                ggml_backend_buft_get_device(ggml_backend_buffer_get_type(dst_buf)) !=
+                    ggml_backend_get_device(dst_backends[rank]) ||
+                !ggml_guid_matches(ggml_backend_guid(src_backends[rank]), ggml_backend_guid(dst_backends[rank])) ||
+                dst_backends[rank]->iface.cpy_tensor_async == nullptr) {
+            return fallback(false, "child backend or buffer placement unsupported");
+        }
+    }
+
+    for (size_t rank = 0; rank < n_src; ++rank) {
+        if (!dst_backends[rank]->iface.cpy_tensor_async(
+                    src_backends[rank], dst_backends[rank], src_shards[rank], dst_shards[rank])) {
+            // A child may still reject a runtime condition after structural
+            // preflight. Complete prior rank work before reporting failure so
+            // the scheduler's full blocking fallback cannot observe a partial
+            // transfer.
+            ggml_backend_synchronize(backend_src);
+            ggml_backend_synchronize(backend_dst);
+            return fallback(false, "child runtime rejected copy after preflight");
+        }
+    }
+
+    const uint64_t logical_bytes = ggml_nbytes(src);
+    dst_ctx->async_copy_success.fetch_add(1, std::memory_order_relaxed);
+    dst_ctx->async_copy_logical_bytes.fetch_add(logical_bytes, std::memory_order_relaxed);
+    dst_ctx->async_copy_physical_bytes.fetch_add(logical_bytes * n_src, std::memory_order_relaxed);
+    if (dst_ctx->async_copy_debug) {
+        GGML_LOG_INFO("META_COPY async tensor='%s' type=%s state=MIRRORED->MIRRORED logical_bytes=%llu physical_bytes=%llu ranks=%zu\n",
+                src->name, ggml_type_name(src->type),
+                (unsigned long long) logical_bytes,
+                (unsigned long long) (logical_bytes * n_src), n_src);
+    }
+    return true;
 }
 
 static void ggml_backend_meta_synchronize(ggml_backend_t backend) {
@@ -3076,7 +3214,7 @@ static const ggml_backend_i ggml_backend_meta_i = {
     /* .get_tensor_async        = */ ggml_backend_meta_get_tensor_async,
     /* .set_tensor_2d_async     = */ nullptr,
     /* .get_tensor_2d_async     = */ nullptr,
-    /* .cpy_tensor_async        = */ nullptr,
+    /* .cpy_tensor_async        = */ ggml_backend_meta_copy_tensor_async,
     /* .synchronize             = */ ggml_backend_meta_synchronize,
     /* .graph_plan_create       = */ nullptr,
     /* .graph_plan_free         = */ nullptr,
@@ -3113,4 +3251,21 @@ ggml_backend_t ggml_backend_meta_simple_backend(ggml_backend_t meta_backend, siz
     GGML_ASSERT(ggml_backend_is_meta(meta_backend));
     const ggml_backend_meta_context * backend_ctx = (const ggml_backend_meta_context *) meta_backend->context;
     return backend_ctx->backend_configs[index].backend;
+}
+
+bool ggml_backend_meta_get_async_copy_stats(
+        ggml_backend_t meta_backend, ggml_backend_meta_async_copy_stats * stats) {
+    if (!ggml_backend_is_meta(meta_backend) || stats == nullptr) {
+        return false;
+    }
+    const auto * ctx = (const ggml_backend_meta_context *) meta_backend->context;
+    stats->attempts          = ctx->async_copy_attempts.load(std::memory_order_relaxed);
+    stats->meta_attempts     = ctx->async_copy_meta_attempts.load(std::memory_order_relaxed);
+    stats->success           = ctx->async_copy_success.load(std::memory_order_relaxed);
+    stats->fallback          = ctx->async_copy_fallback.load(std::memory_order_relaxed);
+    stats->meta_fallback     = ctx->async_copy_meta_fallback.load(std::memory_order_relaxed);
+    stats->unsupported_state = ctx->async_copy_unsupported_state.load(std::memory_order_relaxed);
+    stats->logical_bytes     = ctx->async_copy_logical_bytes.load(std::memory_order_relaxed);
+    stats->physical_bytes    = ctx->async_copy_physical_bytes.load(std::memory_order_relaxed);
+    return true;
 }
