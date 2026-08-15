@@ -401,6 +401,8 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
     static const std::regex pattern_ssm_alpha       ("blk\\.\\d*\\.ssm_alpha.weight");
     static const std::regex pattern_ssm_beta        ("blk\\.\\d*\\.ssm_beta.weight");
     static const std::regex pattern_ssm_beta_alpha  ("blk\\.\\d*\\.ssm_ba.weight");
+    static const std::regex pattern_gdn_qkvz_fused  ("blk\\.\\d*\\.gdn_qkvz\\.fused");
+    static const std::regex pattern_gdn_ba_fused    ("blk\\.\\d*\\.gdn_beta_alpha\\.fused");
     static const std::regex pattern_r_cache         ("cache_r_l\\d*");
     static const std::regex pattern_s_cache         ("cache_s_l\\d*");
     static const std::regex pattern_ssm_conv1d      ("blk\\.\\d*\\.ssm_conv1d.weight");
@@ -482,7 +484,7 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
         if (std::regex_match(tensor_name, pattern_q_bias) || std::regex_match(tensor_name, pattern_kv_bias)) {
             return get_tensor_config_impl(GGML_BACKEND_SPLIT_AXIS_0, "attn_output.weight", "ssm_out.weight");
         }
-        if (std::regex_match(tensor_name, pattern_qkv_weight)) {
+        if (std::regex_match(tensor_name, pattern_qkv_weight) || std::regex_match(tensor_name, pattern_gdn_qkvz_fused)) {
             return get_tensor_config_impl(GGML_BACKEND_SPLIT_AXIS_1, "attn_output.weight", "ssm_out.weight");
         }
         if ( std::regex_match(tensor_name, pattern_qkv_bias)) {
@@ -536,7 +538,7 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
             return get_tensor_config_impl(GGML_BACKEND_SPLIT_AXIS_0, "ssm_out.weight");
         }
         if (std::regex_match(tensor_name, pattern_ssm_alpha) || std::regex_match(tensor_name, pattern_ssm_beta) ||
-                std::regex_match(tensor_name, pattern_ssm_beta_alpha)) {
+                std::regex_match(tensor_name, pattern_ssm_beta_alpha) || std::regex_match(tensor_name, pattern_gdn_ba_fused)) {
             return get_tensor_config_impl(GGML_BACKEND_SPLIT_AXIS_1, "ssm_out.weight");
         }
         if (std::regex_match(tensor_name, pattern_r_cache) || std::regex_match(tensor_name, pattern_s_cache)) {
@@ -607,12 +609,19 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
                     GGML_ASSERT(tensor->ne[axis] == 2*key_dim + value_dim);
                     return {{key_dim, 2 + head_ratio}};
                 }
+                if (std::regex_match(tensor_name, pattern_gdn_qkvz_fused)) {
+                    GGML_ASSERT(tensor->ne[axis] == 2*key_dim + 2*value_dim);
+                    return {{key_dim, 2 + 2*head_ratio}};
+                }
                 if (std::regex_match(tensor_name, pattern_attn_gate_weight) || std::regex_match(tensor_name, pattern_ssm_out_weight)) {
                     return {{key_dim, head_ratio}};
                 }
                 if (std::regex_match(tensor_name, pattern_ssm_dt) || std::regex_match(tensor_name, pattern_ssm_a) ||
                         std::regex_match(tensor_name, pattern_ssm_alpha) || std::regex_match(tensor_name, pattern_ssm_beta)) {
                     return {{n_k_heads, head_ratio}};
+                }
+                if (std::regex_match(tensor_name, pattern_gdn_ba_fused)) {
+                    return {{n_k_heads, 2*head_ratio}};
                 }
                 if (std::regex_match(tensor_name, pattern_r_cache)) {
                     return {{key_dim * (hparams.ssm_d_conv - 1), 2 + head_ratio}};
@@ -667,6 +676,7 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
             const int64_t blck_size_perf  = std::lcm(blck_size, 128);
             const int64_t granularity_qkv = std::lcm(blck_size_perf, head_dim);
             if (std::regex_match(tensor_name, pattern_qkv_weight) || std::regex_match(tensor_name, pattern_attn_gate_weight) ||
+                    std::regex_match(tensor_name, pattern_gdn_qkvz_fused) ||
                     std::regex_match(tensor_name, pattern_ssm_conv1d) || std::regex_match(tensor_name, pattern_ssm_out_weight)) {
                 return std::vector<int64_t>(segments.size(), granularity_qkv);
             }
@@ -674,7 +684,7 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
                     std::regex_match(tensor_name, pattern_ssm_alpha) || std::regex_match(tensor_name, pattern_ssm_beta)) {
                 return std::vector<int64_t>(segments.size(), granularity_qkv / head_dim);
             }
-            if (std::regex_match(tensor_name, pattern_ssm_beta_alpha)) {
+            if (std::regex_match(tensor_name, pattern_ssm_beta_alpha) || std::regex_match(tensor_name, pattern_gdn_ba_fused)) {
                 return std::vector<int64_t>(segments.size(), 2 * (granularity_qkv / head_dim));
             }
             if (std::regex_match(tensor_name, pattern_r_cache)) {
@@ -1799,12 +1809,16 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
         }
     }
 
-    // Opt-in Qwen3.5/3.6 GDN sibling projection fusion. The source tensors are
-    // retained so graph construction can fall back for LoRA adapters. Packed
-    // Q8_0 rows and F32 rows are copied byte-for-byte without requantization.
-    if (llama_model_use_gfx1030_gdn_sibling_fusion() &&
-            arch == LLM_ARCH_QWEN35MOE && type == LLM_TYPE_35B_A3B &&
-            split_mode == LLAMA_SPLIT_MODE_LAYER) {
+    // Opt-in Qwen3.5/3.6/3.8 GDN sibling projection fusion. The source tensors
+    // are retained so graph construction can fall back for LoRA adapters.
+    // Packed Q8_0 rows and F32 rows are copied byte-for-byte without
+    // requantization. Tensor-parallel buffers keep the owning Meta device's
+    // split geometry through the fused tensor-name rules above.
+    const bool gdn_sibling_topology_supported =
+        (arch == LLM_ARCH_QWEN35MOE && type == LLM_TYPE_35B_A3B && split_mode == LLAMA_SPLIT_MODE_LAYER) ||
+        (arch == LLM_ARCH_QWEN35    && type == LLM_TYPE_27B &&
+            (split_mode == LLAMA_SPLIT_MODE_LAYER || split_mode == LLAMA_SPLIT_MODE_TENSOR));
+    if (llama_model_use_gfx1030_gdn_sibling_fusion() && gdn_sibling_topology_supported) {
         size_t fused_bytes = 0;
         int fused_qkvz = 0;
         int fused_ba = 0;
@@ -1825,9 +1839,31 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
                 return nullptr;
             }
 
-            ggml_backend_dev_t dev = ggml_backend_buft_get_device(first_buft);
-            ggml_backend_reg_t reg = dev ? ggml_backend_dev_backend_reg(dev) : nullptr;
-            if (reg == nullptr || std::strcmp(ggml_backend_reg_name(reg), "ROCm") != 0) {
+            auto tensor_is_rocm = [&](ggml_tensor * value) {
+                ggml_backend_buffer_type_t buft = ggml_backend_buffer_get_type(value->buffer);
+                ggml_backend_dev_t dev = buft ? ggml_backend_buft_get_device(buft) : nullptr;
+                if (!ggml_backend_buffer_is_meta(value->buffer)) {
+                    ggml_backend_reg_t reg = dev ? ggml_backend_dev_backend_reg(dev) : nullptr;
+                    return reg != nullptr && std::strcmp(ggml_backend_reg_name(reg), "ROCm") == 0;
+                }
+
+                const auto * group = tensor_parallel_group_for_device(dev);
+                if (group == nullptr || group->n_devices == 0) {
+                    return false;
+                }
+                for (size_t rank = 0; rank < group->n_devices; ++rank) {
+                    ggml_tensor * child = ggml_backend_meta_get_simple_tensor(value, rank);
+                    ggml_backend_buffer_type_t child_buft = child && child->buffer ?
+                        ggml_backend_buffer_get_type(child->buffer) : nullptr;
+                    ggml_backend_dev_t child_dev = child_buft ? ggml_backend_buft_get_device(child_buft) : nullptr;
+                    ggml_backend_reg_t child_reg = child_dev ? ggml_backend_dev_backend_reg(child_dev) : nullptr;
+                    if (child_reg == nullptr || std::strcmp(ggml_backend_reg_name(child_reg), "ROCm") != 0) {
+                        return false;
+                    }
+                }
+                return true;
+            };
+            if (!tensor_is_rocm(first) || !tensor_is_rocm(second)) {
                 return nullptr;
             }
 
@@ -2019,12 +2055,15 @@ bool llama_model::is_tensor_parallel_output_head(const ggml_tensor * tensor) con
     if (!tp_sharded_output_initialized) {
         tp_sharded_output_initialized = true;
         const char * enabled = getenv("GGML_TP_SHARDED_OUTPUT");
-        const bool supported_model = type == LLM_TYPE_35B_A3B || type == LLM_TYPE_122B_A10B;
+        const bool supported_model =
+            type == LLM_TYPE_27B || type == LLM_TYPE_35B_A3B || type == LLM_TYPE_122B_A10B;
         const bool supported_arch =
             ((arch == LLM_ARCH_QWEN35 || arch == LLM_ARCH_QWEN35MOE) && supported_model) ||
             arch == LLM_ARCH_DEEPSEEK4;
         const char * vocab_sharded = getenv("GGML_TP_VOCAB_SHARDED_OUTPUT");
-        const bool vocab_sharded_output = arch == LLM_ARCH_DEEPSEEK4 &&
+        const bool vocab_sharded_supported = arch == LLM_ARCH_DEEPSEEK4 ||
+            ((arch == LLM_ARCH_QWEN35 || arch == LLM_ARCH_QWEN35MOE) && type == LLM_TYPE_27B);
+        const bool vocab_sharded_output = vocab_sharded_supported &&
             vocab_sharded != nullptr && strcmp(vocab_sharded, "1") == 0;
         const bool requested = enabled != nullptr && strcmp(enabled, "1") == 0;
         if (requested && params.no_tp_output_head_sharding && arch == LLM_ARCH_DEEPSEEK4) {
@@ -2083,7 +2122,9 @@ bool llama_model::is_tensor_parallel_output_head(const ggml_tensor * tensor) con
 
 bool llama_model::is_tensor_parallel_output_head_vocab_sharded(const ggml_tensor * tensor) const {
     const char * enabled = getenv("GGML_TP_VOCAB_SHARDED_OUTPUT");
-    return arch == LLM_ARCH_DEEPSEEK4 && enabled != nullptr && strcmp(enabled, "1") == 0 &&
+    const bool supported = arch == LLM_ARCH_DEEPSEEK4 ||
+        ((arch == LLM_ARCH_QWEN35 || arch == LLM_ARCH_QWEN35MOE) && type == LLM_TYPE_27B);
+    return supported && tensor == output && enabled != nullptr && strcmp(enabled, "1") == 0 &&
         is_tensor_parallel_output_head(tensor);
 }
 
