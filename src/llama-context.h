@@ -380,6 +380,12 @@ private:
     // env: LLAMA_GRAPH_REUSE_DISABLE
     bool graph_reuse_disable = false;
 
+    // Opt-in scheduler timeline instrumentation (GGML_SCHED_TRACE).
+    bool     sched_trace                  = false;
+    uint64_t sched_trace_microbatch       = 0;
+    uint64_t graph_reuse_full_sync_count  = 0;
+    uint64_t graph_reuse_full_sync_time_us = 0;
+
     // perf
     mutable int64_t t_start_us  = 0;
     mutable int64_t t_load_us   = 0;

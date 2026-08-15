@@ -823,6 +823,9 @@ struct ggml_backend_sched {
     bool op_offload;
 
     int debug;
+    bool trace;
+    uint64_t dispatch_count;
+    uint64_t current_dispatch;
 
     // used for debugging graph reallocations [GGML_SCHED_DEBUG_REALLOC]
     // ref: https://github.com/ggml-org/llama.cpp/pull/17617
@@ -1611,8 +1614,17 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
             ggml_backend_t input_backend = ggml_backend_sched_get_tensor_backend(sched, split->inputs[input_id]);
             struct ggml_tensor * input = split->inputs[input_id];
             struct ggml_tensor * input_cpy = tensor_copy(input, split_backend_id, sched->cur_copy);
+            const int64_t copy_begin_us = sched->trace ? ggml_time_us() : 0;
+            const char * copy_mode = "unknown";
+            if (sched->trace) {
+                GGML_LOG_INFO("SCHED_TRACE copy_begin dispatch=%llu slot=%d split=%d backend='%s' input=%d tensor='%s' bytes=%zu user_input=%d ts_us=%lld\n",
+                        (unsigned long long) sched->current_dispatch, sched->cur_copy, split_id,
+                        ggml_backend_name(split_backend), input_id, input->name, ggml_nbytes(input),
+                        (input->flags & GGML_TENSOR_FLAG_INPUT) != 0, (long long) copy_begin_us);
+            }
 
             if (input->flags & GGML_TENSOR_FLAG_INPUT) {
+                copy_mode = "user_input_sync";
                 // inputs from the user must be copied immediately to prevent the user overwriting the data before the copy is done
                 if (sched->events[split_backend_id][sched->cur_copy] != NULL) {
                     ggml_backend_event_synchronize(sched->events[split_backend_id][sched->cur_copy]);
@@ -1637,6 +1649,7 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                     //|| (node->src[1] == input_cpy && node->op == GGML_OP_ADD_ID) /* GGML_OP_ADD_ID weights are small and not worth splitting */
                     )) {
 
+                    copy_mode = "expert_select";
                     const int64_t n_expert   = node->op == GGML_OP_MUL_MAT_ID ? input->ne[2] : input->ne[1];
                     const size_t expert_size = node->op == GGML_OP_MUL_MAT_ID ? input->nb[2] : input->nb[1];
 
@@ -1716,7 +1729,10 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                 } else {
                     // try async copy, but if not possible, we can still use a sync copy without synchronizing the dst backend, since we handle the synchronization here with multiple copies and events
                     // TODO: add public function to facilitate this, since applications do not have direct access to the backend interface
-                    if (!split_backend->iface.cpy_tensor_async || !split_backend->iface.cpy_tensor_async(input_backend, split_backend, input, input_cpy)) {
+                    const bool async_copy = split_backend->iface.cpy_tensor_async &&
+                        split_backend->iface.cpy_tensor_async(input_backend, split_backend, input, input_cpy);
+                    copy_mode = async_copy ? "async" : "sync_fallback";
+                    if (!async_copy) {
                         ggml_backend_synchronize(input_backend);
                         if (sched->events[split_backend_id][sched->cur_copy] != NULL) {
                             ggml_backend_event_synchronize(sched->events[split_backend_id][sched->cur_copy]);
@@ -1727,8 +1743,21 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                     }
                 }
             }
+            if (sched->trace) {
+                const int64_t copy_end_us = ggml_time_us();
+                GGML_LOG_INFO("SCHED_TRACE copy_end dispatch=%llu slot=%d split=%d backend='%s' input=%d tensor='%s' mode=%s ts_us=%lld enqueue_us=%lld\n",
+                        (unsigned long long) sched->current_dispatch, sched->cur_copy, split_id,
+                        ggml_backend_name(split_backend), input_id, input->name, copy_mode,
+                        (long long) copy_end_us, (long long) (copy_end_us - copy_begin_us));
+            }
         }
 
+        const int64_t stage_begin_us = sched->trace ? ggml_time_us() : 0;
+        if (sched->trace) {
+            GGML_LOG_INFO("SCHED_TRACE stage_enqueue_begin dispatch=%llu slot=%d split=%d backend='%s' nodes=%d ts_us=%lld\n",
+                    (unsigned long long) sched->current_dispatch, sched->cur_copy, split_id,
+                    ggml_backend_name(split_backend), split->graph.n_nodes, (long long) stage_begin_us);
+        }
         if (!sched->callback_eval) {
             enum ggml_status ec = ggml_backend_graph_compute_async(split_backend, &split->graph);
             if (ec != GGML_STATUS_SUCCESS) {
@@ -1768,6 +1797,14 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
             }
         }
 
+        if (sched->trace) {
+            const int64_t stage_end_us = ggml_time_us();
+            GGML_LOG_INFO("SCHED_TRACE stage_enqueue_end dispatch=%llu slot=%d split=%d backend='%s' ts_us=%lld enqueue_us=%lld\n",
+                    (unsigned long long) sched->current_dispatch, sched->cur_copy, split_id,
+                    ggml_backend_name(split_backend), (long long) stage_end_us,
+                    (long long) (stage_end_us - stage_begin_us));
+        }
+
         // record the event of this copy
         if (split->n_inputs > 0) {
             if (sched->events[split_backend_id][sched->cur_copy] != NULL) {
@@ -1794,6 +1831,8 @@ ggml_backend_sched_t ggml_backend_sched_new(
 
     const char * GGML_SCHED_DEBUG = getenv("GGML_SCHED_DEBUG");
     sched->debug = GGML_SCHED_DEBUG ? atoi(GGML_SCHED_DEBUG) : 0;
+    const char * GGML_SCHED_TRACE = getenv("GGML_SCHED_TRACE");
+    sched->trace = GGML_SCHED_TRACE ? atoi(GGML_SCHED_TRACE) != 0 : false;
 
     sched->debug_realloc = 0;
 #ifdef GGML_SCHED_NO_REALLOC
@@ -1804,6 +1843,10 @@ ggml_backend_sched_t ggml_backend_sched_new(
 
     sched->n_backends = n_backends;
     sched->n_copies = parallel ? GGML_SCHED_MAX_COPIES : 1;
+    if (sched->trace) {
+        GGML_LOG_INFO("SCHED_TRACE scheduler_init parallel=%d copies=%d backends=%d\n",
+                parallel ? 1 : 0, sched->n_copies, sched->n_backends);
+    }
 
     // initialize hash table
     // FIXME: needs to be size*2 to account for leafs (do it in graph_split instead)
@@ -1960,7 +2003,19 @@ enum ggml_status ggml_backend_sched_graph_compute_async(ggml_backend_sched_t sch
         }
     }
 
-    return ggml_backend_sched_compute_splits(sched);
+    sched->current_dispatch = ++sched->dispatch_count;
+    if (sched->trace) {
+        GGML_LOG_INFO("SCHED_TRACE dispatch_begin dispatch=%llu slot=%d splits=%d nodes=%d ts_us=%lld\n",
+                (unsigned long long) sched->current_dispatch, sched->cur_copy,
+                sched->n_splits, graph->n_nodes, (long long) ggml_time_us());
+    }
+    const enum ggml_status status = ggml_backend_sched_compute_splits(sched);
+    if (sched->trace) {
+        GGML_LOG_INFO("SCHED_TRACE dispatch_end dispatch=%llu slot=%d status=%d ts_us=%lld\n",
+                (unsigned long long) sched->current_dispatch, sched->cur_copy,
+                (int) status, (long long) ggml_time_us());
+    }
+    return status;
 }
 
 void ggml_backend_sched_synchronize(ggml_backend_sched_t sched) {

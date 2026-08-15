@@ -95,6 +95,9 @@ llama_context::llama_context(
     //     may need to be backend-dependent
     LLAMA_LOG_INFO("%s: constructing llama_context\n", __func__);
 
+    const char * sched_trace_env = getenv("GGML_SCHED_TRACE");
+    sched_trace = sched_trace_env != nullptr && atoi(sched_trace_env) != 0;
+
     t_start_us = model.t_start_us;
     t_load_us  = model.t_load_us;
 
@@ -428,11 +431,18 @@ llama_context::llama_context(
         LLAMA_LOG_DEBUG("%s: backend_ptrs.size() = %zu\n", __func__, backend_ptrs.size());
 
         // TODO: move these checks to ggml_backend_sched
-        // enabling pipeline parallelism in the scheduler increases memory usage, so it is only done when necessary
+        // Enabling scheduler pipeline slots increases memory usage, so retain
+        // every legacy safety gate. Explicit hybrid TP x PP is a second narrow
+        // eligibility path; PP1 remains exactly on the legacy decision path.
+        const bool layer_split_pipeline = model.split_mode() == LLAMA_SPLIT_MODE_LAYER;
+        const bool hybrid_tensor_pipeline =
+            model.split_mode() == LLAMA_SPLIT_MODE_TENSOR &&
+            model.is_hybrid_parallel() &&
+            model.parallel_topology().pipeline_parallel();
         bool pipeline_parallel =
             model.n_devices() > 1 &&
             model.n_gpu_layers() > model.hparams.n_layer_all &&
-            model.split_mode() == LLAMA_SPLIT_MODE_LAYER &&
+            (layer_split_pipeline || hybrid_tensor_pipeline) &&
             cparams.offload_kqv &&
             !model.has_tensor_overrides();
 
@@ -485,6 +495,11 @@ llama_context::llama_context(
 llama_context::~llama_context() {
     // wait for any pending asynchronous copies into the output buffers before they are freed
     synchronize();
+
+    if (sched_trace) {
+        LLAMA_LOG_INFO("SCHED_TRACE graph_reuse_summary ctx=%p full_sync_count=%" PRIu64 " full_sync_time_us=%" PRIu64 "\n",
+                (void *) this, graph_reuse_full_sync_count, graph_reuse_full_sync_time_us);
+    }
 
     if (!model.hparams.no_alloc) {
         for (size_t i = 0; i < backend_ptrs.size(); ++i) {
@@ -606,6 +621,10 @@ void llama_context::sched_reserve() {
     gf_res_reserve.reset(new llm_graph_result(max_nodes));
 
     sched.reset(ggml_backend_sched_new(backend_ptrs.data(), backend_buft.data(), backend_ptrs.size(), max_nodes, cparams.pipeline_parallel, cparams.op_offload));
+    if (cparams.pipeline_parallel || sched_trace) {
+        LLAMA_LOG_INFO("%s: scheduler parallel=%d, copies=%d\n", __func__,
+                cparams.pipeline_parallel ? 1 : 0, ggml_backend_sched_get_n_copies(sched.get()));
+    }
 
     llama_memory_context_ptr mctx;
     if (memory) {
@@ -1360,15 +1379,30 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
     // the new graph parameters
     // in order to correctly reuse a graph, it's full topology has to be uniquely determined by these parameters
     const auto gparams = graph_params(res, ubatch, mctx, gtype);
+    const bool reuse_graph = !graph_reuse_disable && res->can_reuse(gparams);
+    const uint64_t trace_microbatch = sched_trace ? ++sched_trace_microbatch : 0;
+    const llama_seq_id trace_seq = ubatch.n_seqs_unq > 0 && ubatch.seq_id_unq != nullptr ? ubatch.seq_id_unq[0] : -1;
+    if (sched_trace) {
+        LLAMA_LOG_INFO("SCHED_TRACE microbatch_begin ctx=%p microbatch=%" PRIu64 " seq=%d tokens=%u seqs=%u graph_type=%d reuse=%d\n",
+                (void *) this, trace_microbatch, trace_seq, ubatch.n_tokens, ubatch.n_seqs, (int) gtype, reuse_graph ? 1 : 0);
+    }
 
-    if (!graph_reuse_disable && res->can_reuse(gparams)) {
+    if (reuse_graph) {
         //LLAMA_LOG_DEBUG("%s: reusing previous graph\n", __func__);
 
         // with pipeline parallelism, the previous graph_compute_async may still be running
         // on the GPU. we must synchronize before set_inputs to avoid overwriting input tensors
         // that the previous compute is still reading.
         if (cparams.pipeline_parallel) {
+            const int64_t sync_begin_us = ggml_time_us();
             ggml_backend_sched_synchronize(sched.get());
+            const uint64_t sync_time_us = ggml_time_us() - sync_begin_us;
+            graph_reuse_full_sync_count++;
+            graph_reuse_full_sync_time_us += sync_time_us;
+            if (sched_trace) {
+                LLAMA_LOG_INFO("SCHED_TRACE graph_reuse_full_sync ctx=%p microbatch=%" PRIu64 " seq=%d duration_us=%" PRIu64 " total_count=%" PRIu64 "\n",
+                        (void *) this, trace_microbatch, trace_seq, sync_time_us, graph_reuse_full_sync_count);
+            }
         }
 
         n_reused++;
@@ -1412,6 +1446,11 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         LLAMA_LOG_ERROR("%s: failed to compute graph, compute status: %d\n", __func__, status);
         ret = status;
         return nullptr;
+    }
+
+    if (sched_trace) {
+        LLAMA_LOG_INFO("SCHED_TRACE microbatch_enqueued ctx=%p microbatch=%" PRIu64 " seq=%d tokens=%u\n",
+                (void *) this, trace_microbatch, trace_seq, ubatch.n_tokens);
     }
 
     ret = GGML_STATUS_SUCCESS;
