@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Model-dependent DSpark correctness check for the RDNA2 DSV4 branch.
-# It deliberately uses ubatch=1: the branch's server guard also forces this
-# target path when an AMD DFlash/DSpark drafter is loaded.
+# It deliberately uses ubatch=1: the branch refuses unsafe batched AMD
+# DFlash/DSpark verification rather than silently changing target behavior.
 set -Eeuo pipefail
 
 : "${DSV4_MODEL:?set DSV4_MODEL to the target GGUF shard}"

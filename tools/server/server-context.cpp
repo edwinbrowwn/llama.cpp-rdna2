@@ -1261,8 +1261,8 @@ private:
             }
         }
         if (has_block_draft_serial && has_amd_gpu_for_spec && params_base.n_ubatch > 1) {
-            SRV_WRN("%s", "DFlash/DSpark on AMD: forcing target ubatch-size=1 for exact target-token equivalence; target-only inference is unchanged\n");
-            params_base.n_ubatch = 1;
+            SRV_ERR("%s", "DFlash/DSpark on AMD requires --ubatch-size 1 for exact target-token equivalence; refusing unsafe batched speculative verification\n");
+            return false;
         }
 
         // attach a progress callback
