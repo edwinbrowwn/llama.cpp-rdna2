@@ -127,9 +127,10 @@ void llama_model_deepseek4::load_arch_tensors(llama_model_loader & ml) {
         layer.wq_b          = create_tensor(tn(LLM_TENSOR_ATTN_Q_B,      "weight", i), {q_lora_rank, n_head * n_embd_head}, flags);
         layer.wkv           = create_tensor(tn(LLM_TENSOR_ATTN_KV,       "weight", i), {n_embd, n_embd_head}, flags);
         layer.attn_kv_norm  = create_tensor(tn(LLM_TENSOR_ATTN_KV_NORM,  "weight", i), {n_embd_head}, flags);
-        // for wo_a, the shape in the file is (n_head * n_embd_head / o_groups, o_lora_rank*o_groups)
-        // so we reshape here, to avoid reshaping the tensor in the graph
-        layer.wo_a          = create_tensor(tn(LLM_TENSOR_ATTN_OUT_A,    "weight", i), {n_head * n_embd_head / o_groups, o_lora_rank, o_groups}, flags | TENSOR_ALLOW_RESHAPE);
+        // Keep wo_a in its serialized 2-D shape for tensor-split placement.
+        // The graph reshapes it to [K, o_lora_rank, o_groups]; that reshape
+        // carries the split across the grouped axis to match attn_derope.
+        layer.wo_a          = create_tensor(tn(LLM_TENSOR_ATTN_OUT_A,    "weight", i), {n_head * n_embd_head / o_groups, o_lora_rank * o_groups}, flags);
         layer.wo_b          = create_tensor(tn(LLM_TENSOR_ATTN_OUT_B,    "weight", i), {o_groups * o_lora_rank, n_embd}, flags);
 
         layer.hc_attn_fn    = create_tensor(tn(LLM_TENSOR_HC_ATTN_FN,    "weight", i), {hc_dim, hc_mix_dim}, flags);
@@ -1279,7 +1280,8 @@ ggml_tensor * llama_model_deepseek4::graph::build_attention_impl(
 
     out = ggml_reshape_3d(ctx0, out, o_group_dim, n_groups, nt);
     out = ggml_permute(ctx0, out, 0, 2, 1, 3);
-    ggml_tensor * oa = ggml_mul_mat(ctx0, layer.wo_a, out);
+    ggml_tensor * oa = ggml_mul_mat(ctx0,
+            ggml_reshape_3d(ctx0, layer.wo_a, layer.wo_a->ne[0], o_lora_rank, n_groups), out);
     cb(oa, "attn_wo_a", il);
     oa = ggml_permute(ctx0, oa, 0, 2, 1, 3);
     oa = ggml_cont_2d(ctx0, oa, o_lora_rank*n_groups, nt);
@@ -1312,7 +1314,6 @@ llama_model_deepseek4::graph::graph(const llama_model & model, const llm_graph_p
             cb(res->t_layer_inp[il], "layer_inp", il);
             ggml_build_forward_expand(gf, res->t_layer_inp[il]);
         }
-
         ggml_tensor * residual = inpL;
         ggml_tensor * post = nullptr;
         ggml_tensor * comb = nullptr;
@@ -1416,7 +1417,11 @@ llama_model_deepseek4::graph::graph(const llama_model & model, const llm_graph_p
     res->t_embd = cur;
 
     cur = ggml_mul_mat(ctx0, model.output, cur);
-    if (model.is_tensor_parallel_output_head(model.output)) {
+    if (model.is_tensor_parallel_output_head(model.output) &&
+            !model.is_tensor_parallel_output_head_vocab_sharded(model.output)) {
+        // Input-dimension sharding produces partial logits requiring an FP32
+        // allreduce. Vocabulary sharding leaves logits partitioned for the
+        // meta buffer to reassemble when CPU sampling reads them.
         cur->flags |= GGML_TENSOR_FLAG_FORCE_FP32_ALLREDUCE;
     }
     cb(cur, "result_output", -1);

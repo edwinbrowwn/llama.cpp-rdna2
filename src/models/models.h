@@ -1335,6 +1335,30 @@ struct llama_model_eagle3 : public llama_model_base {
 };
 
 
+// Official DeepSeek-V4 DSpark drafter.  This is intentionally separate from
+// llama_model_dflash: the artifact has a DeepSeek-V4 block recipe and its own
+// dspark.* tensor namespace, and is not a Qwen-style DFlash model.
+struct llama_model_deepseek4_dspark_draft : public llama_model_base {
+    llama_model_deepseek4_dspark_draft(const struct llama_model_params & params) : llama_model_base(params) {}
+
+    void load_hparams(llama_model_loader & ml) override;
+    void load_vocab(llama_model_loader & ml) override;
+    void load_arch_hparams(llama_model_loader & ml) override;
+    void load_arch_tensors(llama_model_loader & ml) override;
+
+    // The encoder consumes the three target hidden states; the decoder resolves
+    // token/output tensors from ctx_other because this artifact has no vocab.
+    template <bool is_enc>
+    struct graph : public llm_graph_context {
+        graph(const llama_model & model, const llm_graph_params & params);
+
+        ggml_tensor * build_inp_embd_enc() const;
+    };
+
+    std::unique_ptr<llm_graph_context> build_arch_graph(const llm_graph_params & params) const override;
+};
+
+
 struct llama_model_dflash : public llama_model_base {
     llama_model_dflash(const struct llama_model_params & params) : llama_model_base(params) {}
     void load_arch_hparams(llama_model_loader & ml) override;

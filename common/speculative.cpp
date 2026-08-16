@@ -925,7 +925,6 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
 
     const int32_t * target_layer_ids   = nullptr; // model_dft's extract layer indices
     uint32_t        target_layer_ids_n = 0;
-    int32_t         n_layer_tgt        = 0;       // extract id == n_layer_tgt -> pre-final-norm state (nextn)
 
     // scratch buffer for concatenated target features [n_tokens, n_embd_enc]
     std::vector<float> features_buf;
@@ -951,15 +950,22 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         n_embd_dec    = llama_model_n_embd(model_dft);
         n_embd_enc    = (int32_t) target_layer_ids_n * n_embd_tgt;
 
-        // read the trained block size from the dflash.block_size metadata key
+        // Official DFlash and DSpark artifacts use the dflash.* namespace.
+        // Keep dspark.* as a fallback for legacy converted artifacts, without
+        // allowing the legacy key to override the official metadata.
         block_size = 16;
+        mask_token_id = llama_vocab_mask(llama_model_get_vocab(model_dft));
         {
             char buf[32] = {};
             if (llama_model_meta_val_str(model_dft, "dflash.block_size", buf, sizeof(buf)) >= 0) {
                 block_size = std::atoi(buf);
+            } else if (is_dspark && llama_model_meta_val_str(model_dft, "dspark.block_size", buf, sizeof(buf)) >= 0) {
+                block_size = std::atoi(buf);
+            }
+            if (is_dspark && llama_model_meta_val_str(model_dft, "dspark.noise_token_id", buf, sizeof(buf)) >= 0) {
+                mask_token_id = std::atoi(buf);
             }
         }
-        mask_token_id = llama_vocab_mask(llama_model_get_vocab(model_dft));
 
         LOG_INF("%s: adding speculative implementation '%s'\n", __func__, common_speculative_type_to_str(type).c_str());
         LOG_INF("%s: - n_max=%d, n_min=%d, p_min=%.2f\n", __func__, this->params.n_max, this->params.n_min, this->params.p_min);
@@ -974,6 +980,13 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
             this->params.n_max = std::min(this->params.n_max, n_draft_max);
             this->params.n_min = std::min(this->params.n_min, n_draft_max);
         }
+        if (is_dspark && this->params.n_max < n_draft_max) {
+            // The official DSpark artifact always decodes and scores the full
+            // trained block; a smaller n_max discards paid-for draft tokens.
+            LOG_WRN("%s: DSpark drafts cost a full block of %d tokens per round; "
+                    "n_max=%d wastes the remainder -- consider n_max=%d with p_min>0 for confidence pruning\n",
+                    __func__, block_size, this->params.n_max, n_draft_max);
+        }
 
         batch        = llama_batch_init(llama_n_batch(ctx_dft), 0,          n_seq);
         batch_inject = llama_batch_init(llama_n_batch(ctx_dft), n_embd_dec, n_seq);
@@ -987,16 +1000,10 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
             s.reset(common_sampler_init(model_dft, sparams));
         }
 
-        // turn on extraction of the target layers' input embeddings; an id equal
-        // to the target's layer count means the pre-final-norm hidden state,
-        // which is captured through the unmasked nextn path instead
-        n_layer_tgt = llama_model_n_layer(model_tgt);
+        // DFlash/DSpark target_layers identify layer-input taps. Do not route
+        // the final listed DSV4 layer through the unrelated MTP nextn path.
         for (uint32_t k = 0; k < target_layer_ids_n; ++k) {
-            if (target_layer_ids[k] == n_layer_tgt) {
-                llama_set_embeddings_nextn(ctx_tgt, true, /*masked*/ false);
-            } else {
-                llama_set_embeddings_layer_inp(ctx_tgt, (uint32_t) target_layer_ids[k], true);
-            }
+            llama_set_embeddings_layer_inp(ctx_tgt, (uint32_t) target_layer_ids[k], true);
         }
 
         llama_set_embeddings_nextn(ctx_dft, true, /*masked*/ true);
@@ -1080,11 +1087,9 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
             }
             const int32_t n_rows = i_batch_end[seq_id] - i_batch_beg[seq_id] + 1;
 
-            // the previous block decoded its noise tokens at these very positions and left their K/V
-            // behind. injecting now would add a second cell at each position, and since the decoder
-            // runs non-causal both would be attended. drop the stale draft region first: the cache
-            // must hold exactly one injected target state per token, as in the reference.
-            llama_memory_seq_rm(llama_get_memory(ctx_dft), seq_id, batch_in.pos[i_batch_beg[seq_id]], -1);
+            // The target layer-input buffers are populated by asynchronous
+            // backend copies. Synchronize before copying them to the drafter.
+            llama_synchronize(ctx_tgt);
 
             for (int32_t offset = 0; offset < n_rows; offset += n_ubatch) {
                 const int32_t n_chunk = std::min(n_ubatch, n_rows - offset);
@@ -1092,9 +1097,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                 // gather this chunk's target features, interleaved by extract layer
                 features_buf.resize((size_t) n_chunk * n_embd_enc);
                 for (uint32_t k = 0; k < target_layer_ids_n; ++k) {
-                    const float * layer = target_layer_ids[k] == n_layer_tgt
-                        ? llama_get_embeddings_nextn(ctx_tgt)
-                        : llama_get_embeddings_layer_inp(ctx_tgt, (uint32_t) target_layer_ids[k]);
+                    const float * layer = llama_get_embeddings_layer_inp(ctx_tgt, (uint32_t) target_layer_ids[k]);
                     if (!layer) {
                         GGML_ABORT("DFlash: target layer %d input not extracted.", target_layer_ids[k]);
                     }
@@ -1180,6 +1183,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         // record where each block starts and its size
         std::vector<int32_t> i_block_beg(n_seq, -1);
         std::vector<int32_t> n_block    (n_seq,  0);
+        std::vector<int32_t> n_sample   (n_seq,  0);
 
         for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
             auto & dp = dparams[seq_id];
@@ -1191,16 +1195,15 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
 
             const int32_t n = (int32_t) dp.n_past;
 
-            // the previous block left its noise tokens' K/V in the draft region. the decoder runs
-            // non-causal, so those cells are not masked out by position and the new block would
-            // attend to them. only the injected target states (positions < n_past) may persist.
-            llama_memory_seq_rm(llama_get_memory(ctx_dft), seq_id, n, -1);
-
             const int32_t n_draft = params.n_max;
 
+            // DSpark's anchor-first block has one target position per
+            // requested draft token. The trained block size already clamps
+            // n_max above; do not submit unused mask positions.
             const int32_t n_block_tokens = n_draft + (is_dspark ? 0 : 1);
             i_block_beg[seq_id] = batch.n_tokens;
             n_block    [seq_id] = n_block_tokens;
+            n_sample   [seq_id] = n_draft;
             for (int32_t i = 0; i < n_block_tokens; ++i) {
                 common_batch_add(batch, i == 0 ? dp.id_last : mask_token_id, n + i, { seq_id }, true);
             }
@@ -1225,6 +1228,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
 
             const int32_t beg            = i_block_beg[seq_id];
             const int32_t n_block_tokens = n_block[seq_id];
+            const int32_t n_draft        = n_sample[seq_id];
 
             auto * smpl = smpls[seq_id].get();
 
@@ -1235,7 +1239,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                 // at the first position below the confidence threshold.
                 const float * conf = params.p_min > 0.0f ? llama_get_embeddings_nextn(ctx_dft) : nullptr;
 
-                for (int32_t i = 0; i < n_block_tokens; ++i) {
+                for (int32_t i = 0; i < n_draft; ++i) {
                     const int32_t idx = beg + i;
 
                     if (conf && conf[(size_t) idx * n_embd_dec] < params.p_min) {
@@ -2314,6 +2318,22 @@ common_params common_base_params_to_speculative(const common_params & params) {
     result.n_outputs_max = params.n_parallel;
     result.n_outputs_max_per_seq = 1;
 
+    // DFlash/DSpark reserve one draft-context output row per anchor/draft
+    // position. Without this, output rows can be truncated or mis-mapped.
+    const bool has_block_draft = std::any_of(
+        params.speculative.types.begin(), params.speculative.types.end(),
+        [](common_speculative_type type) {
+            return type == COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH ||
+                   type == COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK;
+        });
+    if (has_block_draft) {
+        const int32_t per_seq = std::max(1, params_spec.n_max + 1);
+        result.n_outputs_max = params.n_parallel * per_seq;
+        if (params_spec.backend_sampling) {
+            result.n_outputs_max_per_seq = per_seq;
+        }
+    }
+
     return result;
 }
 
@@ -2355,6 +2375,12 @@ common_speculative_init_result::common_speculative_init_result(
     if ((spec_dflash || spec_dspark) && mparams.split_mode == LLAMA_SPLIT_MODE_TENSOR) {
         mparams.split_mode = LLAMA_SPLIT_MODE_LAYER;
         LOG_INF("%s: using layer split for DFlash/DSpark draft weights while retaining target tensor split\n", __func__);
+    }
+    if (spec_dflash || spec_dspark) {
+        // The draft decoder is non-causal and requires its full block in one
+        // physical ubatch. This also permits an explicit target ubatch=1
+        // correctness isolation run without breaking draft initialization.
+        cparams.n_ubatch = std::max(cparams.n_ubatch, (uint32_t) params.speculative.draft.n_max + 1u);
     }
 
     if (spec_mtp) {
