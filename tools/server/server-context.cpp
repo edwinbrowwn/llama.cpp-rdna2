@@ -1236,6 +1236,35 @@ private:
             }
         }
 
+        // The RDNA2 DSV4 target's chunked recurrent path is not numerically
+        // equivalent to its autoregressive path during speculative verification.
+        // Keep normal inference unchanged, but make optional DFlash/DSpark use
+        // the proven serial target path rather than allowing token divergence.
+        const bool has_block_draft_serial = std::any_of(
+            params_base.speculative.types.begin(), params_base.speculative.types.end(),
+            [](common_speculative_type type) {
+                return type == COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH ||
+                       type == COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK;
+            });
+        bool has_amd_gpu_for_spec = false;
+        for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+            ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+            if (ggml_backend_dev_type(dev) != GGML_BACKEND_DEVICE_TYPE_GPU) {
+                continue;
+            }
+            const std::string name = ggml_backend_dev_name(dev);
+            if (name.find("AMD") != std::string::npos ||
+                name.find("Radeon") != std::string::npos ||
+                name.find("ROCm") != std::string::npos) {
+                has_amd_gpu_for_spec = true;
+                break;
+            }
+        }
+        if (has_block_draft_serial && has_amd_gpu_for_spec && params_base.n_ubatch > 1) {
+            SRV_WRN("%s", "DFlash/DSpark on AMD: forcing target ubatch-size=1 for exact target-token equivalence; target-only inference is unchanged\n");
+            params_base.n_ubatch = 1;
+        }
+
         // attach a progress callback
         {
             params_base.load_progress_callback = load_progress_callback;
@@ -1461,24 +1490,39 @@ private:
         }
         SRV_TRC("%s", "for more info see https://github.com/ggml-org/llama.cpp/pull/16391\n");
 
-        // Honor the explicit checkpoint count on every backend. AMD restore remains
-        // experimental (issue #20176), so warn when the user enables it but do
-        // not silently override --ctx-checkpoints.
-        if (params_base.n_ctx_checkpoints > 0) {
-            for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
-                ggml_backend_dev_t dev = ggml_backend_dev_get(i);
-                if (ggml_backend_dev_type(dev) != GGML_BACKEND_DEVICE_TYPE_GPU) {
-                    continue;
-                }
-                std::string name = ggml_backend_dev_name(dev);
-                if (name.find("AMD") != std::string::npos ||
-                    name.find("Radeon") != std::string::npos ||
-                    name.find("ROCm") != std::string::npos) {
-                    SRV_WRN("AMD GPU detected (%s) — context checkpoints explicitly enabled (max=%d, issue #20176); use --ctx-checkpoints 0 to disable\n",
-                            name.c_str(), params_base.n_ctx_checkpoints);
-                    break;
-                }
+        // AMD checkpoint restore remains experimental (issue #20176). More
+        // importantly, the branch's DFlash/DSpark target verification path is
+        // not numerically equivalent when server checkpoints are active: the
+        // first batched verification token can differ from the no-draft path.
+        // Disable only this optional checkpoint feature for block drafters;
+        // legacy models and ordinary speculative paths retain user settings.
+        const bool has_block_draft = std::any_of(
+            params_base.speculative.types.begin(), params_base.speculative.types.end(),
+            [](common_speculative_type type) {
+                return type == COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH ||
+                       type == COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK;
+            });
+        bool has_amd_gpu = false;
+        for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+            ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+            if (ggml_backend_dev_type(dev) != GGML_BACKEND_DEVICE_TYPE_GPU) {
+                continue;
             }
+            const std::string name = ggml_backend_dev_name(dev);
+            if (name.find("AMD") != std::string::npos ||
+                name.find("Radeon") != std::string::npos ||
+                name.find("ROCm") != std::string::npos) {
+                has_amd_gpu = true;
+                if (params_base.n_ctx_checkpoints > 0) {
+                    SRV_WRN("AMD GPU detected (%s) — context checkpoints enabled (max=%d, issue #20176)\n",
+                            name.c_str(), params_base.n_ctx_checkpoints);
+                }
+                break;
+            }
+        }
+        if (has_block_draft && has_amd_gpu && params_base.n_ctx_checkpoints > 0) {
+            SRV_WRN("%s", "DFlash/DSpark speculative decoding: disabling server context checkpoints on AMD for target-token equivalence; use target-only mode if checkpoints are required\n");
+            params_base.n_ctx_checkpoints = 0;
         }
 
         if (params_base.n_ctx_checkpoints > 0) {
