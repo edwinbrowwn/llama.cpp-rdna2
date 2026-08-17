@@ -15,8 +15,8 @@ TP4 is the measured/certified default policy. TP2 through TP8 are experimental a
 
 Modes:
 
-- `auto`: enable the offline-certified TP4 policy when the strict launch gate passes; TP2/3/5/6/7/8 remain Auto.
-- `force`: explicitly enable the experimental policy for supported TP2-TP8 shapes, still subject to plugin eligibility and conflict checks.
+- `auto`: enable the offline-certified non-MTP TP4 policy when the strict launch gate passes; MTP and TP2/3/5/6/7/8 remain Auto.
+- `force`: explicitly enable the experimental policy for supported TP2-TP8 shapes, including MTP, still subject to plugin eligibility and conflict checks.
 - `off`: do not select the native policy.
 
 Equivalent environment variable: `LLAMA_ARG_RCCL_TUNE=auto|force|off`. Existing `NCCL_ALGO`, `NCCL_PROTO`, channel, thread, or tuner-plugin overrides disable automatic selection rather than being overwritten.

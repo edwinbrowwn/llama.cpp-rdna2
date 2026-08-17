@@ -4,6 +4,7 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
 #include <filesystem>
 #include <string>
 
@@ -157,6 +158,13 @@ void server_rccl_tuner_prepare(const common_params & params, const char * argv0)
     const size_t n_split_devices = tensor_split_device_count(params);
     if (mode == COMMON_RCCL_TUNE_AUTO && n_split_devices != 4) {
         LOG_INF("RCCL native tuner: TP%zu is experimental and requires --rccl-tune force; using RCCL Auto\n", n_split_devices);
+        return;
+    }
+
+    const bool has_mtp = std::find(params.speculative.types.begin(), params.speculative.types.end(),
+            COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params.speculative.types.end();
+    if (mode == COMMON_RCCL_TUNE_AUTO && has_mtp) {
+        LOG_INF("RCCL native tuner: MTP workload is not certified; using RCCL Auto (use --rccl-tune force to experiment)\n");
         return;
     }
 
