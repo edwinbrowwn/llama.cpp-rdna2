@@ -9,12 +9,14 @@ llama-server --rccl-tune auto \
   -ngl 999
 ```
 
-`auto` is the default for `llama-server`. The native C++ startup gate requires tensor-parallel mode, four nonzero tensor-split entries, RCCL, and a plugin built beside the executable. The RCCL v6 plugin then requires four one-node AMD Radeon Pro V620 (`gfx1030`) devices and applies Ring/LL/3 only to the exact 20,480-byte AllReduce. All other collectives remain RCCL Auto.
+`auto` is the default for `llama-server`. The native C++ startup gate requires tensor-parallel mode, a 2- to 8-way nonzero tensor split, RCCL, and a plugin built beside the executable. The RCCL v6 plugin then requires one node with 2 to 8 visible AMD Radeon Pro V620 (`gfx1030`) devices. It applies Ring/LL with `min(3, TP-ranks)` channels only to the exact 20,480-byte AllReduce. All other collectives remain RCCL Auto.
+
+TP4 is the measured/certified default policy. TP2 through TP8 are experimental and require explicit `--rccl-tune force`; they are not benchmarked at startup. This makes the broader policy opt-in while retaining conservative Auto behavior for unvalidated TP sizes.
 
 Modes:
 
-- `auto`: enable the offline-certified policy when the strict launch gate passes; unsupported hardware or shapes remain Auto.
-- `force`: request the policy explicitly, still subject to plugin eligibility and conflict checks.
+- `auto`: enable the offline-certified TP4 policy when the strict launch gate passes; TP2/3/5/6/7/8 remain Auto.
+- `force`: explicitly enable the experimental policy for supported TP2-TP8 shapes, still subject to plugin eligibility and conflict checks.
 - `off`: do not select the native policy.
 
 Equivalent environment variable: `LLAMA_ARG_RCCL_TUNE=auto|force|off`. Existing `NCCL_ALGO`, `NCCL_PROTO`, channel, thread, or tuner-plugin overrides disable automatic selection rather than being overwritten.

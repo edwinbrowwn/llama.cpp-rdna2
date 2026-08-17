@@ -36,18 +36,19 @@ bool env_present(const char * name) {
     return value != nullptr && value[0] != '\0';
 }
 
-bool tensor_split_is_four_way(const common_params & params) {
+size_t tensor_split_device_count(const common_params & params) {
     size_t nonzero = 0;
     for (size_t i = 0; i < 128; ++i) {
         if (params.tensor_split[i] > 0.0f) {
             ++nonzero;
         }
     }
-    return nonzero == 4;
+    return nonzero;
 }
 
 bool requested_shape_is_eligible(const common_params & params) {
-    if (params.split_mode != LLAMA_SPLIT_MODE_TENSOR || !tensor_split_is_four_way(params)) {
+    const size_t n_split_devices = tensor_split_device_count(params);
+    if (params.split_mode != LLAMA_SPLIT_MODE_TENSOR || n_split_devices < 2 || n_split_devices > 8) {
         return false;
     }
 
@@ -58,7 +59,7 @@ bool requested_shape_is_eligible(const common_params & params) {
                 ++n_devices;
             }
         }
-        if (n_devices != 4) {
+        if (n_devices != n_split_devices) {
             return false;
         }
     }
@@ -149,7 +150,13 @@ void server_rccl_tuner_prepare(const common_params & params, const char * argv0)
     }
 
     if (!requested_shape_is_eligible(params)) {
-        LOG_INF("RCCL native tuner: non-TP4 tensor-split shape; using RCCL Auto\n");
+        LOG_INF("RCCL native tuner: unsupported tensor-split shape (split_mode=%d tp=%zu); using RCCL Auto\n", static_cast<int>(params.split_mode), tensor_split_device_count(params));
+        return;
+    }
+
+    const size_t n_split_devices = tensor_split_device_count(params);
+    if (mode == COMMON_RCCL_TUNE_AUTO && n_split_devices != 4) {
+        LOG_INF("RCCL native tuner: TP%zu is experimental and requires --rccl-tune force; using RCCL Auto\n", n_split_devices);
         return;
     }
 
@@ -162,7 +169,7 @@ void server_rccl_tuner_prepare(const common_params & params, const char * argv0)
     if (mode == COMMON_RCCL_TUNE_FORCE) {
         setenv("GGML_HIP_RCCL_TUNE", "force", 1);
         setenv("NCCL_TUNER_PLUGIN", plugin.c_str(), 1);
-        LOG_INF("RCCL native tuner: force enabled; policy frozen before communicator initialization\n");
+        LOG_INF("RCCL native tuner: force enabled for TP%zu; policy frozen before communicator initialization\n", n_split_devices);
         return;
     }
 
