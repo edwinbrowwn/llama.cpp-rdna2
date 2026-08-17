@@ -4,6 +4,7 @@
 #include "server-cors-proxy.h"
 #include "server-stream.h"
 #include "server-tools.h"
+#include "server-rccl-tuner.h"
 
 #include "arg.h"
 #include "build-info.h"
@@ -106,6 +107,7 @@ int llama_server(int argc, char ** argv) {
         return 1;
     }
 
+    server_rccl_tuner_prepare(params, argc > 0 ? argv[0] : nullptr);
     llama_backend_init();
     llama_numa_init(params.numa);
 

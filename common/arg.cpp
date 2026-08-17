@@ -2646,6 +2646,21 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_DEVICE"));
     add_opt(common_arg(
+        {"--rccl-tune"}, "auto|off|force",
+        "guarded native V620 RCCL policy (default: auto; unsupported shapes fall back to RCCL Auto)",
+        [](common_params & params, const std::string & value) {
+            if (value == "auto") {
+                params.rccl_tune = COMMON_RCCL_TUNE_AUTO;
+            } else if (value == "off") {
+                params.rccl_tune = COMMON_RCCL_TUNE_OFF;
+            } else if (value == "force") {
+                params.rccl_tune = COMMON_RCCL_TUNE_FORCE;
+            } else {
+                throw std::invalid_argument("invalid --rccl-tune, valid options: auto, off, force");
+            }
+        }
+    ).set_examples({ LLAMA_EXAMPLE_SERVER }).set_env("LLAMA_ARG_RCCL_TUNE"));
+    add_opt(common_arg(
         {"--list-devices"},
         "print list of available devices and exit",
         [](common_params &) {

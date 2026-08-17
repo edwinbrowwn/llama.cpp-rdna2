@@ -437,6 +437,12 @@ struct lr_opt {
 
 struct ggml_opt_optimizer_params common_opt_lr_pars(void * userdata);
 
+enum common_rccl_tune_mode {
+    COMMON_RCCL_TUNE_AUTO,
+    COMMON_RCCL_TUNE_OFF,
+    COMMON_RCCL_TUNE_FORCE,
+};
+
 struct common_params {
     int32_t n_predict             =    -1; // max. number of new tokens to predict, -1 == no limit
     int32_t n_ctx                 =     0; // context size, 0 == context the model was trained with
@@ -466,6 +472,7 @@ struct common_params {
     int32_t main_gpu           = 0;     // the GPU that is used for scratch and small tensors
     float   tensor_split[128]  = {0};   // how split tensors should be distributed across GPUs
     bool    fit_params         = true;  // whether to fit unset model/context parameters to free device memory
+    common_rccl_tune_mode rccl_tune = COMMON_RCCL_TUNE_AUTO; // guarded native V620 RCCL policy
     bool    fit_params_print   = false; // print the estimated required memory to run the model
     int32_t fit_params_min_ctx = 4096;  // minimum context size to set when trying to reduce memory use
 

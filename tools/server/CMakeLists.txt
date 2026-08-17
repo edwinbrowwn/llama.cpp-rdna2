@@ -43,6 +43,8 @@ add_library(${TARGET}
     server-http.h
     server-models.cpp
     server-models.h
+    server-rccl-tuner.cpp
+    server-rccl-tuner.h
 )
 set_target_properties(${TARGET} PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
 
@@ -63,3 +65,7 @@ install(TARGETS ${TARGET} RUNTIME)
 
 target_link_libraries(${TARGET} PRIVATE llama-server-impl)
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
+
+if (TARGET ggml-rccl-tuner-rdna2-v620)
+    add_dependencies(${TARGET} ggml-rccl-tuner-rdna2-v620)
+endif()
