@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 // Host-side loader for the optional BridgeSpec Qwen3.8-27B sidecars.
 // The sidecars are deliberately opt-in and model-specific.  A loader object
@@ -25,6 +26,12 @@ public:
 
     bool active() const;
     void disable();
+
+    bool get_state(std::vector<uint8_t> & data) const;
+    bool set_state(const std::vector<uint8_t> & data) const;
+    bool reset_state() const;
+    bool truncate_state(int32_t pos_max) const;
+    bool rebase_state(int32_t pos_min, int32_t pos_max, int32_t delta) const;
 
     int catchup(const int32_t * tokens, const int32_t * positions,
                 const float * hidden_rows, int count) const;
@@ -52,6 +59,12 @@ public:
 
     bool active() const;
     void disable();
+
+    bool get_state(std::vector<uint8_t> & data) const;
+    bool set_state(const std::vector<uint8_t> & data) const;
+    bool reset_state() const;
+    bool truncate_state(int32_t pos_max) const;
+    bool rebase_state(int32_t pos_min, int32_t pos_max, int32_t delta) const;
 
     int chunk(const int32_t * positions, const float * target_features, int count) const;
     int draft(int32_t last_token, int32_t past_tokens, int32_t * output_ids) const;

@@ -1,9 +1,11 @@
 // DFlash2 HIP drafter sidecar DLL — loaded by llama.cpp's impl_draft_dflash.
 // SPDX-License-Identifier: MIT
+// Release ABI 3 adds cursor/epoch state operations used by native checkpoints.
 // API: spec_dflash_init(dir) / spec_dflash_chunk(poss, feats, n) /
 //      spec_dflash_draft(id_last, n_past, out_ids[7]).
 #include "dflash_kernels.hip"
 #include "../artifact_manifest.h"
+#include "bridgespec/sidecar_abi.h"
 
 #define DFC(x) do { hipError_t e_ = (x); if (e_ != hipSuccess) { fprintf(stderr, "[dflash-sidecar] %s @%d\n", hipGetErrorString(e_), __LINE__); return -1; } } while (0)
 
@@ -73,6 +75,9 @@ struct DState {
     int *pos_d, *tok_d, *tk_pidx, *tk_ids;
     __half *Kc[DF_LAYERS], *Vc[DF_LAYERS];
     int max_pos = 16384;
+    int32_t state_pos_min = 0;
+    int32_t state_pos_max = 0; // exclusive; target chunks only
+    uint64_t state_epoch = 1;
     int tkparts = 0;
 };
 DState S;
@@ -81,13 +86,30 @@ Tens * DT(const std::string & n) {
 }
 } // namespace
 
+// See the MTP sidecar for the rationale. The single-block directional copy is
+// only used by the cold context-shift path, never by draft().
+__global__ void shift_kv_rows(__half * kv, int src_min, int src_max, int delta, int width) {
+    // Move downward low-to-high and upward high-to-low so overlapping source
+    // and destination ranges behave like memmove.
+    const int step = delta > 0 ? -1 : 1;
+    int pos = delta > 0 ? src_max - 1 : src_min;
+    for (int r = 0; r < src_max - src_min; ++r, pos += step) {
+        const size_t src = (size_t) pos * (size_t) width;
+        const size_t dst = (size_t) (pos + delta) * (size_t) width;
+        for (int i = (int) threadIdx.x; i < width; i += (int) blockDim.x) {
+            kv[dst + (size_t) i] = kv[src + (size_t) i];
+        }
+        __syncthreads();
+    }
+}
+
 #ifdef _WIN32
 #define DF_API extern "C" __declspec(dllexport)
 #else
 #define DF_API extern "C"
 #endif
 
-static constexpr int32_t DF_RELEASE_ABI = 2;
+static constexpr int32_t DF_RELEASE_ABI = 3;
 
 DF_API int spec_dflash_release_abi() {
     return DF_RELEASE_ABI;
@@ -95,6 +117,108 @@ DF_API int spec_dflash_release_abi() {
 
 DF_API int spec_dflash_check(int32_t n_embd_enc, int32_t block_size) {
     return (n_embd_enc == 25600 && block_size == DF_BLOCK) ? 0 : -1;
+}
+
+DF_API int spec_dflash_state_size() {
+    return (int) sizeof(bridgespec_sidecar_state);
+}
+
+DF_API int spec_dflash_get_state(void * data, int size) {
+    if (!S.ok || data == nullptr || size != (int) sizeof(bridgespec_sidecar_state)) {
+        return -1;
+    }
+    bridgespec_sidecar_state state = {};
+    state.magic   = BRIDGESPEC_STATE_MAGIC;
+    state.version = BRIDGESPEC_STATE_VERSION;
+    state.kind    = BRIDGESPEC_STATE_KIND_DFLASH;
+    state.pos_min = S.state_pos_min;
+    state.pos_max = S.state_pos_max;
+    state.epoch   = S.state_epoch;
+    std::memcpy(data, &state, sizeof(state));
+    return 0;
+}
+
+static bool spec_dflash_state_matches(const void * data, int size, bridgespec_sidecar_state & state) {
+    if (!S.ok || data == nullptr || size != (int) sizeof(state)) {
+        return false;
+    }
+    std::memcpy(&state, data, sizeof(state));
+    return state.magic == BRIDGESPEC_STATE_MAGIC &&
+           state.version == BRIDGESPEC_STATE_VERSION &&
+           state.kind == BRIDGESPEC_STATE_KIND_DFLASH &&
+           state.epoch == S.state_epoch &&
+           state.pos_min == S.state_pos_min &&
+           state.pos_min >= 0 && state.pos_min <= state.pos_max &&
+           state.pos_max <= S.state_pos_max &&
+           state.pos_max <= S.max_pos;
+}
+
+DF_API int spec_dflash_set_state(const void * data, int size) {
+    bridgespec_sidecar_state state = {};
+    if (!spec_dflash_state_matches(data, size, state)) {
+        return -1;
+    }
+    S.state_pos_max = state.pos_max;
+    return 0;
+}
+
+DF_API int spec_dflash_reset_state() {
+    if (!S.ok) {
+        return -1;
+    }
+    if (++S.state_epoch == 0) {
+        S.state_epoch = 1;
+    }
+    S.state_pos_min = 0;
+    S.state_pos_max = 0;
+    return 0;
+}
+
+DF_API int spec_dflash_truncate_state(int32_t pos_max) {
+    if (!S.ok || pos_max < S.state_pos_min || pos_max > S.state_pos_max) {
+        return -1;
+    }
+    S.state_pos_max = pos_max;
+    return 0;
+}
+
+DF_API int spec_dflash_rebase_state(int32_t pos_min, int32_t pos_max, int32_t delta) {
+    if (!S.ok || pos_min < 0 || pos_min > pos_max || pos_max > S.max_pos) {
+        return -1;
+    }
+    if (delta == 0 || S.state_pos_max <= pos_min) {
+        if (delta != 0 && ++S.state_epoch == 0) {
+            S.state_epoch = 1;
+        }
+        return 0;
+    }
+    if (pos_max < S.state_pos_max) {
+        return -1;
+    }
+
+    const int64_t new_min = (int64_t) pos_min + delta;
+    const int64_t new_max = (int64_t) S.state_pos_max + delta;
+    if (new_min < 0 || new_max < new_min || new_max > S.max_pos) {
+        return -1;
+    }
+
+    DFC(hipStreamSynchronize(S.st));
+    for (int il = 0; il < DF_LAYERS; ++il) {
+        shift_kv_rows<<<1, 256, 0, S.st>>>(S.Kc[il], pos_min, S.state_pos_max, delta, DF_KV * DF_HDIM);
+        DFC(hipGetLastError());
+        shift_kv_rows<<<1, 256, 0, S.st>>>(S.Vc[il], pos_min, S.state_pos_max, delta, DF_KV * DF_HDIM);
+        DFC(hipGetLastError());
+    }
+    DFC(hipStreamSynchronize(S.st));
+
+    if (S.state_pos_min >= pos_min) {
+        S.state_pos_min += delta;
+    }
+    S.state_pos_max = (int32_t) new_max;
+    if (++S.state_epoch == 0) {
+        S.state_epoch = 1;
+    }
+    return 0;
 }
 
 static bool expect_tensor(const std::vector<Tens> & tensors, const std::string & name,
@@ -400,7 +524,15 @@ DF_API int spec_dflash_init(const char * dir) {
 
 // encoder + KV inject for up to n rows of target features
 DF_API int spec_dflash_chunk(const int32_t * poss, const float * feats, int n) {
-    if (!S.ok || n < 0 || !poss || !feats) return -1;
+    if (!S.ok || n < 0 || (n > 0 && (!poss || !feats))) return -1;
+    if (n == 0) return 0;
+    for (int r = 0; r < n; ++r) {
+        if (poss[r] < 0 || poss[r] >= S.max_pos || poss[r] != S.state_pos_max + r) {
+            fprintf(stderr, "[dflash-sidecar] chunk: non-contiguous position %d at row %d (expected %d)\n",
+                    poss[r], r, S.state_pos_max + r);
+            return -1;
+        }
+    }
     static int n_calls = 0, n_rows = 0;
     static double tot_ms = 0.0;
     const bool dbg = getenv("LLAMA_SPEC_HIP_DEBUG") != nullptr;
@@ -408,9 +540,6 @@ DF_API int spec_dflash_chunk(const int32_t * poss, const float * feats, int n) {
     const int NROT = 128;
     for (int off = 0; off < n; off += 8) {
         const int nb = std::min(8, n - off);
-        bool skip = false;
-        for (int i = 0; i < nb; ++i) if (poss[off + i] < 0 || poss[off + i] >= S.max_pos) skip = true;
-        if (skip) continue;
         DFC(hipMemcpyAsync(S.feat_d, feats + (size_t) off * 25600, (size_t) nb * 25600 * 4, hipMemcpyHostToDevice, S.st));
         DFC(hipMemcpyAsync(S.pos_d, poss + off, nb * 4, hipMemcpyHostToDevice, S.st));
         DISPATCH_Q4K(nb, S.W_fc, S.feat_d, S.henc, 25600, DF_EMBD, S.st);
@@ -425,6 +554,7 @@ DF_API int spec_dflash_chunk(const int32_t * poss, const float * feats, int n) {
         }
         DFC(hipStreamSynchronize(S.st));
     }
+    S.state_pos_max = poss[n - 1] + 1;
     if (dbg) {
         auto t1 = std::chrono::high_resolution_clock::now();
         tot_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -439,7 +569,8 @@ DF_API int spec_dflash_chunk(const int32_t * poss, const float * feats, int n) {
 
 DF_API int spec_dflash_draft(int32_t id_last, int32_t n_past, int32_t * out_ids) {
     if (!S.ok || !out_ids || id_last < 0 || id_last >= DF_VOCAB) return -1;
-    if (n_past < 1 || static_cast<uint64_t>(n_past) + DF_BLOCK > static_cast<uint64_t>(S.max_pos)) return -1;
+    if (n_past < 1 || n_past != S.state_pos_max ||
+            static_cast<uint64_t>(n_past) + DF_BLOCK > static_cast<uint64_t>(S.max_pos)) return -1;
     const int NROT = 128;
     static int n_calls = 0;
     static double tot_ms = 0.0;

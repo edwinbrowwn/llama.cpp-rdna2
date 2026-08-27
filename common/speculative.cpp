@@ -188,8 +188,14 @@ struct common_speculative_impl {
     virtual void accept(llama_seq_id seq_id, uint16_t n_accepted, bool is_other) = 0;
 
     // (optional) serialize/restore per-seq internal state (e.g. eagle3's deferred boundary).
-    virtual bool get_state(llama_seq_id /*seq_id*/, std::vector<uint8_t> & /*data*/) const { return false; }
-    virtual void set_state(llama_seq_id /*seq_id*/, const std::vector<uint8_t> & /*data*/) {}
+    // Sidecar implementations serialize only a small logical cursor; their
+    // large device KV allocation stays resident and is never copied here.
+    virtual bool get_state(llama_seq_id /*seq_id*/, std::vector<uint8_t> & /*data*/) { return false; }
+    virtual bool set_state(llama_seq_id /*seq_id*/, const std::vector<uint8_t> & /*data*/) { return true; }
+    virtual bool state_required(llama_seq_id /*seq_id*/) const { return false; }
+    virtual bool reset_state(llama_seq_id /*seq_id*/) { return true; }
+    virtual bool truncate_state(llama_seq_id /*seq_id*/, llama_pos /*pos_max*/) { return true; }
+    virtual bool rebase_state(llama_seq_id /*seq_id*/, llama_pos /*pos_min*/, llama_pos /*pos_max*/, llama_pos /*delta*/) { return true; }
 };
 
 struct common_speculative_impl_draft_simple : public common_speculative_impl {
@@ -885,7 +891,7 @@ struct common_speculative_impl_draft_eagle3 : public common_speculative_impl {
         return llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt);
     }
 
-    bool get_state(llama_seq_id seq_id, std::vector<uint8_t> & data) const override {
+    bool get_state(llama_seq_id seq_id, std::vector<uint8_t> & data) override {
         if (!need_boundary_stash()) {
             return false;
         }
@@ -902,15 +908,15 @@ struct common_speculative_impl_draft_eagle3 : public common_speculative_impl {
         return true;
     }
 
-    void set_state(llama_seq_id seq_id, const std::vector<uint8_t> & data) override {
+    bool set_state(llama_seq_id seq_id, const std::vector<uint8_t> & data) override {
         if (!need_boundary_stash()) {
-            return;
+            return true;
         }
         if (seq_id < 0 || seq_id >= (llama_seq_id) n_seq) {
-            return;
+            return false;
         }
         if (data.size() != sizeof(llama_pos) + (size_t) n_embd_dec * sizeof(float)) {
-            return;
+            return false;
         }
 
         llama_pos pos = -1;
@@ -919,6 +925,7 @@ struct common_speculative_impl_draft_eagle3 : public common_speculative_impl {
         pending_pos_last[seq_id] = pos;
         pending_g_last[seq_id].resize(n_embd_dec);
         std::memcpy(pending_g_last[seq_id].data(), data.data() + sizeof(llama_pos), (size_t) n_embd_dec * sizeof(float));
+        return true;
     }
 };
 
@@ -958,6 +965,8 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
 
     // scratch buffer for concatenated target features [n_tokens, n_embd_enc]
     std::vector<float> features_buf;
+    std::vector<llama_pos> verify_pos_first;
+    std::vector<int32_t> verify_rows;
 
     common_bridgespec_dflash_sidecar sidecar;
     bool sidecar_target_only = false; // runtime failure or unsupported sampling mode
@@ -1049,6 +1058,8 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
 
         selector_rng.resize(n_seq);
         selector_reset.assign(n_seq, true);
+        verify_pos_first.assign(n_seq, -1);
+        verify_rows.assign(n_seq, 0);
 
         // offload draft sampling to the backend
         backend_chains.assign(n_seq, nullptr);
@@ -1194,6 +1205,9 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                 continue;
             }
             const int32_t n_rows = i_batch_end[seq_id] - i_batch_beg[seq_id] + 1;
+            verify_rows[seq_id] = n_rows;
+            verify_pos_first[seq_id] = batch_in.pos != nullptr
+                    ? batch_in.pos[i_batch_beg[seq_id]] : -1;
 
             // M-RoPE target positions are tuples whose temporal component can repeat across image
             // tokens. The 1-D draft cache instead keeps exactly one dense row per target token.
@@ -1543,8 +1557,86 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         }
     }
 
-    void accept(llama_seq_id /*seq_id*/, uint16_t /*n_accepted*/, bool /*is_other*/) override {
-        // noop
+    bool state_required(llama_seq_id /*seq_id*/) const override {
+        return sidecar.active();
+    }
+
+    bool get_state(llama_seq_id seq_id, std::vector<uint8_t> & data) override {
+        if (seq_id != 0 || !sidecar.active()) {
+            return false;
+        }
+        if (!sidecar.get_state(data)) {
+            sidecar.disable();
+            sidecar_target_only = true;
+            SPC_ERR("%s", "DFlash sidecar state snapshot failed; entering target-only mode\n");
+            return false;
+        }
+        return true;
+    }
+
+    bool set_state(llama_seq_id seq_id, const std::vector<uint8_t> & data) override {
+        if (!sidecar.active()) {
+            return true;
+        }
+        if (seq_id != 0 || !sidecar.set_state(data)) {
+            sidecar.disable();
+            sidecar_target_only = true;
+            SPC_ERR("%s", "DFlash sidecar state restore failed; entering target-only mode\n");
+            return false;
+        }
+        return true;
+    }
+
+    bool reset_state(llama_seq_id seq_id) override {
+        if (!sidecar.active()) {
+            return true;
+        }
+        if (seq_id != 0 || !sidecar.reset_state()) {
+            sidecar.disable();
+            sidecar_target_only = true;
+            SPC_ERR("%s", "DFlash sidecar state reset failed; entering target-only mode\n");
+            return false;
+        }
+        return true;
+    }
+
+    bool truncate_state(llama_seq_id seq_id, llama_pos pos_max) override {
+        if (!sidecar.active()) {
+            return true;
+        }
+        if (seq_id != 0 || !sidecar.truncate_state(pos_max)) {
+            sidecar.disable();
+            sidecar_target_only = true;
+            SPC_ERR("%s", "DFlash sidecar state truncate failed; entering target-only mode\n");
+            return false;
+        }
+        return true;
+    }
+
+    bool rebase_state(llama_seq_id seq_id, llama_pos pos_min, llama_pos pos_max, llama_pos delta) override {
+        if (!sidecar.active()) {
+            return true;
+        }
+        if (seq_id != 0 || !sidecar.rebase_state(pos_min, pos_max, delta)) {
+            sidecar.disable();
+            sidecar_target_only = true;
+            SPC_ERR("%s", "DFlash sidecar state rebase failed; entering target-only mode\n");
+            return false;
+        }
+        return true;
+    }
+
+    void accept(llama_seq_id seq_id, uint16_t n_accepted, bool /*is_other*/) override {
+        if (!sidecar.active() || seq_id != 0 || verify_pos_first[seq_id] < 0 || verify_rows[seq_id] <= 0) {
+            return;
+        }
+        const int32_t n_commit = std::min<int32_t>((int32_t) n_accepted + 1, verify_rows[seq_id]);
+        const llama_pos pos_max = verify_pos_first[seq_id] + n_commit;
+        if (!sidecar.truncate_state(pos_max)) {
+            sidecar.disable();
+            sidecar_target_only = true;
+            SPC_ERR("%s", "DFlash sidecar state commit failed; entering target-only mode\n");
+        }
     }
 };
 
@@ -1583,6 +1675,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
     // Row 0 corresponds to the sampled token, row N to the Nth accepted draft token.
     std::vector<std::vector<float>> verify_h;
     std::vector<int32_t> verify_h_rows;
+    std::vector<llama_pos> verify_pos_first;
 
     std::vector<int>                i_last;
     std::vector<std::vector<float>> chain_h;
@@ -1704,6 +1797,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
 
         verify_h.assign(n_seq, {});
         verify_h_rows.assign(n_seq, 0);
+        verify_pos_first.assign(n_seq, -1);
     }
 
     void prepare_process(const common_speculative_draft_params_vec & dparams) override {
@@ -1915,6 +2009,8 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
 
             const int32_t n_rows = i_batch_end[seq_id] - i_batch_beg[seq_id] + 1;
             verify_h_rows[seq_id] = n_rows;
+            verify_pos_first[seq_id] = batch_in.pos != nullptr
+                    ? batch_in.pos[i_batch_beg[seq_id]] : -1;
             verify_h[seq_id].resize((size_t) n_rows * n_embd);
 
             for (int32_t i = 0; i < n_rows; ++i) {
@@ -2130,6 +2226,75 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         }
     }
 
+    bool state_required(llama_seq_id /*seq_id*/) const override {
+        return sidecar.active();
+    }
+
+    bool get_state(llama_seq_id seq_id, std::vector<uint8_t> & data) override {
+        if (seq_id != 0 || !sidecar.active()) {
+            return false;
+        }
+        if (!sidecar.get_state(data)) {
+            sidecar.disable();
+            sidecar_target_only = true;
+            SPC_ERR("%s", "MTP sidecar state snapshot failed; entering target-only mode\n");
+            return false;
+        }
+        return true;
+    }
+
+    bool set_state(llama_seq_id seq_id, const std::vector<uint8_t> & data) override {
+        if (!sidecar.active()) {
+            return true;
+        }
+        if (seq_id != 0 || !sidecar.set_state(data)) {
+            sidecar.disable();
+            sidecar_target_only = true;
+            SPC_ERR("%s", "MTP sidecar state restore failed; entering target-only mode\n");
+            return false;
+        }
+        return true;
+    }
+
+    bool reset_state(llama_seq_id seq_id) override {
+        if (!sidecar.active()) {
+            return true;
+        }
+        if (seq_id != 0 || !sidecar.reset_state()) {
+            sidecar.disable();
+            sidecar_target_only = true;
+            SPC_ERR("%s", "MTP sidecar state reset failed; entering target-only mode\n");
+            return false;
+        }
+        return true;
+    }
+
+    bool truncate_state(llama_seq_id seq_id, llama_pos pos_max) override {
+        if (!sidecar.active()) {
+            return true;
+        }
+        if (seq_id != 0 || !sidecar.truncate_state(pos_max)) {
+            sidecar.disable();
+            sidecar_target_only = true;
+            SPC_ERR("%s", "MTP sidecar state truncate failed; entering target-only mode\n");
+            return false;
+        }
+        return true;
+    }
+
+    bool rebase_state(llama_seq_id seq_id, llama_pos pos_min, llama_pos pos_max, llama_pos delta) override {
+        if (!sidecar.active()) {
+            return true;
+        }
+        if (seq_id != 0 || !sidecar.rebase_state(pos_min, pos_max, delta)) {
+            sidecar.disable();
+            sidecar_target_only = true;
+            SPC_ERR("%s", "MTP sidecar state rebase failed; entering target-only mode\n");
+            return false;
+        }
+        return true;
+    }
+
     void accept(llama_seq_id seq_id, uint16_t n_accepted, bool /*is_other*/) override {
         if (seq_id < 0 || seq_id >= (llama_seq_id) n_seq) {
             return;
@@ -2138,6 +2303,16 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         const int32_t n_rows = verify_h_rows[seq_id];
         if (n_rows <= 0) {
             return;
+        }
+
+        if (sidecar.active()) {
+            const int32_t n_commit = std::min<int32_t>((int32_t) n_accepted + 1, n_rows);
+            if (verify_pos_first[seq_id] < 0 ||
+                    !sidecar.truncate_state(verify_pos_first[seq_id] + n_commit)) {
+                sidecar.disable();
+                sidecar_target_only = true;
+                SPC_ERR("%s", "MTP sidecar state commit failed; entering target-only mode\n");
+            }
         }
 
         if (deferred_catchup_ready) {
@@ -3222,29 +3397,197 @@ void common_speculative_accept(common_speculative * spec, llama_seq_id seq_id, u
     }
 }
 
-// TODO: support the case of more than one speculative implementations having a state
+// Speculative checkpoints can contain state for more than one implementation
+// (for example, an MTP sidecar plus an n-gram fallback). Keep the envelope
+// compact and implementation-keyed so a restore never feeds one format to a
+// different implementation. Sidecar payloads are only a fixed-size cursor.
+static constexpr uint32_t COMMON_SPECULATIVE_STATE_MAGIC   = UINT32_C(0x53504353); // "SPCS"
+static constexpr uint32_t COMMON_SPECULATIVE_STATE_VERSION = 1;
+
+static void common_speculative_state_put_u32(std::vector<uint8_t> & data, uint32_t value) {
+    data.push_back((uint8_t) (value & 0xffU));
+    data.push_back((uint8_t) ((value >> 8) & 0xffU));
+    data.push_back((uint8_t) ((value >> 16) & 0xffU));
+    data.push_back((uint8_t) ((value >> 24) & 0xffU));
+}
+
+static bool common_speculative_state_get_u32(const std::vector<uint8_t> & data,
+        size_t & offset, uint32_t & value) {
+    if (offset > data.size() || data.size() - offset < sizeof(uint32_t)) {
+        return false;
+    }
+    value = (uint32_t) data[offset] |
+            ((uint32_t) data[offset + 1] << 8) |
+            ((uint32_t) data[offset + 2] << 16) |
+            ((uint32_t) data[offset + 3] << 24);
+    offset += sizeof(uint32_t);
+    return true;
+}
+
 bool common_speculative_get_state(common_speculative * spec, llama_seq_id seq_id, std::vector<uint8_t> & data) {
+    data.clear();
     if (spec == nullptr) {
         return false;
     }
 
+    struct state_entry {
+        uint32_t type;
+        std::vector<uint8_t> data;
+    };
+    std::vector<state_entry> entries;
+
     for (auto & impl : spec->impls) {
-        if (impl->get_state(seq_id, data)) {
-            return true;
+        std::vector<uint8_t> impl_data;
+        if (!impl->get_state(seq_id, impl_data)) {
+            continue;
         }
+        if (impl_data.size() > UINT32_MAX) {
+            SPC_ERR("speculative state for %s is too large to checkpoint\n",
+                    common_speculative_type_to_str(impl->type).c_str());
+            data.clear();
+            return false;
+        }
+        entries.push_back({ (uint32_t) impl->type, std::move(impl_data) });
     }
 
-    return false;
+    if (entries.empty() || entries.size() > UINT32_MAX) {
+        return false;
+    }
+
+    size_t total = 3 * sizeof(uint32_t);
+    for (const auto & entry : entries) {
+        if (entry.data.size() > UINT32_MAX || total > SIZE_MAX - 2 * sizeof(uint32_t) - entry.data.size()) {
+            data.clear();
+            return false;
+        }
+        total += 2 * sizeof(uint32_t) + entry.data.size();
+    }
+    data.reserve(total);
+    common_speculative_state_put_u32(data, COMMON_SPECULATIVE_STATE_MAGIC);
+    common_speculative_state_put_u32(data, COMMON_SPECULATIVE_STATE_VERSION);
+    common_speculative_state_put_u32(data, (uint32_t) entries.size());
+    for (const auto & entry : entries) {
+        common_speculative_state_put_u32(data, entry.type);
+        common_speculative_state_put_u32(data, (uint32_t) entry.data.size());
+        data.insert(data.end(), entry.data.begin(), entry.data.end());
+    }
+    return true;
 }
 
-void common_speculative_set_state(common_speculative * spec, llama_seq_id seq_id, const std::vector<uint8_t> & data) {
+bool common_speculative_set_state(common_speculative * spec, llama_seq_id seq_id, const std::vector<uint8_t> & data) {
+    if (spec == nullptr) {
+        return true;
+    }
+
+    // Preserve compatibility with the pre-envelope EAGLE3 state that may be
+    // supplied by an embedding application. New checkpoints always use the
+    // keyed format above; a sidecar rejects legacy bytes rather than guessing.
+    size_t offset = 0;
+    uint32_t magic = 0;
+    uint32_t version = 0;
+    uint32_t n_entries = 0;
+    if (!common_speculative_state_get_u32(data, offset, magic) ||
+            magic != COMMON_SPECULATIVE_STATE_MAGIC) {
+        bool result = true;
+        for (auto & impl : spec->impls) {
+            result = impl->set_state(seq_id, data) && result;
+        }
+        return result;
+    }
+
+    if (!common_speculative_state_get_u32(data, offset, version) ||
+            !common_speculative_state_get_u32(data, offset, n_entries) ||
+            version != COMMON_SPECULATIVE_STATE_VERSION ||
+            offset > data.size() ||
+            n_entries > (data.size() - offset) / (2 * sizeof(uint32_t))) {
+        for (auto & impl : spec->impls) {
+            if (impl->state_required(seq_id)) {
+                impl->set_state(seq_id, {});
+            }
+        }
+        return false;
+    }
+
+    struct state_entry_view {
+        uint32_t type;
+        const uint8_t * data;
+        size_t size;
+    };
+    std::vector<state_entry_view> entries;
+    entries.reserve(n_entries);
+    for (uint32_t i = 0; i < n_entries; ++i) {
+        uint32_t type = 0;
+        uint32_t size = 0;
+        if (!common_speculative_state_get_u32(data, offset, type) ||
+                !common_speculative_state_get_u32(data, offset, size) ||
+                offset > data.size() || data.size() - offset < size) {
+            for (auto & impl : spec->impls) {
+                if (impl->state_required(seq_id)) {
+                    impl->set_state(seq_id, {});
+                }
+            }
+            return false;
+        }
+        entries.push_back({ type, data.data() + offset, size });
+        offset += size;
+    }
+    if (offset != data.size()) {
+        for (auto & impl : spec->impls) {
+            if (impl->state_required(seq_id)) {
+                impl->set_state(seq_id, {});
+            }
+        }
+        return false;
+    }
+
+    bool result = true;
+    for (auto & impl : spec->impls) {
+        const auto it = std::find_if(entries.begin(), entries.end(), [&](const state_entry_view & entry) {
+            return entry.type == (uint32_t) impl->type;
+        });
+        if (it == entries.end()) {
+            if (impl->state_required(seq_id)) {
+                result = impl->set_state(seq_id, {}) && result;
+            }
+            continue;
+        }
+
+        const std::vector<uint8_t> impl_data(it->data, it->data + it->size);
+        result = impl->set_state(seq_id, impl_data) && result;
+    }
+    return result;
+}
+
+void common_speculative_reset_state(common_speculative * spec, llama_seq_id seq_id) {
     if (spec == nullptr) {
         return;
     }
-
     for (auto & impl : spec->impls) {
-        impl->set_state(seq_id, data);
+        impl->reset_state(seq_id);
     }
+}
+
+bool common_speculative_truncate_state(common_speculative * spec, llama_seq_id seq_id, llama_pos pos_max) {
+    if (spec == nullptr) {
+        return true;
+    }
+    bool result = true;
+    for (auto & impl : spec->impls) {
+        result = impl->truncate_state(seq_id, pos_max) && result;
+    }
+    return result;
+}
+
+bool common_speculative_rebase_state(common_speculative * spec, llama_seq_id seq_id,
+        llama_pos pos_min, llama_pos pos_max, llama_pos delta) {
+    if (spec == nullptr) {
+        return true;
+    }
+    bool result = true;
+    for (auto & impl : spec->impls) {
+        result = impl->rebase_state(seq_id, pos_min, pos_max, delta) && result;
+    }
+    return result;
 }
 
 void common_speculative_print_stats(const common_speculative * spec) {

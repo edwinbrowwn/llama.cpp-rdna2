@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: MIT
 // HIP draft sidecar: C API around the MTP-block kernels, built as a DLL that
 // llama.cpp's speculative driver loads at runtime (LLAMA_SPEC_HIP_SIDECAR).
+// Release ABI 2 adds cursor/epoch state operations used by native checkpoints.
 // The harness build (-DSIDECAR_HARNESS) replays golden.bin through the SAME API.
 #include "kernels.hip"
 #include "kernels_b.hip"
 #include "../artifact_manifest.h"
+#include "bridgespec/sidecar_abi.h"
 
 // ---------------- host: weights ----------------
 using Tensor = bridgespec_artifact::TensorDesc;
@@ -37,6 +39,9 @@ struct State {
     int *pidx, *tok_out;
     int nparts;
     size_t max_pos = 131072;
+    int32_t state_pos_min = 0;
+    int32_t state_pos_max = 0; // exclusive; draft-only rows are not committed
+    uint64_t state_epoch = 1;
     hipEvent_t ev_a, ev_b; // GPU-side timing (debug)
     // weights
     const block_q4_0 *W_embd, *W_ehp, *W_q, *W_k, *W_v, *W_o, *W_fg, *W_fu, *W_fd, *W_head;
@@ -50,6 +55,25 @@ Tensor * find_tensor(const char * name) {
 }
 
 #define SC_CHECK(x) do { hipError_t e_ = (x); if (e_ != hipSuccess) { fprintf(stderr, "[hip-sidecar] %s at %s:%d\n", hipGetErrorString(e_), __FILE__, __LINE__); return -1; } } while (0)
+
+// Move a contiguous position range in-place. A single block and an explicit
+// direction make overlapping moves deterministic without allocating a second
+// context-sized KV buffer. Rebase is rare (context shift); the draft hot path
+// never calls this kernel.
+__global__ void shift_kv_rows(__half * kv, int src_min, int src_max, int delta, int width) {
+    // Move downward low-to-high and upward high-to-low so overlapping source
+    // and destination ranges behave like memmove.
+    const int step = delta > 0 ? -1 : 1;
+    int pos = delta > 0 ? src_max - 1 : src_min;
+    for (int r = 0; r < src_max - src_min; ++r, pos += step) {
+        const size_t src = (size_t) pos * (size_t) width;
+        const size_t dst = (size_t) (pos + delta) * (size_t) width;
+        for (int i = (int) threadIdx.x; i < width; i += (int) blockDim.x) {
+            kv[dst + (size_t) i] = kv[src + (size_t) i];
+        }
+        __syncthreads();
+    }
+}
 
 // phase 1: inputs -> projection -> Q/K/V -> rope -> KV store (rows independent)
 void block_phase1(Scratch & c, hipStream_t st, const float * xh_in, int pos) {
@@ -103,7 +127,7 @@ void block_phase2(Scratch & c, hipStream_t st, int pos, int * tok_dst) {
 #define SC_API extern "C"
 #endif
 
-static constexpr int32_t SC_RELEASE_ABI = 1;
+static constexpr int32_t SC_RELEASE_ABI = 2;
 
 SC_API int spec_hip_release_abi() {
     return SC_RELEASE_ABI;
@@ -113,6 +137,109 @@ SC_API int spec_hip_release_abi() {
 // to run against a mismatched drafter (wrong arch/width/head slice).
 SC_API int spec_hip_check(int32_t n_embd, int32_t head_rows) {
     return (n_embd == N_EMBD && head_rows == N_HEAD_ROWS) ? 0 : -1;
+}
+
+SC_API int spec_hip_state_size() {
+    return (int) sizeof(bridgespec_sidecar_state);
+}
+
+SC_API int spec_hip_get_state(void * data, int size) {
+    if (!S.ok || data == nullptr || size != (int) sizeof(bridgespec_sidecar_state)) {
+        return -1;
+    }
+    bridgespec_sidecar_state state = {};
+    state.magic   = BRIDGESPEC_STATE_MAGIC;
+    state.version = BRIDGESPEC_STATE_VERSION;
+    state.kind    = BRIDGESPEC_STATE_KIND_MTP;
+    state.pos_min = S.state_pos_min;
+    state.pos_max = S.state_pos_max;
+    state.epoch   = S.state_epoch;
+    std::memcpy(data, &state, sizeof(state));
+    return 0;
+}
+
+static bool spec_hip_state_matches(const void * data, int size, bridgespec_sidecar_state & state) {
+    if (!S.ok || data == nullptr || size != (int) sizeof(state)) {
+        return false;
+    }
+    std::memcpy(&state, data, sizeof(state));
+    return state.magic == BRIDGESPEC_STATE_MAGIC &&
+           state.version == BRIDGESPEC_STATE_VERSION &&
+           state.kind == BRIDGESPEC_STATE_KIND_MTP &&
+           state.epoch == S.state_epoch &&
+           state.pos_min == S.state_pos_min &&
+           state.pos_min >= 0 && state.pos_min <= state.pos_max &&
+           state.pos_max <= S.state_pos_max &&
+           state.pos_max <= (int32_t) S.max_pos;
+}
+
+SC_API int spec_hip_set_state(const void * data, int size) {
+    bridgespec_sidecar_state state = {};
+    if (!spec_hip_state_matches(data, size, state)) {
+        return -1;
+    }
+    // The physical rows before pos_max are immutable within an epoch. Rows
+    // produced by draft() are intentionally outside the committed cursor and
+    // therefore need no GPU work when a checkpoint is restored.
+    S.state_pos_max = state.pos_max;
+    return 0;
+}
+
+SC_API int spec_hip_reset_state() {
+    if (!S.ok) {
+        return -1;
+    }
+    if (++S.state_epoch == 0) {
+        S.state_epoch = 1;
+    }
+    S.state_pos_min = 0;
+    S.state_pos_max = 0;
+    return 0;
+}
+
+SC_API int spec_hip_truncate_state(int32_t pos_max) {
+    if (!S.ok || pos_max < S.state_pos_min || pos_max > S.state_pos_max) {
+        return -1;
+    }
+    S.state_pos_max = pos_max;
+    return 0;
+}
+
+SC_API int spec_hip_rebase_state(int32_t pos_min, int32_t pos_max, int32_t delta) {
+    if (!S.ok || pos_min < 0 || pos_min > pos_max || pos_max > (int32_t) S.max_pos) {
+        return -1;
+    }
+    if (delta == 0 || S.state_pos_max <= pos_min) {
+        if (delta != 0 && ++S.state_epoch == 0) {
+            S.state_epoch = 1;
+        }
+        return 0;
+    }
+    if (pos_max < S.state_pos_max) {
+        return -1;
+    }
+
+    const int64_t new_min = (int64_t) pos_min + delta;
+    const int64_t new_max = (int64_t) S.state_pos_max + delta;
+    if (new_min < 0 || new_max < new_min || new_max > (int64_t) S.max_pos) {
+        return -1;
+    }
+
+    SC_CHECK(hipStreamSynchronize(S.st));
+    shift_kv_rows<<<1, 256, 0, S.st>>>(S.Kc, pos_min, S.state_pos_max, delta, N_HEAD_KV * HEAD_DIM);
+    SC_CHECK(hipGetLastError());
+    shift_kv_rows<<<1, 256, 0, S.st>>>(S.Vc, pos_min, S.state_pos_max, delta, N_HEAD_KV * HEAD_DIM);
+    SC_CHECK(hipGetLastError());
+    SC_CHECK(hipStreamSynchronize(S.st));
+
+    if (S.state_pos_min >= pos_min) {
+        S.state_pos_min += delta;
+    }
+    S.state_pos_max = (int32_t) new_max;
+    if (++S.state_epoch == 0) {
+        S.state_epoch = 1;
+    }
+    return 0;
 }
 
 // init: weights_dir holds drafter_manifest.json + drafter_weights.bin;
@@ -315,7 +442,8 @@ SC_API int spec_hip_init(const char * weights_dir, const char * ids_path) {
 
 // catch-up rows: token+pos+h per row; only KV side effects
 SC_API int spec_hip_catchup(const int32_t * toks, const int32_t * poss, const float * h_rows, int n) {
-    if (!S.ok || n < 0 || toks == nullptr || poss == nullptr || h_rows == nullptr) return -1;
+    if (!S.ok || n < 0 || (n > 0 && (toks == nullptr || poss == nullptr || h_rows == nullptr))) return -1;
+    if (n == 0) return 0;
     for (int r = 0; r < n; ++r) {
         if (toks[r] < 0 || toks[r] >= SC_N_VOCAB) {
             fprintf(stderr, "[hip-sidecar] catchup: invalid token %d at row %d\n", toks[r], r);
@@ -331,7 +459,12 @@ SC_API int spec_hip_catchup(const int32_t * toks, const int32_t * poss, const fl
     // is honored by writing every row's KV before the batched attention, whose
     // per-row length masks to that row's own position.
     for (int r = 0; r < n; ++r) {
-        if (poss[r] < 0 || (size_t) poss[r] >= S.max_pos) return -1; // caller guarantees bounds
+        if (poss[r] < 0 || (size_t) poss[r] >= S.max_pos ||
+                poss[r] != S.state_pos_max + r) {
+            fprintf(stderr, "[hip-sidecar] catchup: non-contiguous position %d at row %d (expected %d)\n",
+                    poss[r], r, S.state_pos_max + r);
+            return -1;
+        }
     }
     auto & b = S.bs;
     hipStream_t st = S.st;
@@ -376,6 +509,7 @@ SC_API int spec_hip_catchup(const int32_t * toks, const int32_t * poss, const fl
         }
         SC_CHECK(hipStreamSynchronize(st));
     }
+    S.state_pos_max = poss[n - 1] + 1;
     if (dbg) {
         SC_CHECK(hipEventRecord(S.ev_b, S.st));
         SC_CHECK(hipEventSynchronize(S.ev_b));
@@ -400,7 +534,8 @@ SC_API int spec_hip_draft(int32_t id_last, int32_t n_past, const float * h, int 
         fprintf(stderr, "[hip-sidecar] draft: invalid id_last %d\n", id_last);
         return -1;
     }
-    if (n_past < 0 || static_cast<size_t>(n_past) + static_cast<size_t>(n) > S.max_pos) return -1;
+    if (n_past < 0 || n_past != S.state_pos_max ||
+            static_cast<size_t>(n_past) + static_cast<size_t>(n) > S.max_pos) return -1;
     // fault-injection hook for hardening tests: returns garbage ids once
     if (getenv("LLAMA_SPEC_HIP_FAULT_BADID") != nullptr) {
         static bool fired = false;

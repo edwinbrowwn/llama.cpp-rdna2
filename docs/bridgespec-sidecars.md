@@ -6,8 +6,9 @@ the sidecar proposes token IDs and the normal target verifier accepts or
 rejects them.
 
 The sidecars are intentionally **not** enabled by default. They are
-model-specific, currently single-instance, and initially support greedy text
-inference only.
+model-specific, currently single-instance, and support greedy text inference
+only. The host treats them as stateful speculative implementations rather
+than stateless token generators.
 
 ## Prepare the 27B artifacts
 
@@ -103,15 +104,27 @@ export LLAMA_SPEC_HIP_DFLASH_DIR=/absolute/artifacts/bridgespec-dflash
   --ctx-checkpoints 0 --cache-ram 0 --no-cache-idle-slots
 ```
 
-## Safety and current limits
+## State, safety, and current limits
 
 - `-np 1` is required; the sidecar ABI has one process-global state object.
 - Greedy drafting is required (`temperature=0`, `p_min=0`). The host disables
   a loaded sidecar rather than silently using greedy proposals for stochastic
   requests.
-- Text-only, contiguous positions are the initial supported path. Vision,
-  sequence forks, save/restore, prompt-cache reuse, context shifting, and
-  migration are not supported.
+- Text-only, contiguous positions are the supported sidecar input. Vision
+  batches, sequence forks, and migration disable the sidecar safely.
+- The ABI exposes `state_size`, `get_state`, `set_state`, `reset_state`,
+  `truncate_state`, and `rebase_state` for both sidecars. Snapshots contain
+  only a position cursor plus an epoch; the large device KV cache is not
+  serialized or copied. The speculative manager wraps state by implementation
+  type, so stacked implementations cannot consume one another's state.
+- Target verification updates the sidecar cursor, acceptance truncates it to
+  the accepted prefix, checkpoint rollback restores it, slot reset starts a
+  new epoch, and context shifting rebases the device KV rows. Any failed
+  update or restore enters target-only mode instead of guessing at state.
+- Prompt-cache and external slot-file restore do not persist the sidecar's
+  device KV contents. If a restored target state does not receive a complete
+  contiguous sidecar prefill, the sidecar rejects the gap and the host uses
+  target-only mode for correctness.
 - The target verifier remains the correctness authority. An initialization
   failure falls back to the native drafter. A runtime sidecar failure disables
   drafting for the process rather than using a potentially desynchronized

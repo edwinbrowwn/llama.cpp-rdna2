@@ -1,7 +1,9 @@
 #include "bridgespec_sidecar.h"
+#include "../include/bridgespec/sidecar_abi.h"
 
 #include <cctype>
 #include <cstring>
+#include <limits>
 #include <utility>
 
 #ifdef _WIN32
@@ -91,6 +93,13 @@ static bool require_absolute(const std::string & path, const char * label, std::
     return true;
 }
 
+using state_size_fn_t     = int (*)();
+using state_get_fn_t      = int (*)(void *, int);
+using state_set_fn_t      = int (*)(const void *, int);
+using state_reset_fn_t    = int (*)();
+using state_truncate_fn_t = int (*)(int32_t);
+using state_rebase_fn_t   = int (*)(int32_t, int32_t, int32_t);
+
 using mtp_release_abi_fn = int (*)();
 using mtp_check_fn      = int (*)(int32_t, int32_t);
 using mtp_init_fn       = int (*)(const char *, const char *);
@@ -108,6 +117,12 @@ using dflash_draft_fn       = int (*)(int32_t, int32_t, int32_t *);
 struct common_bridgespec_mtp_sidecar::impl {
     void * handle = nullptr;
     bool active = false;
+    state_size_fn_t state_size_fn = nullptr;
+    state_get_fn_t state_get_fn = nullptr;
+    state_set_fn_t state_set_fn = nullptr;
+    state_reset_fn_t state_reset_fn = nullptr;
+    state_truncate_fn_t state_truncate_fn = nullptr;
+    state_rebase_fn_t state_rebase_fn = nullptr;
     mtp_catchup_fn catchup_fn = nullptr;
     mtp_draft_fn draft_fn = nullptr;
 };
@@ -143,14 +158,20 @@ bool common_bridgespec_mtp_sidecar::load(const std::string & library_path,
     mtp_init_fn init = nullptr;
     if (!resolve_symbol(handle, "spec_hip_release_abi", release_abi, error) ||
         !resolve_symbol(handle, "spec_hip_check", check, error) ||
+        !resolve_symbol(handle, "spec_hip_state_size", pimpl->state_size_fn, error) ||
+        !resolve_symbol(handle, "spec_hip_get_state", pimpl->state_get_fn, error) ||
+        !resolve_symbol(handle, "spec_hip_set_state", pimpl->state_set_fn, error) ||
+        !resolve_symbol(handle, "spec_hip_reset_state", pimpl->state_reset_fn, error) ||
+        !resolve_symbol(handle, "spec_hip_truncate_state", pimpl->state_truncate_fn, error) ||
+        !resolve_symbol(handle, "spec_hip_rebase_state", pimpl->state_rebase_fn, error) ||
         !resolve_symbol(handle, "spec_hip_init", init, error) ||
         !resolve_symbol(handle, "spec_hip_catchup", pimpl->catchup_fn, error) ||
         !resolve_symbol(handle, "spec_hip_draft", pimpl->draft_fn, error)) {
         close_library(handle);
         return false;
     }
-    if (release_abi() != 1) {
-        error = "MTP sidecar ABI version mismatch (expected 1)";
+    if (release_abi() != 2) {
+        error = "MTP sidecar ABI version mismatch (expected 2)";
         close_library(handle);
         return false;
     }
@@ -159,9 +180,28 @@ bool common_bridgespec_mtp_sidecar::load(const std::string & library_path,
         close_library(handle);
         return false;
     }
+    if (pimpl->state_size_fn() != static_cast<int>(sizeof(bridgespec_sidecar_state))) {
+        error = "MTP sidecar state ABI size mismatch";
+        close_library(handle);
+        pimpl->state_size_fn = nullptr;
+        pimpl->state_get_fn = nullptr;
+        pimpl->state_set_fn = nullptr;
+        pimpl->state_reset_fn = nullptr;
+        pimpl->state_truncate_fn = nullptr;
+        pimpl->state_rebase_fn = nullptr;
+        pimpl->catchup_fn = nullptr;
+        pimpl->draft_fn = nullptr;
+        return false;
+    }
     if (init(weights_dir.c_str(), ids_path.c_str()) != 0) {
         error = "MTP sidecar initialization failed";
         close_library(handle);
+        pimpl->state_size_fn = nullptr;
+        pimpl->state_get_fn = nullptr;
+        pimpl->state_set_fn = nullptr;
+        pimpl->state_reset_fn = nullptr;
+        pimpl->state_truncate_fn = nullptr;
+        pimpl->state_rebase_fn = nullptr;
         pimpl->catchup_fn = nullptr;
         pimpl->draft_fn = nullptr;
         return false;
@@ -182,6 +222,44 @@ void common_bridgespec_mtp_sidecar::disable() {
     }
 }
 
+bool common_bridgespec_mtp_sidecar::get_state(std::vector<uint8_t> & data) const {
+    if (!active() || pimpl->state_get_fn == nullptr || pimpl->state_size_fn == nullptr) {
+        return false;
+    }
+    const int size = pimpl->state_size_fn();
+    if (size != static_cast<int>(sizeof(bridgespec_sidecar_state))) {
+        data.clear();
+        return false;
+    }
+    data.resize(static_cast<size_t>(size));
+    if (pimpl->state_get_fn(data.data(), size) != 0) {
+        data.clear();
+        return false;
+    }
+    return true;
+}
+
+bool common_bridgespec_mtp_sidecar::set_state(const std::vector<uint8_t> & data) const {
+    return active() && pimpl->state_set_fn != nullptr &&
+           data.size() == sizeof(bridgespec_sidecar_state) &&
+           data.size() <= static_cast<size_t>(std::numeric_limits<int>::max()) &&
+           pimpl->state_set_fn(data.data(), static_cast<int>(data.size())) == 0;
+}
+
+bool common_bridgespec_mtp_sidecar::reset_state() const {
+    return active() && pimpl->state_reset_fn != nullptr && pimpl->state_reset_fn() == 0;
+}
+
+bool common_bridgespec_mtp_sidecar::truncate_state(int32_t pos_max) const {
+    return active() && pimpl->state_truncate_fn != nullptr &&
+           pimpl->state_truncate_fn(pos_max) == 0;
+}
+
+bool common_bridgespec_mtp_sidecar::rebase_state(int32_t pos_min, int32_t pos_max, int32_t delta) const {
+    return active() && pimpl->state_rebase_fn != nullptr &&
+           pimpl->state_rebase_fn(pos_min, pos_max, delta) == 0;
+}
+
 int common_bridgespec_mtp_sidecar::catchup(const int32_t * tokens, const int32_t * positions,
         const float * hidden_rows, int count) const {
     return active() && pimpl->catchup_fn != nullptr
@@ -197,6 +275,12 @@ int common_bridgespec_mtp_sidecar::draft(int32_t last_token, int32_t past_tokens
 struct common_bridgespec_dflash_sidecar::impl {
     void * handle = nullptr;
     bool active = false;
+    state_size_fn_t state_size_fn = nullptr;
+    state_get_fn_t state_get_fn = nullptr;
+    state_set_fn_t state_set_fn = nullptr;
+    state_reset_fn_t state_reset_fn = nullptr;
+    state_truncate_fn_t state_truncate_fn = nullptr;
+    state_rebase_fn_t state_rebase_fn = nullptr;
     dflash_chunk_fn chunk_fn = nullptr;
     dflash_draft_fn draft_fn = nullptr;
 };
@@ -230,14 +314,20 @@ bool common_bridgespec_dflash_sidecar::load(const std::string & library_path,
     dflash_init_fn init = nullptr;
     if (!resolve_symbol(handle, "spec_dflash_release_abi", release_abi, error) ||
         !resolve_symbol(handle, "spec_dflash_check", check, error) ||
+        !resolve_symbol(handle, "spec_dflash_state_size", pimpl->state_size_fn, error) ||
+        !resolve_symbol(handle, "spec_dflash_get_state", pimpl->state_get_fn, error) ||
+        !resolve_symbol(handle, "spec_dflash_set_state", pimpl->state_set_fn, error) ||
+        !resolve_symbol(handle, "spec_dflash_reset_state", pimpl->state_reset_fn, error) ||
+        !resolve_symbol(handle, "spec_dflash_truncate_state", pimpl->state_truncate_fn, error) ||
+        !resolve_symbol(handle, "spec_dflash_rebase_state", pimpl->state_rebase_fn, error) ||
         !resolve_symbol(handle, "spec_dflash_init", init, error) ||
         !resolve_symbol(handle, "spec_dflash_chunk", pimpl->chunk_fn, error) ||
         !resolve_symbol(handle, "spec_dflash_draft", pimpl->draft_fn, error)) {
         close_library(handle);
         return false;
     }
-    if (release_abi() != 2) {
-        error = "DFlash sidecar ABI version mismatch (expected 2)";
+    if (release_abi() != 3) {
+        error = "DFlash sidecar ABI version mismatch (expected 3)";
         close_library(handle);
         return false;
     }
@@ -246,9 +336,28 @@ bool common_bridgespec_dflash_sidecar::load(const std::string & library_path,
         close_library(handle);
         return false;
     }
+    if (pimpl->state_size_fn() != static_cast<int>(sizeof(bridgespec_sidecar_state))) {
+        error = "DFlash sidecar state ABI size mismatch";
+        close_library(handle);
+        pimpl->state_size_fn = nullptr;
+        pimpl->state_get_fn = nullptr;
+        pimpl->state_set_fn = nullptr;
+        pimpl->state_reset_fn = nullptr;
+        pimpl->state_truncate_fn = nullptr;
+        pimpl->state_rebase_fn = nullptr;
+        pimpl->chunk_fn = nullptr;
+        pimpl->draft_fn = nullptr;
+        return false;
+    }
     if (init(artifact_dir.c_str()) != 0) {
         error = "DFlash sidecar initialization failed";
         close_library(handle);
+        pimpl->state_size_fn = nullptr;
+        pimpl->state_get_fn = nullptr;
+        pimpl->state_set_fn = nullptr;
+        pimpl->state_reset_fn = nullptr;
+        pimpl->state_truncate_fn = nullptr;
+        pimpl->state_rebase_fn = nullptr;
         pimpl->chunk_fn = nullptr;
         pimpl->draft_fn = nullptr;
         return false;
@@ -267,6 +376,44 @@ void common_bridgespec_dflash_sidecar::disable() {
     if (pimpl != nullptr) {
         pimpl->active = false;
     }
+}
+
+bool common_bridgespec_dflash_sidecar::get_state(std::vector<uint8_t> & data) const {
+    if (!active() || pimpl->state_get_fn == nullptr || pimpl->state_size_fn == nullptr) {
+        return false;
+    }
+    const int size = pimpl->state_size_fn();
+    if (size != static_cast<int>(sizeof(bridgespec_sidecar_state))) {
+        data.clear();
+        return false;
+    }
+    data.resize(static_cast<size_t>(size));
+    if (pimpl->state_get_fn(data.data(), size) != 0) {
+        data.clear();
+        return false;
+    }
+    return true;
+}
+
+bool common_bridgespec_dflash_sidecar::set_state(const std::vector<uint8_t> & data) const {
+    return active() && pimpl->state_set_fn != nullptr &&
+           data.size() == sizeof(bridgespec_sidecar_state) &&
+           data.size() <= static_cast<size_t>(std::numeric_limits<int>::max()) &&
+           pimpl->state_set_fn(data.data(), static_cast<int>(data.size())) == 0;
+}
+
+bool common_bridgespec_dflash_sidecar::reset_state() const {
+    return active() && pimpl->state_reset_fn != nullptr && pimpl->state_reset_fn() == 0;
+}
+
+bool common_bridgespec_dflash_sidecar::truncate_state(int32_t pos_max) const {
+    return active() && pimpl->state_truncate_fn != nullptr &&
+           pimpl->state_truncate_fn(pos_max) == 0;
+}
+
+bool common_bridgespec_dflash_sidecar::rebase_state(int32_t pos_min, int32_t pos_max, int32_t delta) const {
+    return active() && pimpl->state_rebase_fn != nullptr &&
+           pimpl->state_rebase_fn(pos_min, pos_max, delta) == 0;
 }
 
 int common_bridgespec_dflash_sidecar::chunk(const int32_t * positions,

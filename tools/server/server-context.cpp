@@ -497,6 +497,11 @@ struct server_slot {
         n_sent_text    = 0;
 
         if (can_speculate()) {
+            // A prompt-cache/slot reset restores the target and native draft
+            // contexts separately from the optional sidecar. Invalidate the
+            // sidecar epoch before the slot can accept another request; the
+            // next full prompt prefill will seed it again without copying KV.
+            common_speculative_reset_state(spec, id);
             spec_draft.clear();
             spec_dists.clear();
             spec_i_batch.clear();
@@ -3288,8 +3293,18 @@ private:
 
                 SLT_WRN(slot, "slot context shift, n_keep = %d, n_left = %d, n_discard = %d\n", n_keep, n_left, n_discard);
 
+                // The sidecar has an absolute-position KV array, whereas the
+                // native memory abstraction changes positions in-place. Move
+                // the live sidecar range before rewriting prompt.tokens; its
+                // epoch invalidation makes older checkpoints fail closed.
+                const llama_pos sidecar_pos_max = llama_memory_seq_pos_max(
+                        llama_get_memory(slot.ctx_tgt), slot.id) + 1;
                 slot.mem.seq_rm (slot.id, n_keep            , n_keep + n_discard);
                 slot.mem.seq_add(slot.id, n_keep + n_discard, slot.prompt.tokens.pos_next(), -n_discard);
+                if (slot.can_speculate() && !common_speculative_rebase_state(
+                            spec.get(), slot.id, n_keep + n_discard, sidecar_pos_max, -n_discard)) {
+                    SLT_WRN(slot, "%s", "speculative sidecar rebase failed; continuing target-only\n");
+                }
 
                 // add generated tokens to cache
                 // ref: https://github.com/ggml-org/llama.cpp/pull/16818#discussion_r2473269481
@@ -3437,6 +3452,12 @@ private:
                 if (use_ckpt_dft) {
                     ckpt.update_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
                 }
+
+                // Capture the sidecar cursor at the same logical boundary as
+                // the target/draft checkpoint. This is a tiny host snapshot;
+                // it does not copy the sidecar's device KV cache.
+                ckpt.data_spec.clear();
+                common_speculative_get_state(spec.get(), slot.id, ckpt.data_spec);
             }
         });
 
@@ -3722,8 +3743,11 @@ private:
                                         // restore the context checkpoint
                                         it->load_tgt(ctx_tgt, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
                                         it->load_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-                                        // restore the draft's speculative state
-                                        common_speculative_set_state(spec.get(), slot.id, it->data_spec);
+                                        // restore the draft's speculative state,
+                                        // including the sidecar's logical KV cursor
+                                        if (!common_speculative_set_state(spec.get(), slot.id, it->data_spec)) {
+                                            SLT_WRN(slot, "%s", "speculative sidecar state restore failed; continuing target-only\n");
+                                        }
 
                                         pos_next = std::min(pos_next, std::max(it->pos_min + 1, it->pos_max));
                                         n_past   = std::min(slot.prompt.tokens.size_up_to_pos(pos_next), (size_t) it->n_tokens);
@@ -4326,6 +4350,9 @@ private:
 
                         if (slot.ctx_dft) {
                             ckpt.load_dft(slot.ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+                        }
+                        if (!common_speculative_set_state(spec.get(), slot.id, ckpt.data_spec)) {
+                            SLT_WRN(slot, "%s", "speculative sidecar rollback state restore failed; continuing target-only\n");
                         }
 
                         slot.mem.seq_rm(slot.id, ckpt.pos_max + 1, -1, (llama_pos) ckpt.n_tokens);

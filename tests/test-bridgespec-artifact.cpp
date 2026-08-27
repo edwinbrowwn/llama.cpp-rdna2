@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "artifact_manifest.h"
 #include "bridgespec_sidecar.h"
+#include "../include/bridgespec/sidecar_abi.h"
 
 #include <cstdio>
 #include <string>
@@ -24,6 +25,12 @@ static int require(bool condition, const char * label) {
 
 int main() {
     int failures = 0;
+    failures += require(sizeof(bridgespec_sidecar_state) == 24,
+                        "sidecar state ABI is a fixed 24-byte record");
+    failures += require(BRIDGESPEC_STATE_VERSION == 1 &&
+                        BRIDGESPEC_STATE_KIND_MTP == 1 && BRIDGESPEC_STATE_KIND_DFLASH == 2,
+                        "sidecar state ABI constants are stable");
+
     std::vector<TensorDesc> tensors;
     const char * valid =
         "{\"schema\":1,\"generator\":{\"name\":\"ignored\"},\"tensors\":["
