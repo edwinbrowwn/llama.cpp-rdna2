@@ -20,8 +20,8 @@ namespace {
 
 static bool is_absolute_path(const std::string & path) {
 #ifdef _WIN32
-    return path.size() >= 3 && std::isalpha(static_cast<unsigned char>(path[0])) &&
-            path[1] == ':' && (path[2] == '\\' || path[2] == '/') ||
+    return (path.size() >= 3 && std::isalpha(static_cast<unsigned char>(path[0])) &&
+            path[1] == ':' && (path[2] == '\\' || path[2] == '/')) ||
             path.rfind("\\\\", 0) == 0 || path.rfind("//", 0) == 0;
 #else
     return !path.empty() && path[0] == '/';

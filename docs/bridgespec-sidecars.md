@@ -40,7 +40,10 @@ python3 tools/bridgespec/validate_assets.py dflash /absolute/artifacts/bridgespe
 The target must have Q4_0 token embeddings, a Q6_K output head, vocabulary
 size 248,320, and one MTP block at index 64. The DFlash draft must provide the
 81-tensor Qwen3.8-27B DFlash2 schema. Do not mix an ID table, sliced head, and
-weights from different preparation runs.
+weights from different preparation runs. The generated MTP `*-bridgespec.gguf`
+is retained as a prepared derivative, but the initial sidecar host path uses
+the original full-vocabulary target because sliced native MTP-head loading is
+not enabled in this integration yet.
 
 ## Build
 
@@ -73,7 +76,7 @@ export LLAMA_SPEC_HIP_WEIGHTS=/absolute/artifacts/bridgespec-mtp
 export LLAMA_DRAFT_HEAD_IDS=/absolute/artifacts/bridgespec-mtp/draft_head_ids.bin
 
 ./build-bridgespec/bin/llama-server \
-  -m /absolute/artifacts/bridgespec-mtp/Qwen3.8-27B-Q4_0-bridgespec.gguf \
+  -m /absolute/models/Qwen3.8-27B-Q4_0.gguf \
   --spec-type draft-mtp \
   --spec-draft-n-max 3 \
   --spec-draft-p-min 0 \
