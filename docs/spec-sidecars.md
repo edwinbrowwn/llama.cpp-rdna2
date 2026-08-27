@@ -67,20 +67,20 @@ cmake --build build-spec-sidecar \
 ```
 
 The resulting libraries are `spec_hip_sidecar.so` and
-`spec_dflash_sidecar.so` in the build `bin` directory. The sidecar target is
+`spec_dflash_sidecar.so` in the build `bin` directory. For automatic runtime
+discovery, put the prepared bundles at `bin/spec-sidecar-mtp` and
+`bin/spec-sidecar-dflash` beside those libraries (or under the documented
+installed `share/llama.cpp/spec-sidecar` layout). The sidecar target is
 optional because it contains fixed Qwen3.8-27B dimensions and is not a
 replacement for the normal HIP backend.
 
 ## Run MTP
 
-Use an absolute sidecar library and artifact path. The master gate is
-mandatory:
+The default bundle layout needs only the master gate; provider paths are
+optional overrides:
 
 ```sh
 export SPEC_SIDECAR=1
-export LLAMA_SPEC_HIP_SIDECAR=/absolute/build/bin/spec_hip_sidecar.so
-export LLAMA_SPEC_HIP_WEIGHTS=/absolute/artifacts/spec-sidecar-mtp
-export LLAMA_DRAFT_HEAD_IDS=/absolute/artifacts/spec-sidecar-mtp/draft_head_ids.bin
 
 ./build-spec-sidecar/bin/llama-server \
   -m /absolute/models/Qwen3.8-27B-Q4_0.gguf \
@@ -100,8 +100,6 @@ is not needed for the sidecar-only path:
 
 ```sh
 export SPEC_SIDECAR=1
-export LLAMA_SPEC_HIP_DFLASH=/absolute/build/bin/spec_dflash_sidecar.so
-export LLAMA_SPEC_HIP_DFLASH_DIR=/absolute/artifacts/spec-sidecar-dflash
 
 ./build-spec-sidecar/bin/llama-server \
   -m /absolute/models/Qwen3.8-27B-Q4_0.gguf \

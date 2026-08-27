@@ -53,6 +53,8 @@ struct common_spec_sidecar_profile {
     const char * artifact_env = nullptr;
     const char * ids_env = nullptr;
     const char * full_head_env = nullptr;
+    const char * default_library_name = nullptr;
+    const char * default_artifact_dir_name = nullptr;
 
     common_spec_sidecar_model_match_fn matches_model = nullptr;
     common_spec_sidecar_file_match_fn matches_target_file = nullptr;

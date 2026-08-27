@@ -9,7 +9,11 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <filesystem>
 #include <utility>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 #ifdef _WIN32
 #   ifndef WIN32_LEAN_AND_MEAN
@@ -259,6 +263,8 @@ static const common_spec_sidecar_profile QWEN35_MTP_PROFILE = {
     /* .artifact_env          = */ "LLAMA_SPEC_HIP_WEIGHTS",
     /* .ids_env               = */ "LLAMA_DRAFT_HEAD_IDS",
     /* .full_head_env         = */ nullptr,
+    /* .default_library_name  = */ "spec_hip_sidecar.so",
+    /* .default_artifact_dir_name = */ "spec-sidecar-mtp",
     /* .matches_model         = */ qwen35_profile_matches_model,
     /* .matches_target_file   = */ qwen35_profile_matches_target_file,
 };
@@ -287,6 +293,8 @@ static const common_spec_sidecar_profile QWEN35_DFLASH_PROFILE = {
     /* .artifact_env          = */ "LLAMA_SPEC_HIP_DFLASH_DIR",
     /* .ids_env               = */ nullptr,
     /* .full_head_env         = */ "LLAMA_SPEC_HIP_FULL_HEAD",
+    /* .default_library_name  = */ "spec_dflash_sidecar.so",
+    /* .default_artifact_dir_name = */ "spec-sidecar-dflash",
     /* .matches_model         = */ qwen35_profile_matches_model,
     /* .matches_target_file   = */ qwen35_profile_matches_target_file,
 };
@@ -298,6 +306,103 @@ static const common_spec_sidecar_profile * const ALL_PROFILES[] = {
 
 static const char * env_value(const char * name) {
     return name != nullptr ? std::getenv(name) : nullptr;
+}
+
+static std::string normalize_path(const std::filesystem::path & path) {
+    std::error_code ec;
+    const auto normalized = std::filesystem::weakly_canonical(path, ec);
+    return (ec ? path : normalized).string();
+}
+
+static bool is_regular_file(const std::string & path) {
+    std::error_code ec;
+    return !path.empty() && std::filesystem::is_regular_file(path, ec) && !ec;
+}
+
+static bool is_directory(const std::string & path) {
+    std::error_code ec;
+    return !path.empty() && std::filesystem::is_directory(path, ec) && !ec;
+}
+
+static std::string executable_directory() {
+#ifdef _WIN32
+    char buffer[4096] = {};
+    const DWORD n = GetModuleFileNameA(nullptr, buffer, sizeof(buffer));
+    if (n == 0 || n >= sizeof(buffer)) {
+        return {};
+    }
+    return normalize_path(std::filesystem::path(std::string(buffer, n)).parent_path());
+#else
+    char buffer[4096] = {};
+    const ssize_t n = readlink("/proc/self/exe", buffer, sizeof(buffer) - 1);
+    if (n <= 0 || n >= (ssize_t) sizeof(buffer)) {
+        return {};
+    }
+    buffer[n] = '\0';
+    return normalize_path(std::filesystem::path(buffer).parent_path());
+#endif
+}
+
+static std::string home_directory() {
+#ifdef _WIN32
+    const char * home = env_value("USERPROFILE");
+    if (home == nullptr) {
+        home = env_value("HOMEDRIVE");
+        const char * tail = env_value("HOMEPATH");
+        if (home != nullptr && tail != nullptr) {
+            return normalize_path(std::filesystem::path(std::string(home) + tail));
+        }
+    }
+#else
+    const char * home = env_value("HOME");
+#endif
+    return home != nullptr ? normalize_path(std::filesystem::path(home)) : std::string();
+}
+
+static std::string find_default_library(const common_spec_sidecar_profile & profile) {
+    if (profile.default_library_name == nullptr) {
+        return {};
+    }
+    const std::filesystem::path exe = executable_directory();
+    const std::vector<std::filesystem::path> candidates = {
+        exe / profile.default_library_name,
+        exe.parent_path() / "lib" / profile.default_library_name,
+        exe.parent_path() / "lib" / "llama.cpp" / profile.default_library_name,
+        std::filesystem::path(".") / profile.default_library_name,
+    };
+    for (const auto & candidate : candidates) {
+        const std::string path = normalize_path(candidate);
+        if (is_regular_file(path)) {
+            return path;
+        }
+    }
+    return {};
+}
+
+static std::string find_default_artifact_directory(const common_spec_sidecar_profile & profile) {
+    if (profile.default_artifact_dir_name == nullptr) {
+        return {};
+    }
+    const std::filesystem::path exe = executable_directory();
+    const std::string home = home_directory();
+    const std::vector<std::filesystem::path> roots = {
+        exe,
+        exe / "spec-sidecar",
+        exe.parent_path() / "share" / "llama.cpp" / "spec-sidecar",
+        home.empty() ? std::filesystem::path() : std::filesystem::path(home) / ".cache" / "llama.cpp" / "spec-sidecar",
+        home.empty() ? std::filesystem::path() : std::filesystem::path(home) / ".local" / "share" / "llama.cpp" / "spec-sidecar",
+    };
+    for (const auto & root : roots) {
+        if (root.empty()) {
+            continue;
+        }
+        const std::filesystem::path candidate = root / profile.default_artifact_dir_name;
+        const std::string path = normalize_path(candidate);
+        if (is_directory(path)) {
+            return path;
+        }
+    }
+    return {};
 }
 
 static bool get_file_size(const std::string & path, uint64_t & size, std::string & error) {
@@ -440,21 +545,26 @@ const common_spec_sidecar_profile * common_spec_sidecar_profile_for_target_file(
 bool common_spec_sidecar_get_paths(const common_spec_sidecar_profile & profile,
         common_spec_sidecar_paths & paths, std::string & error) {
     paths = {};
-    const char * library = env_value(profile.library_env);
-    const char * artifact = env_value(profile.artifact_env);
-    if (library == nullptr || artifact == nullptr) {
+    const char * library_env = env_value(profile.library_env);
+    const char * artifact_env = env_value(profile.artifact_env);
+    paths.library = library_env != nullptr ? library_env : find_default_library(profile);
+    paths.artifact_dir = artifact_env != nullptr ? artifact_env : find_default_artifact_directory(profile);
+    if (paths.library.empty() || paths.artifact_dir.empty()) {
         error = std::string(profile.name != nullptr ? profile.name : "sidecar") +
-                " library/artifact paths are not configured";
+                " could not discover its default library/artifact bundle; set the provider paths explicitly";
         return false;
     }
-    paths.library = library;
-    paths.artifact_dir = artifact;
     if (profile.kind == COMMON_SPEC_SIDECAR_KIND_MTP) {
         const char * ids = env_value(profile.ids_env);
         paths.ids = ids != nullptr ? ids : join_path(paths.artifact_dir, "draft_head_ids.bin");
     }
     paths.dflash_full_head = profile.full_head_env != nullptr &&
             env_value(profile.full_head_env) != nullptr;
+    if (profile.kind == COMMON_SPEC_SIDECAR_KIND_DFLASH && !paths.dflash_full_head &&
+            !is_regular_file(join_path(paths.artifact_dir, "target_head_sliced.bin")) &&
+            is_regular_file(join_path(paths.artifact_dir, "target_head.bin"))) {
+        paths.dflash_full_head = true;
+    }
     return true;
 }
 
