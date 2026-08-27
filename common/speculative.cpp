@@ -1159,6 +1159,11 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         const bool has_tokens     = batch_in.token != nullptr;
         const bool has_embeddings = batch_in.embd  != nullptr;
         if (has_tokens == has_embeddings) {
+            if (sidecar.active()) {
+                sidecar.disable();
+                sidecar_target_only = true;
+                SPC_WRN("%s", "DFlash sidecar requires text token batches; entering target-only mode\n");
+            }
             return true;
         }
 
@@ -1771,6 +1776,11 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
 
         // TODO: how to make it work with vision tokens?
         if (batch_in.token == nullptr || batch_in.embd != nullptr) {
+            if (sidecar.active()) {
+                sidecar.disable();
+                sidecar_target_only = true;
+                SPC_WRN("%s", "MTP sidecar requires text token batches; entering target-only mode\n");
+            }
             return true;
         }
 
