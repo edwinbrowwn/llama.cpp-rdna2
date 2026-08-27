@@ -281,6 +281,8 @@ if (NOT LLAMA_SANITIZE_ADDRESS AND NOT GGML_SCHED_NO_REALLOC)
   llama_build_and_test(test-opt.cpp)
 endif()
 llama_build_and_test(test-backend-ops.cpp)
+llama_build_and_test(test-bridgespec-artifact.cpp)
+target_include_directories(test-bridgespec-artifact PRIVATE ${PROJECT_SOURCE_DIR}/src/bridgespec)
 
 # Pure host-side selector contract for the guarded RDNA2 BF16 hidden AllReduce.
 llama_build_and_test(test-cuda-allreduce-precision.cpp)
