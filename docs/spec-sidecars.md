@@ -5,10 +5,13 @@ Qwen3.8-27B MTP and DFlash2 drafters. The target model remains authoritative:
 the sidecar proposes token IDs and the normal target verifier accepts or
 rejects them.
 
-The sidecars are intentionally **not** enabled by default. They are
-model-specific, support up to eight isolated sequences, and support both
-keyed stochastic and greedy text inference. The host treats them as stateful
-speculative implementations rather than stateless token generators.
+The sidecars are intentionally **not** enabled by default. Runtime activation
+requires the exact opt-in `SPEC_SIDECAR=1`; an unset value, `0`, or any other
+value leaves the sidecar code dormant and preserves native speculative
+selection. They are model-specific, support up to eight isolated sequences,
+and support both keyed stochastic and greedy text inference. The host treats
+them as stateful speculative implementations rather than stateless token
+generators.
 
 ## Prepare the 27B artifacts
 
@@ -70,9 +73,11 @@ replacement for the normal HIP backend.
 
 ## Run MTP
 
-Use an absolute sidecar library and artifact path:
+Use an absolute sidecar library and artifact path. The master gate is
+mandatory:
 
 ```sh
+export SPEC_SIDECAR=1
 export LLAMA_SPEC_HIP_SIDECAR=/absolute/build/bin/spec_hip_sidecar.so
 export LLAMA_SPEC_HIP_WEIGHTS=/absolute/artifacts/spec-sidecar-mtp
 export LLAMA_DRAFT_HEAD_IDS=/absolute/artifacts/spec-sidecar-mtp/draft_head_ids.bin
@@ -94,6 +99,7 @@ The matching GGUF may still be supplied when native fallback is desired, but it
 is not needed for the sidecar-only path:
 
 ```sh
+export SPEC_SIDECAR=1
 export LLAMA_SPEC_HIP_DFLASH=/absolute/build/bin/spec_dflash_sidecar.so
 export LLAMA_SPEC_HIP_DFLASH_DIR=/absolute/artifacts/spec-sidecar-dflash
 
