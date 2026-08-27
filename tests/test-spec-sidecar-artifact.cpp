@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: MIT
 #include "artifact_manifest.h"
 #include "spec_sidecar.h"
+#include "../common/speculative.h"
 #include "../include/spec_sidecar/sidecar_abi.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -24,8 +27,58 @@ static int require(bool condition, const char * label) {
     return 1;
 }
 
+static void set_environment(const char * name, const char * value) {
+#if defined(_WIN32)
+    _putenv_s(name, value);
+#else
+    setenv(name, value, 1);
+#endif
+}
+
+static void unset_environment(const char * name) {
+#if defined(_WIN32)
+    _putenv_s(name, "");
+#else
+    unsetenv(name);
+#endif
+}
+
 int main() {
     int failures = 0;
+
+    // The master gate must run before target metadata, artifact, or library
+    // inspection. The deliberately invalid model pointer makes an accidental
+    // pre-gate dereference fail immediately instead of merely returning false.
+    common_params_speculative gate_params;
+    gate_params.types = { COMMON_SPECULATIVE_TYPE_DRAFT_MTP };
+    set_environment("LLAMA_SPEC_HIP_SIDECAR", "/definitely/missing/spec_hip_sidecar.so");
+    set_environment("LLAMA_SPEC_HIP_WEIGHTS", "/definitely/missing");
+    unset_environment("SPEC_SIDECAR");
+    std::string gate_error = "stale";
+    const auto disabled = common_speculative_sidecar_preflight(
+            gate_params, reinterpret_cast<const llama_model *>(static_cast<uintptr_t>(1)), 1, gate_error);
+    failures += require(disabled == COMMON_SPECULATIVE_TYPE_NONE &&
+                        !gate_params.draft.sidecar_only &&
+                        gate_params.draft.sidecar_type == COMMON_SPECULATIVE_TYPE_NONE &&
+                        gate_params.draft.sidecar_profile == nullptr && gate_error.empty(),
+                        "unset SPEC_SIDECAR disables preflight before model or artifact inspection");
+
+    set_environment("SPEC_SIDECAR", "0");
+    gate_error = "stale";
+    const auto zero = common_speculative_sidecar_preflight(
+            gate_params, reinterpret_cast<const llama_model *>(static_cast<uintptr_t>(1)), 1, gate_error);
+    failures += require(zero == COMMON_SPECULATIVE_TYPE_NONE && gate_error.empty(),
+                        "SPEC_SIDECAR=0 disables preflight");
+
+    for (const char * value : {"", "01", "true", "2"}) {
+        set_environment("SPEC_SIDECAR", value);
+        gate_error = "stale";
+        const auto rejected = common_speculative_sidecar_preflight(
+                gate_params, reinterpret_cast<const llama_model *>(static_cast<uintptr_t>(1)), 1, gate_error);
+        failures += require(rejected == COMMON_SPECULATIVE_TYPE_NONE && gate_error.empty(),
+                            "only the exact SPEC_SIDECAR=1 value enables preflight");
+    }
+    unset_environment("SPEC_SIDECAR");
     failures += require(sizeof(spec_sidecar_state) == 24,
                         "sidecar state ABI is a fixed 24-byte record");
     failures += require(SPEC_SIDECAR_STATE_VERSION == 1 &&

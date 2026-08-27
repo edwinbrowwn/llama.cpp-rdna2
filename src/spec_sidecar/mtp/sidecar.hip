@@ -772,7 +772,7 @@ static int spec_hip_draft_impl(int32_t seq_id, int32_t id_last, int32_t n_past,
             win_n = 0;
         }
     }
-    return 0;
+    return n;
 }
 
 SC_API int spec_hip_draft(int32_t seq_id, int32_t id_last, int32_t n_past,

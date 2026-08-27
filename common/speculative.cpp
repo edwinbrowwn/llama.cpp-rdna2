@@ -979,8 +979,6 @@ struct common_speculative_impl_draft_eagle3 : public common_speculative_impl {
 };
 
 // DFlash: block-diffusion drafting with a draft-side KV cache injection
-static constexpr int32_t SPEC_SIDECAR_DFLASH_TARGET_LAYER_IDS[] = { 6, 20, 34, 48, 62 };
-
 struct common_speculative_impl_draft_dflash : public common_speculative_impl {
     common_params_speculative_draft params;
 
@@ -1032,6 +1030,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         auto * ctx_dft = this->params.ctx_dft;
         const bool sidecar_only = this->params.sidecar_only &&
                 this->params.sidecar_type == COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH;
+        const common_spec_sidecar_profile * sidecar_profile = this->params.sidecar_profile;
         GGML_ASSERT(ctx_tgt && (ctx_dft != nullptr || sidecar_only) &&
                 "DFlash requires a target context or a validated sidecar-only mode");
 
@@ -1041,20 +1040,22 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         if (model_dft != nullptr) {
             target_layer_ids   = llama_model_target_layer_ids  (model_dft);
             target_layer_ids_n = llama_model_target_layer_ids_n(model_dft);
-        } else {
-            target_layer_ids   = SPEC_SIDECAR_DFLASH_TARGET_LAYER_IDS;
-            target_layer_ids_n = sizeof(SPEC_SIDECAR_DFLASH_TARGET_LAYER_IDS) /
-                    sizeof(SPEC_SIDECAR_DFLASH_TARGET_LAYER_IDS[0]);
+        } else if (sidecar_only && sidecar_profile != nullptr &&
+                sidecar_profile->kind == COMMON_SPEC_SIDECAR_KIND_DFLASH) {
+            target_layer_ids   = sidecar_profile->dflash_target_layer_ids;
+            target_layer_ids_n = sidecar_profile->dflash_target_layer_ids_n;
         }
         GGML_ASSERT(target_layer_ids_n > 0 && "DFlash model has no target_layer_ids");
 
         n_embd_tgt    = llama_model_n_embd(model_tgt);
-        n_embd_dec    = model_dft != nullptr ? llama_model_n_embd(model_dft) : 5120;
+        n_embd_dec    = model_dft != nullptr ? llama_model_n_embd(model_dft) :
+                (sidecar_profile != nullptr ? sidecar_profile->dflash_decoder_width : 0);
         n_embd_enc    = (int32_t) target_layer_ids_n * n_embd_tgt;
 
-        // Read the trained block metadata from a native model, or use the
-        // validated Qwen3.8-27B sidecar contract when no host draft exists.
-        block_size = sidecar_only ? 8 : 16;
+        // Read trained block metadata from a native model, or use the provider
+        // profile when no host draft exists.
+        block_size = sidecar_only && sidecar_profile != nullptr
+                ? sidecar_profile->dflash_block_size : 16;
         if (model_dft != nullptr) {
             char buf[32] = {};
             if (llama_model_meta_val_str(model_dft, "dflash.block_size", buf, sizeof(buf)) >= 0) {
@@ -1067,9 +1068,10 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                 selector_top_k = std::atoi(buf);
                 is_dflash2 = selector_top_k > 0;
             }
-        } else if (sidecar_only) {
-            selector_top_k = SPEC_SIDECAR_DFLASH_DRAFT_TOP_K;
-            is_dflash2 = true;
+        } else if (sidecar_only && sidecar_profile != nullptr &&
+                sidecar_profile->kind == COMMON_SPEC_SIDECAR_KIND_DFLASH) {
+            selector_top_k = sidecar_profile->dflash_selector_top_k;
+            is_dflash2 = selector_top_k > 0;
         }
         mask_token_id = model_dft != nullptr
                 ? llama_vocab_mask(llama_model_get_vocab(model_dft)) : 0;
@@ -1093,14 +1095,19 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         // speculative sidecar's DFlash DLL is selected only after the preflight probe.
         // A sidecar-only construction has no native draft context to fall back
         // to if HIP initialization fails, so it enters target-only mode.
-        if (sidecar_only && is_dflash2) {
-            const char * library = std::getenv("LLAMA_SPEC_HIP_DFLASH");
-            const char * artifact_dir = std::getenv("LLAMA_SPEC_HIP_DFLASH_DIR");
-            if (library != nullptr && artifact_dir != nullptr &&
-                    n_embd_enc == 25600 && block_size == 8 &&
-                    llama_vocab_n_tokens(llama_model_get_vocab(model_tgt)) == 248320) {
-                std::string error;
-                if (sidecar.load(library, artifact_dir, n_embd_enc, block_size, (int32_t) n_seq, error)) {
+        // The provider profile is selected only after the preflight probe.
+        // A sidecar-only construction has no native draft context to fall back
+        // to if HIP initialization fails, so it enters target-only mode.
+        if (sidecar_only && is_dflash2 && sidecar_profile != nullptr &&
+                sidecar_profile->kind == COMMON_SPEC_SIDECAR_KIND_DFLASH) {
+            common_spec_sidecar_paths paths;
+            std::string error;
+            if (common_spec_sidecar_get_paths(*sidecar_profile, paths, error) &&
+                    n_embd_enc == sidecar_profile->dflash_encoded_width &&
+                    block_size == sidecar_profile->dflash_block_size) {
+                if (sidecar.load(paths.library, paths.artifact_dir,
+                        sidecar_profile->dflash_encoded_width,
+                        sidecar_profile->dflash_block_size, (int32_t) n_seq, error)) {
                     for (uint32_t k = 0; k < target_layer_ids_n; ++k) {
                         if (target_layer_ids[k] == n_layer_tgt) {
                             llama_set_embeddings_nextn_device_preferred(ctx_tgt, true);
@@ -1109,14 +1116,17 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                                     ctx_tgt, (uint32_t) target_layer_ids[k], true);
                         }
                     }
-                    SPC_INF("DFlash sidecar active: %s\n", library);
+                    SPC_INF("DFlash sidecar active: %s\n", paths.library.c_str());
                 } else {
                     sidecar_target_only = true;
                     SPC_WRN("DFlash sidecar unavailable (%s); target-only mode\n", error.c_str());
                 }
-            } else if (library != nullptr) {
+            } else {
                 sidecar_target_only = true;
-                SPC_WRN("%s", "DFlash sidecar-only preflight no longer matches the target; target-only mode\n");
+                if (error.empty()) {
+                    error = "provider profile dimensions do not match the target";
+                }
+                SPC_WRN("DFlash sidecar unavailable (%s); target-only mode\n", error.c_str());
             }
         }
         if (sidecar_only && !sidecar.active()) {
@@ -1585,14 +1595,19 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                     return;
                 }
 
+                // The greedy DFlash ABI always fills the trained seven-token
+                // block, while the request may reserve a smaller speculative
+                // width. Only expose the requested prefix to target verification.
+                const int n_emit = std::min(n, limit);
+
                 const int32_t n_vocab = llama_vocab_n_tokens(
                         llama_model_get_vocab(llama_get_model(params.ctx_tgt)));
                 auto & result = *dp.result;
                 if (stochastic) {
                     dp.dists->clear();
-                    dp.dists->reserve((size_t) n);
+                    dp.dists->reserve((size_t) n_emit);
                 }
-                for (int i = 0; i < n; ++i) {
+                for (int i = 0; i < n_emit; ++i) {
                     if (ids[i] < 0 || ids[i] >= n_vocab) {
                         result.clear();
                         if (dp.dists != nullptr) dp.dists->clear();
@@ -1957,6 +1972,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         auto * ctx_dft = this->params.ctx_dft;
         const bool sidecar_only = this->params.sidecar_only &&
                 this->params.sidecar_type == COMMON_SPECULATIVE_TYPE_DRAFT_MTP;
+        const common_spec_sidecar_profile * sidecar_profile = this->params.sidecar_profile;
         GGML_ASSERT(ctx_tgt && (ctx_dft != nullptr || sidecar_only) &&
                 "MTP requires a target context or a validated sidecar-only mode");
 
@@ -2037,25 +2053,18 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         pending_h.assign(n_seq, std::vector<float>(n_embd, 0.0f));
 
         if (sidecar_only && n_mtp_layers == 1 && !chain_heads && !is_mem_shared &&
-                n_embd == 5120) {
-            const char * library = std::getenv("LLAMA_SPEC_HIP_SIDECAR");
-            const char * weights_dir = std::getenv("LLAMA_SPEC_HIP_WEIGHTS");
-            if (library != nullptr && weights_dir != nullptr &&
-                    llama_vocab_n_tokens(llama_model_get_vocab(llama_get_model(ctx_tgt))) == 248320) {
-                const char * ids_env = std::getenv("LLAMA_DRAFT_HEAD_IDS");
-                const std::string ids_path = ids_env != nullptr
-                        ? ids_env : std::string(weights_dir) + "/draft_head_ids.bin";
-                std::string error;
-                if (sidecar.load(library, weights_dir, ids_path, n_embd, 40960, (int32_t) n_seq, error)) {
-                    llama_set_embeddings_nextn_device_preferred(ctx_tgt, true);
-                    SPC_INF("MTP sidecar active: %s\n", library);
-                } else {
-                    sidecar_target_only = true;
-                    SPC_WRN("MTP sidecar unavailable (%s); target-only mode\n", error.c_str());
-                }
-            } else if (library != nullptr) {
+                sidecar_profile != nullptr && sidecar_profile->kind == COMMON_SPEC_SIDECAR_KIND_MTP) {
+            common_spec_sidecar_paths paths;
+            std::string error;
+            if (common_spec_sidecar_get_paths(*sidecar_profile, paths, error) &&
+                    sidecar.load(paths.library, paths.artifact_dir, paths.ids,
+                            sidecar_profile->mtp_embedding_width,
+                            sidecar_profile->mtp_head_rows, (int32_t) n_seq, error)) {
+                llama_set_embeddings_nextn_device_preferred(ctx_tgt, true);
+                SPC_INF("MTP sidecar active: %s\n", paths.library.c_str());
+            } else {
                 sidecar_target_only = true;
-                SPC_WRN("%s", "MTP sidecar-only preflight no longer matches the target; target-only mode\n");
+                SPC_WRN("MTP sidecar unavailable (%s); target-only mode\n", error.c_str());
             }
         }
         if (sidecar_only && !sidecar.active()) {
@@ -3353,71 +3362,30 @@ static bool common_speculative_has_host_draft_type(const common_params_speculati
            common_speculative_has_type(params, COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK);
 }
 
-static bool common_speculative_target_file_candidate(const std::string & path) {
-    if (path.empty()) {
-        return false;
-    }
-    const gguf_init_params init_params = {
-        /* .no_alloc = */ true,
-        /* .ctx      = */ nullptr,
-    };
-    gguf_context_ptr ctx(gguf_init_from_file(path.c_str(), init_params));
-    if (!ctx) {
-        return false;
-    }
-    const auto key = [&](const char * name) { return gguf_find_key(ctx.get(), name); };
-    const int64_t arch_key = key("general.architecture");
-    const int64_t block_key = key("qwen35.block_count");
-    const int64_t nextn_key = key("qwen35.nextn_predict_layers");
-    const int64_t embd_key = key("qwen35.embedding_length");
-    const int64_t vocab_key = key("tokenizer.ggml.tokens");
-    return arch_key >= 0 && gguf_get_kv_type(ctx.get(), arch_key) == GGUF_TYPE_STRING &&
-           std::strcmp(gguf_get_val_str(ctx.get(), arch_key), "qwen35") == 0 &&
-           block_key >= 0 && gguf_get_kv_type(ctx.get(), block_key) == GGUF_TYPE_UINT32 &&
-           gguf_get_val_u32(ctx.get(), block_key) == 65 &&
-           nextn_key >= 0 && gguf_get_kv_type(ctx.get(), nextn_key) == GGUF_TYPE_UINT32 &&
-           gguf_get_val_u32(ctx.get(), nextn_key) == 1 &&
-           embd_key >= 0 && gguf_get_kv_type(ctx.get(), embd_key) == GGUF_TYPE_UINT32 &&
-           gguf_get_val_u32(ctx.get(), embd_key) == 5120 &&
-           vocab_key >= 0 && gguf_get_kv_type(ctx.get(), vocab_key) == GGUF_TYPE_ARRAY &&
-           gguf_get_arr_n(ctx.get(), vocab_key) == 248320;
-}
-
 bool common_speculative_sidecar_candidate(const common_params_speculative & params,
         const std::string & target_model_path, uint32_t n_seq) {
     if (!common_speculative_sidecar_enabled()) {
         return false;
     }
-    if (!common_speculative_target_file_candidate(target_model_path)) {
-        return false;
-    }
+
     const bool has_mtp = common_speculative_has_type(params, COMMON_SPECULATIVE_TYPE_DRAFT_MTP);
     const bool has_dflash = common_speculative_has_type(params, COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH);
     if (common_speculative_has_host_draft_type(params) || (has_mtp && has_dflash)) {
         return false;
     }
-    const int32_t n_probe_seq = (int32_t) n_seq;
-    std::string error;
 
+    std::string error;
     if (has_mtp) {
-        const char * library = std::getenv("LLAMA_SPEC_HIP_SIDECAR");
-        const char * weights = std::getenv("LLAMA_SPEC_HIP_WEIGHTS");
-        if (library != nullptr && weights != nullptr) {
-            const char * ids_env = std::getenv("LLAMA_DRAFT_HEAD_IDS");
-            const std::string ids = ids_env != nullptr
-                    ? ids_env : std::string(weights) + "/draft_head_ids.bin";
-            if (common_spec_sidecar_mtp_probe(library, weights, ids, 5120, 40960,
-                    n_probe_seq, error)) {
-                return true;
-            }
+        const auto * profile = common_spec_sidecar_profile_for_target_file(
+                COMMON_SPEC_SIDECAR_KIND_MTP, target_model_path, error);
+        if (profile != nullptr && common_spec_sidecar_probe(*profile, n_seq, error)) {
+            return true;
         }
     }
     if (has_dflash) {
-        const char * library = std::getenv("LLAMA_SPEC_HIP_DFLASH");
-        const char * artifacts = std::getenv("LLAMA_SPEC_HIP_DFLASH_DIR");
-        if (library != nullptr && artifacts != nullptr &&
-                common_spec_sidecar_dflash_probe(library, artifacts, 25600, 8,
-                        n_probe_seq, error)) {
+        const auto * profile = common_spec_sidecar_profile_for_target_file(
+                COMMON_SPEC_SIDECAR_KIND_DFLASH, target_model_path, error);
+        if (profile != nullptr && common_spec_sidecar_probe(*profile, n_seq, error)) {
             return true;
         }
     }
@@ -3430,11 +3398,14 @@ common_speculative_type common_speculative_sidecar_preflight(
     if (!common_speculative_sidecar_enabled()) {
         params.draft.sidecar_only = false;
         params.draft.sidecar_type = COMMON_SPECULATIVE_TYPE_NONE;
+        params.draft.sidecar_profile = nullptr;
         error.clear();
         return COMMON_SPECULATIVE_TYPE_NONE;
     }
+
     params.draft.sidecar_only = false;
     params.draft.sidecar_type = COMMON_SPECULATIVE_TYPE_NONE;
+    params.draft.sidecar_profile = nullptr;
     error.clear();
     const bool has_mtp = common_speculative_has_type(params, COMMON_SPECULATIVE_TYPE_DRAFT_MTP);
     const bool has_dflash = common_speculative_has_type(params, COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH);
@@ -3443,43 +3414,25 @@ common_speculative_type common_speculative_sidecar_preflight(
         return COMMON_SPECULATIVE_TYPE_NONE;
     }
 
-    char arch[32] = {};
-    if (llama_model_meta_val_str(model_tgt, "general.architecture", arch, sizeof(arch)) < 0 ||
-            std::strcmp(arch, "qwen35") != 0 ||
-            llama_model_n_embd(model_tgt) != 5120 ||
-            llama_model_n_embd_out(model_tgt) != 5120 ||
-            llama_vocab_n_tokens(llama_model_get_vocab(model_tgt)) != 248320 ||
-            // Qwen3.8-27B has 65 GGUF blocks: 64 trunk layers plus
-            // the single external MTP/NextN block at index 64.
-            llama_model_n_layer(model_tgt) != 64) {
-        return COMMON_SPECULATIVE_TYPE_NONE;
-    }
-
     std::string probe_error;
-    if (has_mtp && llama_model_n_layer_nextn(model_tgt) == 1) {
-        const char * library = std::getenv("LLAMA_SPEC_HIP_SIDECAR");
-        const char * weights = std::getenv("LLAMA_SPEC_HIP_WEIGHTS");
-        if (library != nullptr && weights != nullptr) {
-            const char * ids_env = std::getenv("LLAMA_DRAFT_HEAD_IDS");
-            const std::string ids = ids_env != nullptr
-                    ? ids_env : std::string(weights) + "/draft_head_ids.bin";
-            if (common_spec_sidecar_mtp_probe(library, weights, ids, 5120, 40960,
-                    (int32_t) n_seq, probe_error)) {
-                params.draft.sidecar_only = true;
-                params.draft.sidecar_type = COMMON_SPECULATIVE_TYPE_DRAFT_MTP;
-                return params.draft.sidecar_type;
-            }
+    if (has_mtp) {
+        const auto * profile = common_spec_sidecar_profile_for_model(
+                COMMON_SPEC_SIDECAR_KIND_MTP, model_tgt, probe_error);
+        if (profile != nullptr && common_spec_sidecar_probe(*profile, n_seq, probe_error)) {
+            params.draft.sidecar_only = true;
+            params.draft.sidecar_type = COMMON_SPECULATIVE_TYPE_DRAFT_MTP;
+            params.draft.sidecar_profile = profile;
+            return params.draft.sidecar_type;
         }
     }
 
     if (has_dflash) {
-        const char * library = std::getenv("LLAMA_SPEC_HIP_DFLASH");
-        const char * artifacts = std::getenv("LLAMA_SPEC_HIP_DFLASH_DIR");
-        if (library != nullptr && artifacts != nullptr &&
-                common_spec_sidecar_dflash_probe(library, artifacts, 25600, 8,
-                        (int32_t) n_seq, probe_error)) {
+        const auto * profile = common_spec_sidecar_profile_for_model(
+                COMMON_SPEC_SIDECAR_KIND_DFLASH, model_tgt, probe_error);
+        if (profile != nullptr && common_spec_sidecar_probe(*profile, n_seq, probe_error)) {
             params.draft.sidecar_only = true;
             params.draft.sidecar_type = COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH;
+            params.draft.sidecar_profile = profile;
             return params.draft.sidecar_type;
         }
     }

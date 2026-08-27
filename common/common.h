@@ -59,6 +59,7 @@ struct common_adapter_lora_info {
 using llama_tokens = std::vector<llama_token>;
 
 struct common_control_vector_load_info;
+struct common_spec_sidecar_profile;
 
 //
 // CPU utils
@@ -343,6 +344,7 @@ struct common_params_speculative_draft {
     // to target-only rather than loading a late fallback model.
     bool sidecar_only = false;
     common_speculative_type sidecar_type = COMMON_SPECULATIVE_TYPE_NONE;
+    const common_spec_sidecar_profile * sidecar_profile = nullptr;
 
     int32_t n_gpu_layers = -1; // number of layers to store in VRAM for the draft model (-1 - use default)
 

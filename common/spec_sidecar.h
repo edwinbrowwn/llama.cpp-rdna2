@@ -5,6 +5,75 @@
 #include <string>
 #include <vector>
 
+struct llama_model;
+
+// A provider profile owns model-specific compatibility and artifact details.
+// The speculative driver only selects a profile and invokes its generic
+// capabilities; it does not contain model dimensions or tensor identities.
+enum common_spec_sidecar_kind {
+    COMMON_SPEC_SIDECAR_KIND_MTP = 1,
+    COMMON_SPEC_SIDECAR_KIND_DFLASH = 2,
+};
+
+struct common_spec_sidecar_profile;
+using common_spec_sidecar_model_match_fn = bool (*)(
+        const common_spec_sidecar_profile &, const llama_model *, std::string &);
+using common_spec_sidecar_file_match_fn = bool (*)(
+        const common_spec_sidecar_profile &, const std::string &, std::string &);
+
+struct common_spec_sidecar_profile {
+    const char * name = nullptr;
+    common_spec_sidecar_kind kind = COMMON_SPEC_SIDECAR_KIND_MTP;
+
+    // Strong target identity and shape contract. A negative nextn count means
+    // that the profile does not constrain the target auxiliary-layer count.
+    const char * target_architecture = nullptr;
+    const char * target_name = nullptr;
+    const char * target_size_label = nullptr;
+    int32_t target_n_embd = 0;
+    int32_t target_n_embd_out = 0;
+    int32_t target_n_layer = 0;
+    int32_t target_n_layer_nextn = -1;
+    int32_t target_n_vocab = 0;
+
+    // Provider capabilities consumed by the matching sidecar implementation.
+    int32_t mtp_embedding_width = 0;
+    int32_t mtp_head_rows = 0;
+    int32_t dflash_encoded_width = 0;
+    int32_t dflash_decoder_width = 0;
+    int32_t dflash_block_size = 0;
+    int32_t dflash_selector_top_k = 0;
+    int32_t dflash_head_rows = 0;
+    const int32_t * dflash_target_layer_ids = nullptr;
+    uint32_t dflash_target_layer_ids_n = 0;
+
+    // Configuration names are provider-owned so the core does not encode
+    // artifact naming conventions. Existing neutral names are retained.
+    const char * library_env = nullptr;
+    const char * artifact_env = nullptr;
+    const char * ids_env = nullptr;
+    const char * full_head_env = nullptr;
+
+    common_spec_sidecar_model_match_fn matches_model = nullptr;
+    common_spec_sidecar_file_match_fn matches_target_file = nullptr;
+};
+
+struct common_spec_sidecar_paths {
+    std::string library;
+    std::string artifact_dir;
+    std::string ids;
+    bool dflash_full_head = false;
+};
+
+const common_spec_sidecar_profile * common_spec_sidecar_profile_for_model(
+        common_spec_sidecar_kind kind, const llama_model * model, std::string & error);
+const common_spec_sidecar_profile * common_spec_sidecar_profile_for_target_file(
+        common_spec_sidecar_kind kind, const std::string & path, std::string & error);
+bool common_spec_sidecar_get_paths(const common_spec_sidecar_profile & profile,
+        common_spec_sidecar_paths & paths, std::string & error);
+bool common_spec_sidecar_probe(const common_spec_sidecar_profile & profile,
+        uint32_t n_seq, std::string & error);
+
 // Probe only the sidecar binary/artifact contract. This intentionally performs
 // no HIP initialization, model loading, or device allocation.
 bool common_spec_sidecar_mtp_probe(const std::string & library_path,

@@ -1398,6 +1398,8 @@ private:
                 params_base.speculative.draft.sidecar_only = sidecar_only;
                 params_base.speculative.draft.sidecar_type = sidecar_only
                         ? spec_init->sidecar_type() : COMMON_SPECULATIVE_TYPE_NONE;
+                params_base.speculative.draft.sidecar_profile = sidecar_only
+                        ? params_dft.speculative.draft.sidecar_profile : nullptr;
             }
 
             load_progress_callback(1.0f, &load_progress_spec);

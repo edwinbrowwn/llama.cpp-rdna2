@@ -77,6 +77,7 @@ SPEC_SIDECAR_API int spec_hip_catchup_device(
         const int32_t * positions,
         const float * hidden_rows_device,
         int count);
+// Returns the number of IDs written, or a negative value on failure.
 SPEC_SIDECAR_API int spec_hip_draft(
         int32_t seq_id,
         int32_t last_token,
@@ -84,6 +85,7 @@ SPEC_SIDECAR_API int spec_hip_draft(
         const float * hidden,
         int max_draft,
         int32_t * output_ids);
+// Returns the number of IDs written, or a negative value on failure.
 SPEC_SIDECAR_API int spec_hip_draft_device(
         int32_t seq_id,
         int32_t last_token,

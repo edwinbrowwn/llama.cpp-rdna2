@@ -1,4 +1,7 @@
 #include "spec_sidecar.h"
+#include "gguf.h"
+#include "llama.h"
+#include "../src/spec_sidecar/artifact_manifest.h"
 #include "../include/spec_sidecar/sidecar_abi.h"
 
 #include <cctype>
@@ -113,6 +116,341 @@ static std::string join_path(const std::string & dir, const char * name) {
     return dir + separator + name;
 }
 
+static const int32_t QWEN35_DFLASH_TARGET_LAYER_IDS[] = { 6, 20, 34, 48, 62 };
+
+static bool profile_mismatch(const common_spec_sidecar_profile & profile,
+        const char * detail, std::string & error) {
+    error = std::string(profile.name != nullptr ? profile.name : "sidecar") +
+            " target mismatch: " + detail;
+    return false;
+}
+
+static bool qwen35_profile_matches_model(const common_spec_sidecar_profile & profile,
+        const llama_model * model, std::string & error) {
+    if (model == nullptr) {
+        return profile_mismatch(profile, "target model is null", error);
+    }
+
+    char arch[64] = {};
+    if (llama_model_meta_val_str(model, "general.architecture", arch, sizeof(arch)) < 0 ||
+            profile.target_architecture == nullptr ||
+            std::strcmp(arch, profile.target_architecture) != 0) {
+        return profile_mismatch(profile, "architecture is not qwen35", error);
+    }
+
+    if (profile.target_name != nullptr) {
+        char name[128] = {};
+        if (llama_model_meta_val_str(model, "general.name", name, sizeof(name)) < 0 ||
+                std::strcmp(name, profile.target_name) != 0) {
+            return profile_mismatch(profile, "model name is not the provider target", error);
+        }
+    }
+    if (profile.target_size_label != nullptr) {
+        char label[64] = {};
+        if (llama_model_meta_val_str(model, "general.size_label", label, sizeof(label)) < 0 ||
+                std::strcmp(label, profile.target_size_label) != 0) {
+            return profile_mismatch(profile, "model size label is not the provider target", error);
+        }
+    }
+    if (llama_model_n_embd(model) != profile.target_n_embd ||
+            llama_model_n_embd_out(model) != profile.target_n_embd_out ||
+            llama_model_n_layer(model) != profile.target_n_layer ||
+            llama_vocab_n_tokens(llama_model_get_vocab(model)) != profile.target_n_vocab) {
+        return profile_mismatch(profile, "model dimensions or vocabulary differ", error);
+    }
+    if (profile.target_n_layer_nextn >= 0 &&
+            llama_model_n_layer_nextn(model) != profile.target_n_layer_nextn) {
+        return profile_mismatch(profile, "auxiliary-layer count differs", error);
+    }
+    return true;
+}
+
+static bool qwen35_profile_matches_target_file(const common_spec_sidecar_profile & profile,
+        const std::string & path, std::string & error) {
+    if (path.empty()) {
+        return profile_mismatch(profile, "target model path is empty", error);
+    }
+    const gguf_init_params init_params = {
+        /* .no_alloc = */ true,
+        /* .ctx      = */ nullptr,
+    };
+    gguf_context * ctx = gguf_init_from_file(path.c_str(), init_params);
+    if (ctx == nullptr) {
+        return profile_mismatch(profile, "target GGUF metadata could not be opened", error);
+    }
+
+    bool ok = true;
+    const auto has_u32 = [&](const char * key, uint32_t expected, const char * detail) {
+        const int64_t id = gguf_find_key(ctx, key);
+        if (id < 0 || gguf_get_kv_type(ctx, id) != GGUF_TYPE_UINT32 ||
+                gguf_get_val_u32(ctx, id) != expected) {
+            ok = profile_mismatch(profile, detail, error);
+            return false;
+        }
+        return true;
+    };
+    const int64_t arch_id = gguf_find_key(ctx, "general.architecture");
+    if (arch_id < 0 || gguf_get_kv_type(ctx, arch_id) != GGUF_TYPE_STRING ||
+            profile.target_architecture == nullptr ||
+            std::strcmp(gguf_get_val_str(ctx, arch_id), profile.target_architecture) != 0) {
+        ok = profile_mismatch(profile, "target GGUF architecture differs", error);
+    }
+    if (ok) {
+        const std::string prefix = std::string(profile.target_architecture) + ".";
+        ok = has_u32((prefix + "block_count").c_str(),
+                (uint32_t) profile.target_n_layer + 1, "target GGUF block count differs");
+    }
+    if (ok && profile.target_n_layer_nextn >= 0) {
+        const std::string prefix = std::string(profile.target_architecture) + ".";
+        ok = has_u32((prefix + "nextn_predict_layers").c_str(),
+                (uint32_t) profile.target_n_layer_nextn, "target GGUF auxiliary-layer count differs");
+    }
+    if (ok) {
+        const std::string prefix = std::string(profile.target_architecture) + ".";
+        ok = has_u32((prefix + "embedding_length").c_str(),
+                (uint32_t) profile.target_n_embd, "target GGUF embedding width differs");
+    }
+    const int64_t vocab_id = gguf_find_key(ctx, "tokenizer.ggml.tokens");
+    if (ok && (vocab_id < 0 || gguf_get_kv_type(ctx, vocab_id) != GGUF_TYPE_ARRAY ||
+            gguf_get_arr_n(ctx, vocab_id) != (size_t) profile.target_n_vocab)) {
+        ok = profile_mismatch(profile, "target GGUF vocabulary differs", error);
+    }
+    gguf_free(ctx);
+    return ok;
+}
+
+static const common_spec_sidecar_profile QWEN35_MTP_PROFILE = {
+    /* .name                  = */ "qwen35-mtp",
+    /* .kind                  = */ COMMON_SPEC_SIDECAR_KIND_MTP,
+    /* .target_architecture   = */ "qwen35",
+    /* .target_name           = */ "Qwen3.8-27B",
+    /* .target_size_label     = */ "27B",
+    /* .target_n_embd         = */ 5120,
+    /* .target_n_embd_out     = */ 5120,
+    /* .target_n_layer        = */ 64,
+    /* .target_n_layer_nextn  = */ 1,
+    /* .target_n_vocab        = */ 248320,
+    /* .mtp_embedding_width  = */ 5120,
+    /* .mtp_head_rows         = */ 40960,
+    /* .dflash_encoded_width  = */ 0,
+    /* .dflash_decoder_width  = */ 0,
+    /* .dflash_block_size     = */ 0,
+    /* .dflash_selector_top_k = */ 0,
+    /* .dflash_head_rows      = */ 0,
+    /* .dflash_target_layer_ids = */ nullptr,
+    /* .dflash_target_layer_ids_n = */ 0,
+    /* .library_env           = */ "LLAMA_SPEC_HIP_SIDECAR",
+    /* .artifact_env          = */ "LLAMA_SPEC_HIP_WEIGHTS",
+    /* .ids_env               = */ "LLAMA_DRAFT_HEAD_IDS",
+    /* .full_head_env         = */ nullptr,
+    /* .matches_model         = */ qwen35_profile_matches_model,
+    /* .matches_target_file   = */ qwen35_profile_matches_target_file,
+};
+
+static const common_spec_sidecar_profile QWEN35_DFLASH_PROFILE = {
+    /* .name                  = */ "qwen35-dflash",
+    /* .kind                  = */ COMMON_SPEC_SIDECAR_KIND_DFLASH,
+    /* .target_architecture   = */ "qwen35",
+    /* .target_name           = */ "Qwen3.8-27B",
+    /* .target_size_label     = */ "27B",
+    /* .target_n_embd         = */ 5120,
+    /* .target_n_embd_out     = */ 5120,
+    /* .target_n_layer        = */ 64,
+    /* .target_n_layer_nextn  = */ -1,
+    /* .target_n_vocab        = */ 248320,
+    /* .mtp_embedding_width  = */ 0,
+    /* .mtp_head_rows         = */ 0,
+    /* .dflash_encoded_width  = */ 25600,
+    /* .dflash_decoder_width  = */ 5120,
+    /* .dflash_block_size     = */ 8,
+    /* .dflash_selector_top_k = */ SPEC_SIDECAR_DFLASH_DRAFT_TOP_K,
+    /* .dflash_head_rows      = */ 40960,
+    /* .dflash_target_layer_ids = */ QWEN35_DFLASH_TARGET_LAYER_IDS,
+    /* .dflash_target_layer_ids_n = */ 5,
+    /* .library_env           = */ "LLAMA_SPEC_HIP_DFLASH",
+    /* .artifact_env          = */ "LLAMA_SPEC_HIP_DFLASH_DIR",
+    /* .ids_env               = */ nullptr,
+    /* .full_head_env         = */ "LLAMA_SPEC_HIP_FULL_HEAD",
+    /* .matches_model         = */ qwen35_profile_matches_model,
+    /* .matches_target_file   = */ qwen35_profile_matches_target_file,
+};
+
+static const common_spec_sidecar_profile * const ALL_PROFILES[] = {
+    &QWEN35_MTP_PROFILE,
+    &QWEN35_DFLASH_PROFILE,
+};
+
+static const char * env_value(const char * name) {
+    return name != nullptr ? std::getenv(name) : nullptr;
+}
+
+static bool get_file_size(const std::string & path, uint64_t & size, std::string & error) {
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file) {
+        error = "cannot stat sidecar file: " + path;
+        return false;
+    }
+    const std::streamoff end = file.tellg();
+    if (end < 0) {
+        error = "cannot determine sidecar file size: " + path;
+        return false;
+    }
+    size = static_cast<uint64_t>(end);
+    return true;
+}
+
+static bool validate_manifest_blob(const std::string & manifest_path,
+        const std::string & blob_path, const char * label, std::string & error) {
+    std::vector<spec_sidecar_artifact::TensorDesc> tensors;
+    if (!spec_sidecar_artifact::load_manifest(manifest_path.c_str(), tensors, error)) {
+        error = std::string(label) + " manifest invalid: " + error;
+        return false;
+    }
+    uint64_t blob_size = 0;
+    if (!get_file_size(blob_path, blob_size, error)) {
+        return false;
+    }
+    if (!spec_sidecar_artifact::validate_blob_layout(tensors, blob_size, error)) {
+        error = std::string(label) + " weights invalid: " + error;
+        return false;
+    }
+    return true;
+}
+
+static bool validate_id_table(const std::string & path, int32_t rows,
+        int32_t vocab, std::string & error) {
+    uint64_t size = 0;
+    if (!get_file_size(path, size, error)) {
+        return false;
+    }
+    if (rows <= 0 || size != (uint64_t) rows * sizeof(int32_t)) {
+        error = "sidecar ID table has an unexpected size: " + path;
+        return false;
+    }
+    std::vector<int32_t> ids((size_t) rows);
+    std::ifstream file(path, std::ios::binary);
+    if (!file.read(reinterpret_cast<char *>(ids.data()), (std::streamsize) size)) {
+        error = "sidecar ID table is truncated: " + path;
+        return false;
+    }
+    if (!spec_sidecar_artifact::validate_remap(ids, vocab, error)) {
+        error = "sidecar ID table is invalid: " + error;
+        return false;
+    }
+    return true;
+}
+
+static bool validate_profile_artifacts(const common_spec_sidecar_profile & profile,
+        const common_spec_sidecar_paths & paths, std::string & error) {
+    if (profile.kind == COMMON_SPEC_SIDECAR_KIND_MTP) {
+        if (!validate_manifest_blob(join_path(paths.artifact_dir, "drafter_manifest.json"),
+                join_path(paths.artifact_dir, "drafter_weights.bin"), "MTP sidecar", error)) {
+            return false;
+        }
+        return validate_id_table(paths.ids, profile.mtp_head_rows,
+                profile.target_n_vocab, error);
+    }
+
+    if (!validate_manifest_blob(join_path(paths.artifact_dir, "dflash_manifest.json"),
+            join_path(paths.artifact_dir, "dflash_weights.bin"), "DFlash sidecar", error) ||
+        !validate_manifest_blob(join_path(paths.artifact_dir, "drafter_manifest.json"),
+            join_path(paths.artifact_dir, "drafter_weights.bin"), "DFlash target embedding", error)) {
+        return false;
+    }
+    const char * head_name = paths.dflash_full_head ? "target_head.bin" : "target_head_sliced.bin";
+    if (!require_file(join_path(paths.artifact_dir, head_name), "DFlash target head", error)) {
+        return false;
+    }
+    if (!paths.dflash_full_head && !validate_id_table(
+            join_path(paths.artifact_dir, "draft_head_ids.bin"),
+            profile.dflash_head_rows, profile.target_n_vocab, error)) {
+        return false;
+    }
+    return true;
+}
+
+} // namespace
+
+const common_spec_sidecar_profile * common_spec_sidecar_profile_for_model(
+        common_spec_sidecar_kind kind, const llama_model * model, std::string & error) {
+    error.clear();
+    for (const auto * profile : ALL_PROFILES) {
+        if (profile->kind != kind || profile->matches_model == nullptr) {
+            continue;
+        }
+        std::string mismatch;
+        if (profile->matches_model(*profile, model, mismatch)) {
+            return profile;
+        }
+        if (error.empty()) {
+            error = mismatch;
+        }
+    }
+    if (error.empty()) {
+        error = "no provider is registered for the requested sidecar kind";
+    }
+    return nullptr;
+}
+
+const common_spec_sidecar_profile * common_spec_sidecar_profile_for_target_file(
+        common_spec_sidecar_kind kind, const std::string & path, std::string & error) {
+    error.clear();
+    for (const auto * profile : ALL_PROFILES) {
+        if (profile->kind != kind || profile->matches_target_file == nullptr) {
+            continue;
+        }
+        std::string mismatch;
+        if (profile->matches_target_file(*profile, path, mismatch)) {
+            return profile;
+        }
+        if (error.empty()) {
+            error = mismatch;
+        }
+    }
+    if (error.empty()) {
+        error = "no provider is registered for the requested sidecar kind";
+    }
+    return nullptr;
+}
+
+bool common_spec_sidecar_get_paths(const common_spec_sidecar_profile & profile,
+        common_spec_sidecar_paths & paths, std::string & error) {
+    paths = {};
+    const char * library = env_value(profile.library_env);
+    const char * artifact = env_value(profile.artifact_env);
+    if (library == nullptr || artifact == nullptr) {
+        error = std::string(profile.name != nullptr ? profile.name : "sidecar") +
+                " library/artifact paths are not configured";
+        return false;
+    }
+    paths.library = library;
+    paths.artifact_dir = artifact;
+    if (profile.kind == COMMON_SPEC_SIDECAR_KIND_MTP) {
+        const char * ids = env_value(profile.ids_env);
+        paths.ids = ids != nullptr ? ids : join_path(paths.artifact_dir, "draft_head_ids.bin");
+    }
+    paths.dflash_full_head = profile.full_head_env != nullptr &&
+            env_value(profile.full_head_env) != nullptr;
+    return true;
+}
+
+bool common_spec_sidecar_probe(const common_spec_sidecar_profile & profile,
+        uint32_t n_seq, std::string & error) {
+    common_spec_sidecar_paths paths;
+    if (!common_spec_sidecar_get_paths(profile, paths, error)) {
+        return false;
+    }
+    if (!validate_profile_artifacts(profile, paths, error)) {
+        return false;
+    }
+    if (profile.kind == COMMON_SPEC_SIDECAR_KIND_MTP) {
+        return common_spec_sidecar_mtp_probe(paths.library, paths.artifact_dir, paths.ids,
+                profile.mtp_embedding_width, profile.mtp_head_rows, (int32_t) n_seq, error);
+    }
+    return common_spec_sidecar_dflash_probe(paths.library, paths.artifact_dir,
+            profile.dflash_encoded_width, profile.dflash_block_size, (int32_t) n_seq, error);
+}
+
 using state_size_fn_t     = int (*)();
 using state_get_fn_t      = int (*)(int32_t, void *, int);
 using state_set_fn_t      = int (*)(int32_t, const void *, int);
@@ -142,8 +480,6 @@ using dflash_chunk_device_fn = int (*)(int32_t, const int32_t *, const void * co
 using dflash_draft_fn       = int (*)(int32_t, int32_t, int32_t, int32_t *);
 using dflash_stochastic_top_k_fn = int (*)();
 using dflash_draft_stochastic_fn = int (*)(int32_t, int32_t, int32_t, float, float, uint64_t, int, int32_t *, int32_t *, float *);
-
-} // namespace
 
 bool common_spec_sidecar_mtp_probe(const std::string & library_path,
         const std::string & weights_dir, const std::string & ids_path,
