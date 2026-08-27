@@ -61,6 +61,9 @@ int main(int argc, char ** argv) {
 
         params.speculative.draft.ctx_tgt = ctx_tgt;
         params.speculative.draft.ctx_dft = spec_init->context();
+        params.speculative.draft.sidecar_only = spec_init->sidecar_only();
+        params.speculative.draft.sidecar_type = spec_init->sidecar_only()
+                ? spec_init->sidecar_type() : COMMON_SPECULATIVE_TYPE_NONE;
     }
 
     llama_context * ctx_dft = params.speculative.draft.ctx_dft;
@@ -68,7 +71,8 @@ int main(int argc, char ** argv) {
     // check if the context supports partial sequence removal
     const auto ctx_tgt_seq_rm_type = common_context_can_seq_rm(ctx_tgt);
     const bool use_ckpt_tgt = ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
-    const bool use_ckpt_dft = common_context_can_seq_rm(ctx_dft) == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
+    const bool use_ckpt_dft = ctx_dft != nullptr &&
+            common_context_can_seq_rm(ctx_dft) == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
 
     if (use_ckpt_tgt) {
         LOG_INF("speculative decoding will use checkpoints (context does not support partial sequence removal)\n");

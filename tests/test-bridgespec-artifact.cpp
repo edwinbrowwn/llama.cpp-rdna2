@@ -35,6 +35,14 @@ int main() {
                         offsetof(bridgespec_sidecar_state, pos_max) == 12 &&
                         offsetof(bridgespec_sidecar_state, epoch) == 16,
                         "sidecar state ABI field offsets are stable");
+    failures += require(BRIDGESPEC_MTP_DRAFT_TOP_K == 32 &&
+                        BRIDGESPEC_DFLASH_DRAFT_TOP_K == 16,
+                        "sidecar stochastic top-k constants are stable");
+    const double u0 = bridgespec_stochastic_uniform(UINT64_C(1234), 0);
+    failures += require(u0 >= 0.0 && u0 < 1.0 &&
+                        u0 == bridgespec_stochastic_uniform(UINT64_C(1234), 0) &&
+                        u0 != bridgespec_stochastic_uniform(UINT64_C(1234), 1),
+                        "sidecar proposal RNG is deterministic and bounded");
 
     std::vector<TensorDesc> tensors;
     const char * valid =

@@ -5,11 +5,21 @@
 #include <string>
 #include <vector>
 
+// Probe only the sidecar binary/artifact contract. This intentionally performs
+// no HIP initialization, model loading, or device allocation.
+bool common_bridgespec_mtp_probe(const std::string & library_path,
+        const std::string & weights_dir, const std::string & ids_path,
+        int32_t embedding_width, int32_t head_rows, int32_t n_seq,
+        std::string & error);
+bool common_bridgespec_dflash_probe(const std::string & library_path,
+        const std::string & artifact_dir, int32_t encoded_width,
+        int32_t block_size, int32_t n_seq, std::string & error);
+
 // Host-side loader for the optional BridgeSpec Qwen3.8-27B sidecars.
 // The sidecars are deliberately opt-in and model-specific. A loader object
 // keeps the library resident for the lifetime of the process because the
 // current release ABI has no shutdown operation. State/KV calls are serialized
-// by the speculative driver and sequence-scoped in ABI 3/4.
+// by the speculative driver and sequence-scoped in ABI 4/5.
 class common_bridgespec_mtp_sidecar {
 public:
     common_bridgespec_mtp_sidecar();
@@ -45,6 +55,14 @@ public:
               const float * hidden, int max_draft, int32_t * output_ids) const;
     int draft_device(int32_t seq_id, int32_t last_token, int32_t past_tokens,
                      int max_draft, int32_t * output_ids) const;
+    int draft_stochastic(int32_t seq_id, int32_t last_token, int32_t past_tokens,
+                         const float * hidden, float temperature, float p_min,
+                         uint64_t rng_key, int max_draft, int32_t * output_ids,
+                         int32_t * dist_ids, float * dist_probs) const;
+    int draft_stochastic_device(int32_t seq_id, int32_t last_token, int32_t past_tokens,
+                                float temperature, float p_min, uint64_t rng_key,
+                                int max_draft, int32_t * output_ids,
+                                int32_t * dist_ids, float * dist_probs) const;
 
 private:
     struct impl;
@@ -84,6 +102,10 @@ public:
                      int n_layers, int layer_width, int count) const;
     int draft(int32_t seq_id, int32_t last_token, int32_t past_tokens,
               int32_t * output_ids) const;
+    int draft_stochastic(int32_t seq_id, int32_t last_token, int32_t past_tokens,
+                         float temperature, float p_min, uint64_t rng_key,
+                         int max_draft, int32_t * output_ids,
+                         int32_t * dist_ids, float * dist_probs) const;
 
 private:
     struct impl;

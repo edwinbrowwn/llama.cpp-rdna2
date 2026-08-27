@@ -1,7 +1,7 @@
 // DFlash2 HIP drafter sidecar DLL — loaded by llama.cpp's impl_draft_dflash.
 // SPDX-License-Identifier: MIT
-// Release ABI 4 adds lazy accepted-prefix commits, device-input paths, and
-// sequence-scoped state operations used by native checkpoints.
+// Release ABI 5 adds lazy accepted-prefix commits, device-input paths,
+// sequence-scoped state operations, and compact stochastic top-k proposals.
 // API: spec_dflash_init(dir, n_seq) / spec_dflash_chunk(seq, poss, feats, n) /
 //      spec_dflash_draft(seq, id_last, n_past, out_ids[7]).
 #include "dflash_kernels.hip"
@@ -94,6 +94,12 @@ struct DState {
     int max_pos = 16384;
     DSeqState seq[8];
     int tkparts = 0;
+    // Host scratch copied with the existing compact top-k readback. It lets
+    // stochastic drafting choose a predecessor without a second graph or a
+    // full-vocabulary transfer.
+    int last_tk_ids[8 * DF_TOPK] = {};
+    float last_tk_vals[8 * DF_TOPK] = {};
+    float last_selhid[8 * DF_RANK] = {};
 };
 DState S;
 
@@ -132,7 +138,10 @@ __global__ void shift_kv_rows(__half * kv, int src_min, int src_max, int delta, 
 #define DF_API extern "C"
 #endif
 
-static constexpr int32_t DF_RELEASE_ABI = 4;
+static constexpr int32_t DF_RELEASE_ABI = 5;
+
+static_assert(DF_TOPK == BRIDGESPEC_DFLASH_DRAFT_TOP_K,
+              "DFlash stochastic top-k ABI mismatch");
 
 static int ensure_seq_storage(DSeqState & q) {
     if (q.allocated) return 0;
@@ -777,6 +786,9 @@ readback:
     DFC(hipMemcpyAsync(h_vals, S.tk_vals, sizeof(h_vals), hipMemcpyDeviceToHost, S.st));
     DFC(hipMemcpyAsync(sh, S.selhid, sizeof(sh), hipMemcpyDeviceToHost, S.st));
     DFC(hipStreamSynchronize(S.st));
+    std::memcpy(S.last_tk_ids, h_ids, sizeof(h_ids));
+    std::memcpy(S.last_tk_vals, h_vals, sizeof(h_vals));
+    std::memcpy(S.last_selhid, sh, sizeof(sh));
 
     int pred_idx = 0;
     int n_out = 0;
@@ -812,6 +824,111 @@ readback:
         if (++n_calls % 25 == 0) {
             fprintf(stderr, "[dflash-sidecar] draft avg %.2f ms over %d calls\n", tot_ms / n_calls, n_calls);
         }
+    }
+    return n_out;
+}
+
+// Stochastic DFlash reuses the same single graph and compact top-k readback as
+// greedy DFlash. The selector scores are reconstructed for the sampled
+// predecessor on the host (7 * 16 * 256 multiply-adds), avoiding both a full
+// vocabulary transfer and a second decoder execution.
+DF_API int spec_dflash_stochastic_top_k() {
+    return DF_TOPK;
+}
+
+DF_API int spec_dflash_draft_stochastic(int32_t seq_id, int32_t id_last, int32_t n_past,
+        float temperature, float p_min, uint64_t rng_key, int max_draft,
+        int32_t * out_ids, int32_t * out_dist_ids, float * out_dist_probs) {
+    if (!S.ok || max_draft < 1 || max_draft > 7 || out_ids == nullptr ||
+            out_dist_ids == nullptr || out_dist_probs == nullptr ||
+            !std::isfinite(temperature) || temperature <= 0.0f ||
+            !std::isfinite(p_min) || p_min < 0.0f) {
+        return -1;
+    }
+
+    int32_t greedy_ids[7] = {};
+    if (spec_dflash_draft(seq_id, id_last, n_past, greedy_ids) < 0) {
+        return -1;
+    }
+
+    int pred_idx = 0;
+    int n_out = 0;
+    for (int t = 1; t < 8 && n_out < max_draft; ++t) {
+        const int ps = t == 1 ? -1 : S.last_tk_ids[(t - 1) * DF_TOPK + pred_idx];
+        const int pred_id = t == 1 ? id_last : ((ps >= 0 && ps < S.n_head) ? S.remap[ps] : -1);
+        if (pred_id < 0 || pred_id >= DF_VOCAB) {
+            break;
+        }
+
+        const float * hid = S.last_selhid + (size_t) t * DF_RANK;
+        const float * pv = S.sel_prev.data() + (size_t) pred_id * DF_RANK;
+        float scores[DF_TOPK] = {};
+        float probs[DF_TOPK] = {};
+        float max_score = -1e30f;
+        int valid = 0;
+        for (int kx = 0; kx < DF_TOPK; ++kx) {
+            const int cs = S.last_tk_ids[t * DF_TOPK + kx];
+            if (cs < 0 || cs >= S.n_head) {
+                continue;
+            }
+            const int cid = S.remap[cs];
+            if (cid < 0 || cid >= DF_VOCAB) {
+                continue;
+            }
+            const float * nx = S.sel_next.data() + (size_t) cid * DF_RANK;
+            float score = S.last_tk_vals[t * DF_TOPK + kx];
+            for (int rr = 0; rr < DF_RANK; ++rr) {
+                score += nx[rr] * (pv[rr] * hid[rr]);
+            }
+            if (!std::isfinite(score)) {
+                continue;
+            }
+            scores[kx] = score;
+            max_score = std::max(max_score, score);
+            ++valid;
+        }
+        if (valid == 0) {
+            break;
+        }
+        float sum = 0.0f;
+        for (int kx = 0; kx < DF_TOPK; ++kx) {
+            const int cs = S.last_tk_ids[t * DF_TOPK + kx];
+            const int cid = cs >= 0 && cs < S.n_head ? S.remap[cs] : -1;
+            if (cid < 0 || cid >= DF_VOCAB || !std::isfinite(scores[kx])) {
+                probs[kx] = 0.0f;
+                continue;
+            }
+            probs[kx] = std::exp((scores[kx] - max_score) / temperature);
+            sum += probs[kx];
+        }
+        if (!(sum > 0.0f) || !std::isfinite(sum)) {
+            break;
+        }
+        int selected = DF_TOPK - 1;
+        double cumulative = 0.0;
+        const double u = bridgespec_stochastic_uniform(rng_key, (uint32_t) n_out);
+        for (int kx = 0; kx < DF_TOPK; ++kx) {
+            probs[kx] /= sum;
+            cumulative += probs[kx];
+            if (u < cumulative) {
+                selected = kx;
+                break;
+            }
+        }
+        const int cs = S.last_tk_ids[t * DF_TOPK + selected];
+        const int cid = cs >= 0 && cs < S.n_head ? S.remap[cs] : -1;
+        if (cid < 0 || cid >= DF_VOCAB || probs[selected] < p_min) {
+            break;
+        }
+        out_ids[n_out] = cid;
+        for (int kx = 0; kx < DF_TOPK; ++kx) {
+            const int candidate = S.last_tk_ids[t * DF_TOPK + kx];
+            out_dist_ids[(size_t) n_out * DF_TOPK + kx] =
+                    candidate >= 0 && candidate < S.n_head ? S.remap[candidate] : -1;
+            out_dist_probs[(size_t) n_out * DF_TOPK + kx] = probs[kx];
+        }
+        ++n_out;
+        pred_idx = selected;
     }
     return n_out;
 }

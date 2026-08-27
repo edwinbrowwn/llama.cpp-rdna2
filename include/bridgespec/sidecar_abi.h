@@ -42,7 +42,13 @@ static_assert(sizeof(bridgespec_sidecar_state) == 24,
               "BridgeSpec state ABI must remain a fixed 24-byte record");
 #endif
 
-// Qwen3.8-27B MTP sidecar ABI (release ABI 3).
+// The sidecars use a small top-k proposal distribution for stochastic
+// drafting. The distribution is returned in row-major [max_draft][top_k]
+// buffers; only the first returned-token-count rows are valid.
+#define BRIDGESPEC_MTP_DRAFT_TOP_K    32
+#define BRIDGESPEC_DFLASH_DRAFT_TOP_K 16
+
+// Qwen3.8-27B MTP sidecar ABI (release ABI 4).
 // State and KV operations are sequence-scoped. catchup writes only pending
 // target rows; commit_state is the only operation that makes rows persistent.
 // hidden_device, when non-null, is the already-selected accepted hidden row.
@@ -84,8 +90,36 @@ BRIDGESPEC_API int spec_hip_draft_device(
         int32_t past_tokens,
         int max_draft,
         int32_t * output_ids);
+// Stochastic variants use the supplied keyed RNG stream. They return only
+// selected IDs and compact q distributions; MTP samples on-device while
+// DFlash reuses its compact selector readback. The target sampler remains the
+// owner of verifier RNG/rejection semantics.
+BRIDGESPEC_API int spec_hip_stochastic_top_k(void);
+BRIDGESPEC_API int spec_hip_draft_stochastic(
+        int32_t seq_id,
+        int32_t last_token,
+        int32_t past_tokens,
+        const float * hidden,
+        float temperature,
+        float p_min,
+        uint64_t rng_key,
+        int max_draft,
+        int32_t * output_ids,
+        int32_t * dist_ids,
+        float * dist_probs);
+BRIDGESPEC_API int spec_hip_draft_stochastic_device(
+        int32_t seq_id,
+        int32_t last_token,
+        int32_t past_tokens,
+        float temperature,
+        float p_min,
+        uint64_t rng_key,
+        int max_draft,
+        int32_t * output_ids,
+        int32_t * dist_ids,
+        float * dist_probs);
 
-// Qwen3.8-27B DFlash sidecar ABI (release ABI 4). Target chunks are staged
+// Qwen3.8-27B DFlash sidecar ABI (release ABI 5). Target chunks are staged
 // until commit_state; device-layer input pointers are borrowed for the call.
 BRIDGESPEC_API int spec_dflash_release_abi(void);
 BRIDGESPEC_API int spec_dflash_check(int32_t encoded_width, int32_t block_size, int32_t n_seq);
@@ -115,7 +149,42 @@ BRIDGESPEC_API int spec_dflash_draft(
         int32_t last_token,
         int32_t past_tokens,
         int32_t * output_ids);
+BRIDGESPEC_API int spec_dflash_stochastic_top_k(void);
+BRIDGESPEC_API int spec_dflash_draft_stochastic(
+        int32_t seq_id,
+        int32_t last_token,
+        int32_t past_tokens,
+        float temperature,
+        float p_min,
+        uint64_t rng_key,
+        int max_draft,
+        int32_t * output_ids,
+        int32_t * dist_ids,
+        float * dist_probs);
 
 #ifdef __cplusplus
 }
+
+#if defined(__HIPCC__)
+#  define BRIDGESPEC_HD __host__ __device__
+#else
+#  define BRIDGESPEC_HD
+#endif
+
+// Counter-based proposal RNG. It is deliberately independent of the target
+// sampler's rejection RNG and needs no mutable state in the 24-byte snapshot.
+static inline BRIDGESPEC_HD uint64_t bridgespec_stochastic_mix64(uint64_t x) {
+    x += UINT64_C(0x9e3779b97f4a7c15);
+    x = (x ^ (x >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
+    x = (x ^ (x >> 27)) * UINT64_C(0x94d049bb133111eb);
+    return x ^ (x >> 31);
+}
+
+static inline BRIDGESPEC_HD double bridgespec_stochastic_uniform(uint64_t key, uint32_t step) {
+    const uint64_t z = bridgespec_stochastic_mix64(
+            key + UINT64_C(0xd1b54a32d192ed03) * (uint64_t) (step + 1));
+    return (double) (z >> 11) * (1.0 / 9007199254740992.0);
+}
+
+#undef BRIDGESPEC_HD
 #endif

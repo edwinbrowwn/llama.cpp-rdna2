@@ -6,9 +6,9 @@ the sidecar proposes token IDs and the normal target verifier accepts or
 rejects them.
 
 The sidecars are intentionally **not** enabled by default. They are
-model-specific, support up to eight isolated sequences, and support greedy
-text inference only. The host treats them as stateful speculative
-implementations rather than stateless token generators.
+model-specific, support up to eight isolated sequences, and support both
+keyed stochastic and greedy text inference. The host treats them as stateful
+speculative implementations rather than stateless token generators.
 
 ## Prepare the 27B artifacts
 
@@ -39,11 +39,12 @@ python3 tools/bridgespec/validate_assets.py dflash /absolute/artifacts/bridgespe
 ```
 
 The target must have Q4_0 token embeddings, a Q6_K output head, vocabulary
-size 248,320, and one MTP block at index 64. The DFlash draft must provide the
-81-tensor Qwen3.8-27B DFlash2 schema. Do not mix an ID table, sliced head, and
+size 248,320, and one MTP block at index 64. The DFlash artifacts must provide
+the 81-tensor Qwen3.8-27B DFlash2 schema. Do not mix an ID table, sliced head, and
 weights from different preparation runs. The generated MTP `*-bridgespec.gguf`
-is retained as a prepared derivative, but the initial sidecar host path uses
-the original full-vocabulary target because sliced native MTP-head loading is
+is retained as a prepared derivative, but the sidecar-only path uses the target
+for hidden-state extraction and does not create a native MTP draft context. It
+uses the original full-vocabulary target because sliced native MTP-head loading is
 not enabled in this integration yet.
 
 ## Build
@@ -87,9 +88,10 @@ export LLAMA_DRAFT_HEAD_IDS=/absolute/artifacts/bridgespec-mtp/draft_head_ids.bi
 
 ## Run DFlash2
 
-DFlash still uses its matching GGUF for metadata and native fallback; keep its
-weights on the host with `-ngld 0`. The sidecar loads the prepared controller
-artifacts:
+When the DFlash sidecar probe succeeds, no DFlash GGUF model or draft context
+is loaded by the host; the sidecar loads all prepared controller artifacts.
+The matching GGUF may still be supplied when native fallback is desired, but it
+is not needed for the sidecar-only path:
 
 ```sh
 export LLAMA_SPEC_HIP_DFLASH=/absolute/build/bin/spec_dflash_sidecar.so
@@ -97,8 +99,7 @@ export LLAMA_SPEC_HIP_DFLASH_DIR=/absolute/artifacts/bridgespec-dflash
 
 ./build-bridgespec/bin/llama-server \
   -m /absolute/models/Qwen3.8-27B-Q4_0.gguf \
-  -md /absolute/models/Qwen3.8-27B-DFlash2-Q4_K_M.gguf \
-  -ngld 0 --spec-type draft-dflash \
+  --spec-type draft-dflash \
   --spec-draft-n-max 7 --spec-draft-p-min 0 \
   -np 1 --no-context-shift \
   --ctx-checkpoints 0 --cache-ram 0 --no-cache-idle-slots
@@ -109,9 +110,12 @@ export LLAMA_SPEC_HIP_DFLASH_DIR=/absolute/artifacts/bridgespec-dflash
 - Up to eight sidecar sequences are supported. Each sequence has an isolated
   logical cursor and KV namespace; KV storage is allocated lazily per active
   sequence. Larger `-np` values use the native drafter or target-only fallback.
-- Greedy drafting is required (`temperature=0`, `p_min=0`). The host disables
-  a loaded sidecar rather than silently using greedy proposals for stochastic
-  requests.
+- Greedy drafting uses `temperature=0` and `p_min=0`. For `temperature>0`,
+  both sidecars sample from a compact top-k q distribution and return that q to
+  the target residual verifier. The proposal RNG is a deterministic keyed
+  stream derived from the request seed, sequence, position, sidecar kind, and
+  draft step; target acceptance/rejection RNG remains owned by the main
+  sampler. `p_min` is applied to the sampled q probability.
 - Text-only, contiguous positions are the supported sidecar input. Vision
   batches, unsupported interleaving, and migration disable the sidecar safely.
   With a single HIP target ubatch on the matching device, the host passes
@@ -138,10 +142,11 @@ export LLAMA_SPEC_HIP_DFLASH_DIR=/absolute/artifacts/bridgespec-dflash
   device KV contents. If a restored target state does not receive a complete
   contiguous sidecar prefill, the sidecar rejects the gap and the host uses
   target-only mode for correctness.
-- The target verifier remains the correctness authority. An initialization
-  failure falls back to the native drafter. A runtime sidecar failure disables
-  drafting for the process rather than using a potentially desynchronized
-  native cache.
+- The target verifier remains the correctness authority. A sidecar ABI/artifact
+  probe runs before draft construction. A successful probe selects sidecar-only
+  mode and avoids loading the host draft model/context; a later HIP
+  initialization/runtime failure disables drafting and enters target-only mode
+  rather than loading a late or potentially desynchronized native cache.
 - Validate the activation log and artifact set before making performance
   comparisons. BridgeSpec's published numbers are Windows/RX7900 XTX
   research evidence, not RDNA2/Linux qualification.

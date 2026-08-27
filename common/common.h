@@ -337,6 +337,13 @@ struct common_params_speculative_draft {
     llama_context * ctx_tgt = nullptr;
     llama_context * ctx_dft = nullptr;
 
+    // Set internally after a sidecar ABI/artifact probe succeeds. In this
+    // mode the optional sidecar owns draft execution and no host draft model
+    // or draft context is created; runtime initialization failure fails closed
+    // to target-only rather than loading a late fallback model.
+    bool sidecar_only = false;
+    common_speculative_type sidecar_type = COMMON_SPECULATIVE_TYPE_NONE;
+
     int32_t n_gpu_layers = -1; // number of layers to store in VRAM for the draft model (-1 - use default)
 
     ggml_type cache_type_k = GGML_TYPE_F16; // KV cache data type for the K

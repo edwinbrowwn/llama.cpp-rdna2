@@ -29,6 +29,7 @@ static const int HEAD_DIM  = 256;
 static const int N_ROT     = 64;
 static const int N_FF      = 17408;
 static const int N_HEAD_ROWS = 40960;   // sliced draft head
+static constexpr int MTP_DRAFT_TOP_K = 32;
 static const float RMS_EPS   = 1e-6f;
 static const float FREQ_BASE = 10000000.0f;
 static const int MAX_POS   = 131072;    // matches production context ceiling (f16 KV: 512MB)
@@ -298,4 +299,153 @@ __global__ void argmax_final(const float * pmax, const int * pidx, int nparts, i
     }
     const int token = remap ? remap[mi] : mi;
     out[0] = token >= 0 && token < vocab ? token : -1;
+}
+
+// Select the top MTP_DRAFT_TOP_K logits without returning the
+// sliced head to the host. Each partition keeps its local top-k; the final
+// one-thread merge is exact because every global top-k item is present in its
+// partition's local top-k.
+__global__ void topk_partial(const float * __restrict__ x, int n,
+                             float * __restrict__ pvals, int * __restrict__ pidx) {
+    __shared__ float sm[256];
+    __shared__ int si[256];
+    __shared__ int selected[MTP_DRAFT_TOP_K];
+    const int tid = threadIdx.x;
+    const int base = blockIdx.x * blockDim.x * 8;
+
+    if (tid < MTP_DRAFT_TOP_K) {
+        selected[tid] = -1;
+    }
+    __syncthreads();
+
+    for (int slot = 0; slot < MTP_DRAFT_TOP_K; ++slot) {
+        float best = -1e30f;
+        int best_i = -1;
+        for (int k = 0; k < 8; ++k) {
+            const int i = base + k * blockDim.x + tid;
+            if (i >= n) {
+                continue;
+            }
+            bool already_selected = false;
+            for (int j = 0; j < slot; ++j) {
+                already_selected = already_selected || selected[j] == i;
+            }
+            const float value = x[i];
+            if (!already_selected && value == value &&
+                    (best_i < 0 || value > best || (value == best && i < best_i))) {
+                best = value;
+                best_i = i;
+            }
+        }
+        sm[tid] = best;
+        si[tid] = best_i;
+        __syncthreads();
+        for (int off = blockDim.x / 2; off > 0; off >>= 1) {
+            if (tid < off && si[tid + off] >= 0 &&
+                    (si[tid] < 0 || sm[tid + off] > sm[tid] ||
+                     (sm[tid + off] == sm[tid] && si[tid + off] < si[tid]))) {
+                sm[tid] = sm[tid + off];
+                si[tid] = si[tid + off];
+            }
+            __syncthreads();
+        }
+        if (tid == 0) {
+            selected[slot] = si[0];
+            pvals[blockIdx.x * MTP_DRAFT_TOP_K + slot] = sm[0];
+            pidx[blockIdx.x * MTP_DRAFT_TOP_K + slot] = si[0];
+        }
+        __syncthreads();
+    }
+}
+
+__global__ void topk_final(const float * __restrict__ pvals, const int * __restrict__ pidx,
+                           int nparts, const int * __restrict__ remap, int vocab,
+                           int * __restrict__ out_ids, float * __restrict__ out_vals) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) {
+        return;
+    }
+    int selected[MTP_DRAFT_TOP_K];
+    for (int slot = 0; slot < MTP_DRAFT_TOP_K; ++slot) {
+        float best = -1e30f;
+        int best_i = -1;
+        for (int i = 0; i < nparts * MTP_DRAFT_TOP_K; ++i) {
+            const int candidate = pidx[i];
+            const float value = pvals[i];
+            bool already_selected = false;
+            for (int j = 0; j < slot; ++j) {
+                already_selected = already_selected || selected[j] == candidate;
+            }
+            if (!already_selected && candidate >= 0 && value == value &&
+                    (best_i < 0 || value > best || (value == best && candidate < best_i))) {
+                best = value;
+                best_i = candidate;
+            }
+        }
+        selected[slot] = best_i;
+        out_vals[slot] = best;
+        if (best_i < 0) {
+            out_ids[slot] = -1;
+        } else {
+            const int token = remap ? remap[best_i] : best_i;
+            out_ids[slot] = token >= 0 && token < vocab ? token : -1;
+        }
+    }
+}
+
+// Normalize a top-k row and sample it using the caller-provided deterministic
+// counter-based uniform. The active flag makes a p_min stop sticky while the
+// enclosing sidecar continues issuing the already-pipelined fixed number of
+// kernel launches without any host synchronization.
+__global__ void sample_topk(const int * __restrict__ ids, const float * __restrict__ logits,
+                            int topk, float temperature, float p_min, double uniform,
+                            int step, int * __restrict__ output_id,
+                            float * __restrict__ output_probs, int * __restrict__ output_count,
+                            int * __restrict__ active) {
+    if (blockIdx.x != 0 || threadIdx.x != 0 || *active == 0) {
+        return;
+    }
+    float max_score = -1e30f;
+    int valid = 0;
+    for (int k = 0; k < topk; ++k) {
+        if (ids[k] >= 0 && logits[k] == logits[k] && logits[k] > max_score) {
+            max_score = logits[k];
+        }
+        valid += ids[k] >= 0 && logits[k] == logits[k];
+    }
+    if (valid == 0 || !(temperature > 0.0f) || !(max_score == max_score)) {
+        *active = 0;
+        return;
+    }
+    float probs[MTP_DRAFT_TOP_K] = {};
+    float sum = 0.0f;
+    for (int k = 0; k < topk; ++k) {
+        const float p = ids[k] >= 0 && logits[k] == logits[k]
+                ? expf((logits[k] - max_score) / temperature) : 0.0f;
+        probs[k] = p;
+        sum += p;
+    }
+    if (!(sum > 0.0f) || !(sum == sum)) {
+        *active = 0;
+        return;
+    }
+    int selected = topk - 1;
+    double cumulative = 0.0;
+    const double u = uniform < 1.0 ? (uniform > 0.0 ? uniform : 0.0) : 0.9999999999999999;
+    for (int k = 0; k < topk; ++k) {
+        probs[k] /= sum;
+        cumulative += probs[k];
+        if (u < cumulative) {
+            selected = k;
+            break;
+        }
+    }
+    if (probs[selected] < p_min || ids[selected] < 0) {
+        *active = 0;
+        return;
+    }
+    output_id[step] = ids[selected];
+    for (int k = 0; k < topk; ++k) {
+        output_probs[step * topk + k] = probs[k];
+    }
+    *output_count = step + 1;
 }

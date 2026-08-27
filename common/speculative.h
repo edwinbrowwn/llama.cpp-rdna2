@@ -33,6 +33,18 @@ int32_t common_speculative_n_max(const common_params_speculative * spec);
 
 common_params common_base_params_to_speculative(const common_params & params);
 
+// Probe an opt-in sidecar before constructing any host draft model/context.
+// Returns the selected sidecar type and marks params.draft.sidecar_only on
+// success; returns NONE when native draft loading should be retained.
+common_speculative_type common_speculative_sidecar_preflight(
+        common_params_speculative & params, const llama_model * model_tgt,
+        uint32_t n_seq, std::string & error);
+
+// Cheap pre-target check used by --fit to avoid creating a host draft model
+// solely for memory measurement when the explicit sidecar contract is present.
+bool common_speculative_sidecar_candidate(const common_params_speculative & params,
+        const std::string & target_model_path, uint32_t n_seq);
+
 struct common_speculative_output_limits {
     int32_t total;
     int32_t per_seq;
@@ -115,6 +127,8 @@ struct common_speculative_init_result {
 
     llama_model   * model();
     llama_context * context();
+    bool sidecar_only() const;
+    common_speculative_type sidecar_type() const;
 
 private:
     struct impl;

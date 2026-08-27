@@ -1180,7 +1180,12 @@ private:
         const bool spec_mtp = std::find(params_base.speculative.types.begin(),
                                         params_base.speculative.types.end(),
                                         COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params_base.speculative.types.end();
-        const bool has_spec = has_draft || spec_mtp;
+        // A sidecar-only DFlash invocation may intentionally omit -md: the
+        // ABI/artifact probe is enough to establish the speculative stage.
+        const bool sidecar_candidate = common_speculative_sidecar_candidate(
+                params_base.speculative, params_base.model.path,
+                (uint32_t) params_base.n_parallel);
+        const bool has_spec = has_draft || spec_mtp || sidecar_candidate;
 
         if (callback_state) {
             std::vector<std::string> stages = {"text_model"};
@@ -1248,9 +1253,11 @@ private:
             }
         }
 
-        // optionally reserve VRAM for the draft / MTP context before fitting the target model
+        // Optionally reserve VRAM for a native draft / MTP context before
+        // fitting the target model. A validated sidecar candidate owns draft
+        // execution and must not trigger a host draft-model measurement load.
         if (params_base.fit_params) {
-            if (has_spec) {
+            if (has_spec && !sidecar_candidate) {
                 // MTP draft context lives on the target model, only context+compute are new
                 bool measure_model_bytes = has_draft;
 
@@ -1302,6 +1309,8 @@ private:
                     SRV_WRN("[spec] failed to measure %s memory: %s\n",
                             has_draft ? "draft model" : "MTP context", e.what());
                 }
+            } else if (has_spec && sidecar_candidate) {
+                SRV_INF("%s", "sidecar candidate found; skipping host draft model/context memory measurement\n");
             }
         }
 
@@ -1368,22 +1377,27 @@ private:
                 params_dft.load_progress_callback           = load_progress_callback;
                 params_dft.load_progress_callback_user_data = &load_progress_spec;
 
-                spec_init = common_speculative_init_from_params(params_dft, model_tgt, ctx_tgt);
+                spec_init = common_speculative_init_from_params(
+                        params_dft, model_tgt, ctx_tgt);
                 model_dft = spec_init->model();
                 ctx_dft   = spec_init->context();
+                const bool sidecar_only = spec_init->sidecar_only();
 
-                if (has_draft && model_dft == nullptr) {
+                if (has_draft && model_dft == nullptr && !sidecar_only) {
                     SRV_ERR("failed to load draft model, '%s'\n", params_dft.model.path.c_str());
                     return false;
                 }
 
-                if (ctx_dft == nullptr) {
+                if (ctx_dft == nullptr && !sidecar_only) {
                     SRV_ERR("%s", "failed to create MTP context\n");
                     return false;
                 }
 
                 params_base.speculative.draft.ctx_tgt = ctx_tgt;
                 params_base.speculative.draft.ctx_dft = ctx_dft;
+                params_base.speculative.draft.sidecar_only = sidecar_only;
+                params_base.speculative.draft.sidecar_type = sidecar_only
+                        ? spec_init->sidecar_type() : COMMON_SPECULATIVE_TYPE_NONE;
             }
 
             load_progress_callback(1.0f, &load_progress_spec);
@@ -4052,7 +4066,7 @@ private:
 
         // TODO @ngxson : dft model may have different n_embd than the tgt model, so we check & reject if that's the case
         // this case is not currently used by any models, but may need to be supported in the future
-        if (spec && batch.has_embd) {
+        if (spec && batch.has_embd && model_dft != nullptr) {
             if (llama_model_n_embd_inp(model_dft) != llama_model_n_embd_inp(model_tgt)) {
                 SRV_ERR("%s", "unsupported batch.has_embd + spec case\n");
                 throw std::runtime_error("unsupported batch.has_embd + spec case");

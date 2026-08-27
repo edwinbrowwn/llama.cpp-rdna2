@@ -2,7 +2,9 @@
 #include "../include/bridgespec/sidecar_abi.h"
 
 #include <cctype>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <limits>
 #include <utility>
 
@@ -93,6 +95,24 @@ static bool require_absolute(const std::string & path, const char * label, std::
     return true;
 }
 
+static bool require_file(const std::string & path, const char * label, std::string & error) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file.good()) {
+        error = std::string(label) + " is not readable: " + path;
+        return false;
+    }
+    return true;
+}
+
+static std::string join_path(const std::string & dir, const char * name) {
+#ifdef _WIN32
+    const char separator = '\\';
+#else
+    const char separator = '/';
+#endif
+    return dir + separator + name;
+}
+
 using state_size_fn_t     = int (*)();
 using state_get_fn_t      = int (*)(int32_t, void *, int);
 using state_set_fn_t      = int (*)(int32_t, const void *, int);
@@ -110,6 +130,9 @@ using mtp_catchup_fn    = int (*)(int32_t, const int32_t *, const int32_t *, con
 using mtp_catchup_device_fn = int (*)(int32_t, const int32_t *, const int32_t *, const float *, int);
 using mtp_draft_fn      = int (*)(int32_t, int32_t, int32_t, const float *, int, int32_t *);
 using mtp_draft_device_fn = int (*)(int32_t, int32_t, int32_t, int, int32_t *);
+using mtp_stochastic_top_k_fn = int (*)();
+using mtp_draft_stochastic_fn = int (*)(int32_t, int32_t, int32_t, const float *, float, float, uint64_t, int, int32_t *, int32_t *, float *);
+using mtp_draft_stochastic_device_fn = int (*)(int32_t, int32_t, int32_t, float, float, uint64_t, int, int32_t *, int32_t *, float *);
 
 using dflash_release_abi_fn = int (*)();
 using dflash_check_fn       = int (*)(int32_t, int32_t, int32_t);
@@ -117,8 +140,104 @@ using dflash_init_fn        = int (*)(const char *, int32_t);
 using dflash_chunk_fn       = int (*)(int32_t, const int32_t *, const float *, int);
 using dflash_chunk_device_fn = int (*)(int32_t, const int32_t *, const void * const *, int, int, int);
 using dflash_draft_fn       = int (*)(int32_t, int32_t, int32_t, int32_t *);
+using dflash_stochastic_top_k_fn = int (*)();
+using dflash_draft_stochastic_fn = int (*)(int32_t, int32_t, int32_t, float, float, uint64_t, int, int32_t *, int32_t *, float *);
 
 } // namespace
+
+bool common_bridgespec_mtp_probe(const std::string & library_path,
+        const std::string & weights_dir, const std::string & ids_path,
+        int32_t embedding_width, int32_t head_rows, int32_t n_seq,
+        std::string & error) {
+    if (n_seq < 1 || n_seq > 8) {
+        error = "MTP sidecar supports 1..8 sequences";
+        return false;
+    }
+    if (!require_absolute(library_path, "MTP sidecar library path", error) ||
+        !require_absolute(weights_dir, "MTP sidecar artifact directory", error) ||
+        !require_absolute(ids_path, "MTP sidecar ID path", error) ||
+        !require_file(join_path(weights_dir, "drafter_manifest.json"),
+                "MTP sidecar manifest", error) ||
+        !require_file(join_path(weights_dir, "drafter_weights.bin"),
+                "MTP sidecar weights", error) ||
+        !require_file(ids_path, "MTP sidecar ID table", error)) {
+        return false;
+    }
+
+    void * handle = open_library(library_path, error);
+    if (handle == nullptr) {
+        return false;
+    }
+    mtp_release_abi_fn release = nullptr;
+    mtp_check_fn check = nullptr;
+    mtp_stochastic_top_k_fn top_k = nullptr;
+    mtp_draft_stochastic_fn stochastic = nullptr;
+    mtp_draft_stochastic_device_fn stochastic_device = nullptr;
+    const bool symbols =
+        resolve_symbol(handle, "spec_hip_release_abi", release, error) &&
+        resolve_symbol(handle, "spec_hip_check", check, error) &&
+        resolve_symbol(handle, "spec_hip_stochastic_top_k", top_k, error) &&
+        resolve_symbol(handle, "spec_hip_draft_stochastic", stochastic, error) &&
+        resolve_symbol(handle, "spec_hip_draft_stochastic_device", stochastic_device, error);
+    const bool compatible = symbols && release() == 4 &&
+            check(embedding_width, head_rows, n_seq) == 0 &&
+            top_k() == BRIDGESPEC_MTP_DRAFT_TOP_K;
+    if (!compatible && error.empty()) {
+        error = "MTP sidecar stochastic ABI probe failed";
+    }
+    close_library(handle);
+    return compatible;
+}
+
+bool common_bridgespec_dflash_probe(const std::string & library_path,
+        const std::string & artifact_dir, int32_t encoded_width,
+        int32_t block_size, int32_t n_seq, std::string & error) {
+    if (n_seq < 1 || n_seq > 8) {
+        error = "DFlash sidecar supports 1..8 sequences";
+        return false;
+    }
+    if (!require_absolute(library_path, "DFlash sidecar library path", error) ||
+        !require_absolute(artifact_dir, "DFlash sidecar artifact directory", error) ||
+        !require_file(join_path(artifact_dir, "dflash_manifest.json"),
+                "DFlash sidecar manifest", error) ||
+        !require_file(join_path(artifact_dir, "dflash_weights.bin"),
+                "DFlash sidecar weights", error) ||
+        !require_file(join_path(artifact_dir,
+                std::getenv("LLAMA_SPEC_HIP_FULL_HEAD") != nullptr
+                    ? "target_head.bin" : "target_head_sliced.bin"),
+                "DFlash target head", error) ||
+        (std::getenv("LLAMA_SPEC_HIP_FULL_HEAD") == nullptr &&
+         !require_file(join_path(artifact_dir, "draft_head_ids.bin"),
+                "DFlash target-head ID table", error)) ||
+        !require_file(join_path(artifact_dir, "drafter_manifest.json"),
+                "DFlash target embedding manifest", error) ||
+        !require_file(join_path(artifact_dir, "drafter_weights.bin"),
+                "DFlash target embedding", error)) {
+        return false;
+    }
+
+    void * handle = open_library(library_path, error);
+    if (handle == nullptr) {
+        return false;
+    }
+    dflash_release_abi_fn release = nullptr;
+    dflash_check_fn check = nullptr;
+    dflash_stochastic_top_k_fn top_k = nullptr;
+    dflash_draft_stochastic_fn stochastic = nullptr;
+    const bool symbols =
+        resolve_symbol(handle, "spec_dflash_release_abi", release, error) &&
+        resolve_symbol(handle, "spec_dflash_check", check, error) &&
+        resolve_symbol(handle, "spec_dflash_stochastic_top_k", top_k, error) &&
+        resolve_symbol(handle, "spec_dflash_draft_stochastic", stochastic, error);
+    const bool compatible = symbols && release() == 5 &&
+            check(encoded_width, block_size, n_seq) == 0 &&
+            top_k() == BRIDGESPEC_DFLASH_DRAFT_TOP_K;
+    if (!compatible && error.empty()) {
+        error = "DFlash sidecar stochastic ABI probe failed";
+    }
+    close_library(handle);
+    return compatible;
+}
 
 struct common_bridgespec_mtp_sidecar::impl {
     void * handle = nullptr;
@@ -135,6 +254,9 @@ struct common_bridgespec_mtp_sidecar::impl {
     mtp_catchup_device_fn catchup_device_fn = nullptr;
     mtp_draft_fn draft_fn = nullptr;
     mtp_draft_device_fn draft_device_fn = nullptr;
+    mtp_stochastic_top_k_fn stochastic_top_k_fn = nullptr;
+    mtp_draft_stochastic_fn draft_stochastic_fn = nullptr;
+    mtp_draft_stochastic_device_fn draft_stochastic_device_fn = nullptr;
 };
 
 common_bridgespec_mtp_sidecar::common_bridgespec_mtp_sidecar() : pimpl(new impl) {}
@@ -184,17 +306,25 @@ bool common_bridgespec_mtp_sidecar::load(const std::string & library_path,
         !resolve_symbol(handle, "spec_hip_catchup", pimpl->catchup_fn, error) ||
         !resolve_symbol(handle, "spec_hip_catchup_device", pimpl->catchup_device_fn, error) ||
         !resolve_symbol(handle, "spec_hip_draft", pimpl->draft_fn, error) ||
-        !resolve_symbol(handle, "spec_hip_draft_device", pimpl->draft_device_fn, error)) {
+        !resolve_symbol(handle, "spec_hip_draft_device", pimpl->draft_device_fn, error) ||
+        !resolve_symbol(handle, "spec_hip_stochastic_top_k", pimpl->stochastic_top_k_fn, error) ||
+        !resolve_symbol(handle, "spec_hip_draft_stochastic", pimpl->draft_stochastic_fn, error) ||
+        !resolve_symbol(handle, "spec_hip_draft_stochastic_device", pimpl->draft_stochastic_device_fn, error)) {
         close_library(handle);
         return false;
     }
-    if (release_abi() != 3) {
-        error = "MTP sidecar ABI version mismatch (expected 3)";
+    if (release_abi() != 4) {
+        error = "MTP sidecar ABI version mismatch (expected 4)";
         close_library(handle);
         return false;
     }
     if (check(embedding_width, head_rows, n_seq) != 0) {
         error = "MTP sidecar model shape check failed";
+        close_library(handle);
+        return false;
+    }
+    if (pimpl->stochastic_top_k_fn() != BRIDGESPEC_MTP_DRAFT_TOP_K) {
+        error = "MTP sidecar stochastic top-k mismatch";
         close_library(handle);
         return false;
     }
@@ -312,6 +442,23 @@ int common_bridgespec_mtp_sidecar::draft_device(int32_t seq_id, int32_t last_tok
         ? pimpl->draft_device_fn(seq_id, last_token, past_tokens, max_draft, output_ids) : -1;
 }
 
+int common_bridgespec_mtp_sidecar::draft_stochastic(int32_t seq_id, int32_t last_token,
+        int32_t past_tokens, const float * hidden, float temperature, float p_min,
+        uint64_t rng_key, int max_draft, int32_t * output_ids,
+        int32_t * dist_ids, float * dist_probs) const {
+    return active() && pimpl->draft_stochastic_fn != nullptr
+        ? pimpl->draft_stochastic_fn(seq_id, last_token, past_tokens, hidden,
+                temperature, p_min, rng_key, max_draft, output_ids, dist_ids, dist_probs) : -1;
+}
+
+int common_bridgespec_mtp_sidecar::draft_stochastic_device(int32_t seq_id, int32_t last_token,
+        int32_t past_tokens, float temperature, float p_min, uint64_t rng_key,
+        int max_draft, int32_t * output_ids, int32_t * dist_ids, float * dist_probs) const {
+    return active() && pimpl->draft_stochastic_device_fn != nullptr
+        ? pimpl->draft_stochastic_device_fn(seq_id, last_token, past_tokens,
+                temperature, p_min, rng_key, max_draft, output_ids, dist_ids, dist_probs) : -1;
+}
+
 struct common_bridgespec_dflash_sidecar::impl {
     void * handle = nullptr;
     bool active = false;
@@ -326,6 +473,8 @@ struct common_bridgespec_dflash_sidecar::impl {
     dflash_chunk_fn chunk_fn = nullptr;
     dflash_chunk_device_fn chunk_device_fn = nullptr;
     dflash_draft_fn draft_fn = nullptr;
+    dflash_stochastic_top_k_fn stochastic_top_k_fn = nullptr;
+    dflash_draft_stochastic_fn draft_stochastic_fn = nullptr;
 };
 
 common_bridgespec_dflash_sidecar::common_bridgespec_dflash_sidecar() : pimpl(new impl) {}
@@ -372,17 +521,24 @@ bool common_bridgespec_dflash_sidecar::load(const std::string & library_path,
         !resolve_symbol(handle, "spec_dflash_init", init, error) ||
         !resolve_symbol(handle, "spec_dflash_chunk", pimpl->chunk_fn, error) ||
         !resolve_symbol(handle, "spec_dflash_chunk_device", pimpl->chunk_device_fn, error) ||
-        !resolve_symbol(handle, "spec_dflash_draft", pimpl->draft_fn, error)) {
+        !resolve_symbol(handle, "spec_dflash_draft", pimpl->draft_fn, error) ||
+        !resolve_symbol(handle, "spec_dflash_stochastic_top_k", pimpl->stochastic_top_k_fn, error) ||
+        !resolve_symbol(handle, "spec_dflash_draft_stochastic", pimpl->draft_stochastic_fn, error)) {
         close_library(handle);
         return false;
     }
-    if (release_abi() != 4) {
-        error = "DFlash sidecar ABI version mismatch (expected 4)";
+    if (release_abi() != 5) {
+        error = "DFlash sidecar ABI version mismatch (expected 5)";
         close_library(handle);
         return false;
     }
     if (check(encoded_width, block_size, n_seq) != 0) {
         error = "DFlash sidecar model shape check failed";
+        close_library(handle);
+        return false;
+    }
+    if (pimpl->stochastic_top_k_fn() != BRIDGESPEC_DFLASH_DRAFT_TOP_K) {
+        error = "DFlash sidecar stochastic top-k mismatch";
         close_library(handle);
         return false;
     }
@@ -493,4 +649,12 @@ int common_bridgespec_dflash_sidecar::draft(int32_t seq_id, int32_t last_token, 
         int32_t * output_ids) const {
     return active() && pimpl->draft_fn != nullptr
         ? pimpl->draft_fn(seq_id, last_token, past_tokens, output_ids) : -1;
+}
+
+int common_bridgespec_dflash_sidecar::draft_stochastic(int32_t seq_id, int32_t last_token,
+        int32_t past_tokens, float temperature, float p_min, uint64_t rng_key,
+        int max_draft, int32_t * output_ids, int32_t * dist_ids, float * dist_probs) const {
+    return active() && pimpl->draft_stochastic_fn != nullptr
+        ? pimpl->draft_stochastic_fn(seq_id, last_token, past_tokens, temperature,
+                p_min, rng_key, max_draft, output_ids, dist_ids, dist_probs) : -1;
 }

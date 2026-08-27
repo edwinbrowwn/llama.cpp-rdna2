@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 // HIP draft sidecar: C API around the MTP-block kernels, built as a DLL that
 // llama.cpp's speculative driver loads at runtime (LLAMA_SPEC_HIP_SIDECAR).
-// Release ABI 3 adds lazy accepted-prefix commits, device-input paths, and
-// sequence-scoped state operations used by native checkpoints.
+// Release ABI 4 adds lazy accepted-prefix commits, device-input paths,
+// sequence-scoped state operations, and compact stochastic top-k proposals.
 // The harness build (-DSIDECAR_HARNESS) replays golden.bin through the same
 // sequence-scoped lazy-catchup/commit API.
 #include "kernels.hip"
@@ -55,7 +55,9 @@ struct State {
     BatchScratch bs;
     float *part_m = nullptr, *part_l = nullptr, *part_acc = nullptr; // split-K attention partials
     float *logits = nullptr, *pmax = nullptr;
+    float *draft_logits = nullptr, *draft_probs = nullptr;
     int *pidx = nullptr, *tok_out = nullptr;
+    int *draft_ids = nullptr, *draft_count = nullptr, *draft_active = nullptr;
     int nparts = 0;
     size_t max_pos = 131072;
     SeqState seq[SC_MAX_SEQ];
@@ -118,7 +120,7 @@ void block_phase1(Scratch & c, hipStream_t st, const float * xh_in, int pos,
 
 // phase 2: attention (reads global KV, all rows' stores must be complete) -> ffn
 void block_phase2(Scratch & c, hipStream_t st, int pos, int * tok_dst,
-        __half * Kc, __half * Vc) {
+        __half * Kc, __half * Vc, bool emit_logits = false) {
     auto & s = S;
     // split-K attention (winner of v3/v4/v5 shootout): workgroup per (q-head,
     // 4096-position chunk). The GQA shared-K variants lost to LDS pressure.
@@ -134,12 +136,14 @@ void block_phase2(Scratch & c, hipStream_t st, int pos, int * tok_dst,
     silu_mul<<<(N_FF + 255) / 256, 256, 0, st>>>(c.ffn_g, c.ffn_u, N_FF);
     gemv_q4_0<<<N_EMBD, 32, 0, st>>>(s.W_fd, c.ffn_g, c.ffn_tmp, N_FF, N_EMBD);
     add_inplace<<<(N_EMBD + 255) / 256, 256, 0, st>>>(c.resid, c.ffn_tmp, N_EMBD);
-    if (tok_dst != nullptr) {
+    if (tok_dst != nullptr || emit_logits) {
         rmsnorm<<<1, 256, 0, st>>>(c.resid, s.w_shn, c.hnorm2, N_EMBD);
         gemv_q4_0<<<N_HEAD_ROWS, 32, 0, st>>>(s.W_head, c.hnorm2, s.logits, N_EMBD, N_HEAD_ROWS);
-        argmax_partial<<<s.nparts, 256, 0, st>>>(s.logits, N_HEAD_ROWS, s.pmax, s.pidx);
-        argmax_final<<<1, 1, 0, st>>>(s.pmax, s.pidx, s.nparts, N_HEAD_ROWS,
-                                      s.remap_d, SC_N_VOCAB, tok_dst);
+        if (tok_dst != nullptr) {
+            argmax_partial<<<s.nparts, 256, 0, st>>>(s.logits, N_HEAD_ROWS, s.pmax, s.pidx);
+            argmax_final<<<1, 1, 0, st>>>(s.pmax, s.pidx, s.nparts, N_HEAD_ROWS,
+                                          s.remap_d, SC_N_VOCAB, tok_dst);
+        }
     }
 }
 } // namespace
@@ -150,7 +154,10 @@ void block_phase2(Scratch & c, hipStream_t st, int pos, int * tok_dst,
 #define SC_API extern "C"
 #endif
 
-static constexpr int32_t SC_RELEASE_ABI = 3;
+static constexpr int32_t SC_RELEASE_ABI = 4;
+
+static_assert(MTP_DRAFT_TOP_K == BRIDGESPEC_MTP_DRAFT_TOP_K,
+              "MTP stochastic top-k ABI mismatch");
 
 static bool valid_seq(int32_t seq_id) {
     return seq_id >= 0 && seq_id < S.n_seq && seq_id < SC_MAX_SEQ;
@@ -529,8 +536,14 @@ SC_API int spec_hip_init(const char * weights_dir, const char * ids_path, int32_
     SC_CHECK(hipMalloc(&s.part_acc, (size_t) N_HEAD * ATTN_MAX_PARTS * HEAD_DIM * 4));
     SC_CHECK(hipMalloc(&s.logits, N_HEAD_ROWS * 4));
     s.nparts = (N_HEAD_ROWS + 256 * 8 - 1) / (256 * 8);
-    SC_CHECK(hipMalloc(&s.pmax, s.nparts * 4)); SC_CHECK(hipMalloc(&s.pidx, s.nparts * 4));
+    SC_CHECK(hipMalloc(&s.pmax, (size_t) s.nparts * MTP_DRAFT_TOP_K * 4));
+    SC_CHECK(hipMalloc(&s.pidx, (size_t) s.nparts * MTP_DRAFT_TOP_K * 4));
     SC_CHECK(hipMalloc(&s.tok_out, 8 * 4));
+    SC_CHECK(hipMalloc(&s.draft_ids, (size_t) 8 * MTP_DRAFT_TOP_K * 4));
+    SC_CHECK(hipMalloc(&s.draft_logits, (size_t) 8 * MTP_DRAFT_TOP_K * 4));
+    SC_CHECK(hipMalloc(&s.draft_probs, (size_t) 8 * MTP_DRAFT_TOP_K * 4));
+    SC_CHECK(hipMalloc(&s.draft_count, 4));
+    SC_CHECK(hipMalloc(&s.draft_active, 4));
     if (const char * mp = getenv("LLAMA_SPEC_HIP_MAX_POS")) {
         const long long v = atoll(mp);
         // hard capacity: the split-attention partial buffers cover at most
@@ -770,6 +783,102 @@ SC_API int spec_hip_draft(int32_t seq_id, int32_t id_last, int32_t n_past,
 SC_API int spec_hip_draft_device(int32_t seq_id, int32_t id_last, int32_t n_past,
         int n, int32_t * out_ids) {
     return spec_hip_draft_impl(seq_id, id_last, n_past, nullptr, true, n, out_ids);
+}
+
+// Stochastic drafting keeps the autoregressive chain on the device. Only the
+// compact top-k q rows and selected IDs cross back to the host; the caller's
+// key determines the proposal uniforms without requiring mutable sidecar RNG
+// state in checkpoints.
+static int spec_hip_draft_stochastic_impl(int32_t seq_id, int32_t id_last, int32_t n_past,
+        const float * h, bool h_device, float temperature, float p_min, uint64_t rng_key,
+        int n, int32_t * out_ids, int32_t * out_dist_ids, float * out_dist_probs) {
+    SeqState * q = get_seq_checked(seq_id);
+    if (!S.ok || q == nullptr || n < 1 || n > 8 || out_ids == nullptr ||
+            out_dist_ids == nullptr || out_dist_probs == nullptr ||
+            (!h_device && h == nullptr) || !std::isfinite(temperature) || temperature <= 0.0f ||
+            !std::isfinite(p_min) || p_min < 0.0f) {
+        return -1;
+    }
+    if (id_last < 0 || id_last >= SC_N_VOCAB || n_past < 0 ||
+            n_past != q->state_pos_max || !q->allocated ||
+            (h_device && !q->h_valid) ||
+            static_cast<size_t>(n_past) + static_cast<size_t>(n) > S.max_pos) {
+        return -1;
+    }
+
+    auto & c = S.scr[0];
+    if (h_device) {
+        h = q->h_committed;
+    } else {
+        SC_CHECK(hipMemcpyAsync(c.x_h, h, N_EMBD * sizeof(float), hipMemcpyHostToDevice, S.st));
+    }
+    SC_CHECK(hipMemcpyAsync(c.id_dev, &id_last, sizeof(id_last), hipMemcpyHostToDevice, S.st));
+    const int zero = 0;
+    const int one = 1;
+    SC_CHECK(hipMemcpyAsync(S.draft_count, &zero, sizeof(zero), hipMemcpyHostToDevice, S.st));
+    SC_CHECK(hipMemcpyAsync(S.draft_active, &one, sizeof(one), hipMemcpyHostToDevice, S.st));
+
+    for (int j = 0; j < n; ++j) {
+        const int * tok_src = j == 0 ? c.id_dev : S.tok_out + (j - 1);
+        const float * xh_in = j == 0 ? (h_device ? q->h_committed : c.x_h) : c.hnorm2;
+        deq_row_q4_0<<<(N_EMBD + 255) / 256, 256, 0, S.st>>>(S.W_embd, tok_src, c.x_tok, N_EMBD, SC_N_VOCAB);
+        block_phase1(c, S.st, xh_in, n_past + j, q->Kc, q->Vc);
+        block_phase2(c, S.st, n_past + j, nullptr, q->Kc, q->Vc, true);
+        topk_partial<<<S.nparts, 256, 0, S.st>>>(S.logits, N_HEAD_ROWS, S.pmax, S.pidx);
+        topk_final<<<1, 1, 0, S.st>>>(S.pmax, S.pidx, S.nparts, S.remap_d, SC_N_VOCAB,
+                S.draft_ids + (size_t) j * MTP_DRAFT_TOP_K,
+                S.draft_logits + (size_t) j * MTP_DRAFT_TOP_K);
+        sample_topk<<<1, 1, 0, S.st>>>(
+                S.draft_ids + (size_t) j * MTP_DRAFT_TOP_K,
+                S.draft_logits + (size_t) j * MTP_DRAFT_TOP_K,
+                MTP_DRAFT_TOP_K, temperature, p_min,
+                bridgespec_stochastic_uniform(rng_key, (uint32_t) j), j,
+                S.tok_out, S.draft_probs, S.draft_count, S.draft_active);
+    }
+
+    int h_count = 0;
+    int h_ids[8] = {};
+    int h_dist_ids[8 * MTP_DRAFT_TOP_K] = {};
+    float h_dist_probs[8 * MTP_DRAFT_TOP_K] = {};
+    SC_CHECK(hipMemcpyAsync(&h_count, S.draft_count, sizeof(h_count), hipMemcpyDeviceToHost, S.st));
+    SC_CHECK(hipMemcpyAsync(h_ids, S.tok_out, sizeof(h_ids), hipMemcpyDeviceToHost, S.st));
+    SC_CHECK(hipMemcpyAsync(h_dist_ids, S.draft_ids, sizeof(h_dist_ids), hipMemcpyDeviceToHost, S.st));
+    SC_CHECK(hipMemcpyAsync(h_dist_probs, S.draft_probs, sizeof(h_dist_probs), hipMemcpyDeviceToHost, S.st));
+    SC_CHECK(hipStreamSynchronize(S.st));
+    if (h_count < 0 || h_count > n) {
+        return -1;
+    }
+    for (int j = 0; j < h_count; ++j) {
+        if (h_ids[j] < 0 || h_ids[j] >= SC_N_VOCAB) {
+            return -1;
+        }
+        std::memcpy(out_dist_ids + (size_t) j * MTP_DRAFT_TOP_K,
+                h_dist_ids + (size_t) j * MTP_DRAFT_TOP_K,
+                MTP_DRAFT_TOP_K * sizeof(int32_t));
+        std::memcpy(out_dist_probs + (size_t) j * MTP_DRAFT_TOP_K,
+                h_dist_probs + (size_t) j * MTP_DRAFT_TOP_K,
+                MTP_DRAFT_TOP_K * sizeof(float));
+        out_ids[j] = h_ids[j];
+    }
+    return h_count;
+}
+
+SC_API int spec_hip_stochastic_top_k() {
+    return MTP_DRAFT_TOP_K;
+}
+
+SC_API int spec_hip_draft_stochastic(int32_t seq_id, int32_t id_last, int32_t n_past,
+        const float * h, float temperature, float p_min, uint64_t rng_key, int n,
+        int32_t * out_ids, int32_t * out_dist_ids, float * out_dist_probs) {
+    return spec_hip_draft_stochastic_impl(seq_id, id_last, n_past, h, false,
+            temperature, p_min, rng_key, n, out_ids, out_dist_ids, out_dist_probs);
+}
+
+SC_API int spec_hip_draft_stochastic_device(int32_t seq_id, int32_t id_last, int32_t n_past,
+        float temperature, float p_min, uint64_t rng_key, int n, int32_t * out_ids,
+        int32_t * out_dist_ids, float * out_dist_probs) {
+    return spec_hip_draft_stochastic_impl(seq_id, id_last, n_past, nullptr, true,
+            temperature, p_min, rng_key, n, out_ids, out_dist_ids, out_dist_probs);
 }
 
 // ---------------- harness: replay golden.bin through the API ----------------
