@@ -387,6 +387,14 @@ static bool validate_profile_artifacts(const common_spec_sidecar_profile & profi
 
 } // namespace
 
+size_t common_spec_sidecar_profile_count() {
+    return sizeof(ALL_PROFILES) / sizeof(ALL_PROFILES[0]);
+}
+
+const common_spec_sidecar_profile * common_spec_sidecar_profile_at(size_t index) {
+    return index < common_spec_sidecar_profile_count() ? ALL_PROFILES[index] : nullptr;
+}
+
 const common_spec_sidecar_profile * common_spec_sidecar_profile_for_model(
         common_spec_sidecar_kind kind, const llama_model * model, std::string & error) {
     error.clear();

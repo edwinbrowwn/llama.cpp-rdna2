@@ -79,6 +79,23 @@ int main() {
                             "only the exact SPEC_SIDECAR=1 value enables preflight");
     }
     unset_environment("SPEC_SIDECAR");
+
+    const auto profile_count = common_spec_sidecar_profile_count();
+    failures += require(profile_count >= 2, "provider registry exposes multiple profiles");
+    const auto * profile0 = common_spec_sidecar_profile_at(0);
+    const auto * profile1 = common_spec_sidecar_profile_at(1);
+    failures += require(profile0 != nullptr && profile1 != nullptr &&
+                        profile0->kind != profile1->kind &&
+                        ((profile0->kind == COMMON_SPEC_SIDECAR_KIND_MTP && profile1->kind == COMMON_SPEC_SIDECAR_KIND_DFLASH) ||
+                         (profile0->kind == COMMON_SPEC_SIDECAR_KIND_DFLASH && profile1->kind == COMMON_SPEC_SIDECAR_KIND_MTP)),
+                        "MTP and DFlash are selected as distinct provider profiles");
+    const auto * mtp_profile = profile0->kind == COMMON_SPEC_SIDECAR_KIND_MTP ? profile0 : profile1;
+    const auto * dflash_profile = profile0->kind == COMMON_SPEC_SIDECAR_KIND_DFLASH ? profile0 : profile1;
+    failures += require(mtp_profile->mtp_embedding_width == 5120 && mtp_profile->mtp_head_rows == 40960 &&
+                        dflash_profile->dflash_encoded_width == 25600 && dflash_profile->dflash_block_size == 8 &&
+                        dflash_profile->dflash_head_rows == 40960,
+                        "provider profiles carry independent dimensions and head-row contracts");
+
     failures += require(sizeof(spec_sidecar_state) == 24,
                         "sidecar state ABI is a fixed 24-byte record");
     failures += require(SPEC_SIDECAR_STATE_VERSION == 1 &&
