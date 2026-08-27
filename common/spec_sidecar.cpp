@@ -140,8 +140,10 @@ static bool qwen35_profile_matches_model(const common_spec_sidecar_profile & pro
 
     if (profile.target_name != nullptr) {
         char name[128] = {};
+        // Quantizers may retain a path or add a backend suffix to general.name;
+        // require the stable model identity token rather than an exact spelling.
         if (llama_model_meta_val_str(model, "general.name", name, sizeof(name)) < 0 ||
-                std::strcmp(name, profile.target_name) != 0) {
+                std::strstr(name, profile.target_name) == nullptr) {
             return profile_mismatch(profile, "model name is not the provider target", error);
         }
     }
@@ -194,6 +196,20 @@ static bool qwen35_profile_matches_target_file(const common_spec_sidecar_profile
             profile.target_architecture == nullptr ||
             std::strcmp(gguf_get_val_str(ctx, arch_id), profile.target_architecture) != 0) {
         ok = profile_mismatch(profile, "target GGUF architecture differs", error);
+    }
+    if (ok && profile.target_name != nullptr) {
+        const int64_t name_id = gguf_find_key(ctx, "general.name");
+        if (name_id < 0 || gguf_get_kv_type(ctx, name_id) != GGUF_TYPE_STRING ||
+                std::strstr(gguf_get_val_str(ctx, name_id), profile.target_name) == nullptr) {
+            ok = profile_mismatch(profile, "target GGUF model identity differs", error);
+        }
+    }
+    if (ok && profile.target_size_label != nullptr) {
+        const int64_t label_id = gguf_find_key(ctx, "general.size_label");
+        if (label_id < 0 || gguf_get_kv_type(ctx, label_id) != GGUF_TYPE_STRING ||
+                std::strcmp(gguf_get_val_str(ctx, label_id), profile.target_size_label) != 0) {
+            ok = profile_mismatch(profile, "target GGUF size label differs", error);
+        }
     }
     if (ok) {
         const std::string prefix = std::string(profile.target_architecture) + ".";
