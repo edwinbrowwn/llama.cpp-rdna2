@@ -3,6 +3,7 @@
 #include "bridgespec_sidecar.h"
 #include "../include/bridgespec/sidecar_abi.h"
 
+#include <cstddef>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -30,6 +31,10 @@ int main() {
     failures += require(BRIDGESPEC_STATE_VERSION == 1 &&
                         BRIDGESPEC_STATE_KIND_MTP == 1 && BRIDGESPEC_STATE_KIND_DFLASH == 2,
                         "sidecar state ABI constants are stable");
+    failures += require(offsetof(bridgespec_sidecar_state, pos_min) == 8 &&
+                        offsetof(bridgespec_sidecar_state, pos_max) == 12 &&
+                        offsetof(bridgespec_sidecar_state, epoch) == 16,
+                        "sidecar state ABI field offsets are stable");
 
     std::vector<TensorDesc> tensors;
     const char * valid =
@@ -110,14 +115,14 @@ int main() {
 
     common_bridgespec_mtp_sidecar mtp;
     error.clear();
-    failures += require(!mtp.load("relative-sidecar.so", "/absolute/artifacts", "/absolute/ids.bin", 5120, 40960, error) &&
+    failures += require(!mtp.load("relative-sidecar.so", "/absolute/artifacts", "/absolute/ids.bin", 5120, 40960, 1, error) &&
                         error.find("absolute path") != std::string::npos,
                         "MTP loader rejects relative library paths");
     failures += require(!mtp.active(), "MTP loader remains inactive after path rejection");
 
     common_bridgespec_dflash_sidecar dflash;
     error.clear();
-    failures += require(!dflash.load("relative-sidecar.so", "/absolute/artifacts", 25600, 8, error) &&
+    failures += require(!dflash.load("relative-sidecar.so", "/absolute/artifacts", 25600, 8, 1, error) &&
                         error.find("absolute path") != std::string::npos,
                         "DFlash loader rejects relative library paths");
     failures += require(!dflash.active(), "DFlash loader remains inactive after path rejection");

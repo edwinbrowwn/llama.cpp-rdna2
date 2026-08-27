@@ -28,10 +28,13 @@ __global__ void gemv_q4_0_b(const block_q4_0 * __restrict__ W, const float * __r
     if (lane == 0) y[(size_t) col * n_out + row] = acc;
 }
 
-__global__ void deq_rows_q4_0_b(const block_q4_0 * __restrict__ W, const int * __restrict__ toks,
-                                float * __restrict__ y, int n_in) {
+__global__ void deq_rows_q4_0_b8(const block_q4_0 * __restrict__ W,
+                                  int t0, int t1, int t2, int t3,
+                                  int t4, int t5, int t6, int t7,
+                                  float * __restrict__ y, int n_in, int n_rows) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x, col = blockIdx.y;
-    if (i >= n_in) return;
+    if (i >= n_in || col >= n_rows) return;
+    const int toks[8] = { t0, t1, t2, t3, t4, t5, t6, t7 };
     const int nblk = n_in / 32;
     const block_q4_0 * b = W + (size_t) toks[col] * nblk + (i >> 5);
     y[(size_t) col * n_in + i] = q4_0_get(b, i & 31);
@@ -72,23 +75,24 @@ __global__ void rmsnorm_heads_b(const float * __restrict__ x, const float * __re
     for (int i = threadIdx.x; i < HEAD_DIM; i += blockDim.x) yh[i] = xh[i] * scale * w[i];
 }
 
-__global__ void rope_neox_b(float * __restrict__ x, int nh, const int * __restrict__ poss) {
+__global__ void rope_neox_b_base(float * __restrict__ x, int nh, int pos_base) {
     const int h = blockIdx.x, col = blockIdx.y, i = threadIdx.x;
     if (i >= N_ROT / 2) return;
     float * xh = x + ((size_t) col * nh + h) * HEAD_DIM;
-    const float theta = poss[col] * powf(FREQ_BASE, -2.0f * i / N_ROT);
+    const float theta = (pos_base + col) * powf(FREQ_BASE, -2.0f * i / N_ROT);
     const float c = cosf(theta), s = sinf(theta);
     const float x0 = xh[i], x1 = xh[i + N_ROT / 2];
     xh[i]             = x0 * c - x1 * s;
     xh[i + N_ROT / 2] = x0 * s + x1 * c;
 }
 
-__global__ void kv_store_b(const float * __restrict__ k, const float * __restrict__ v,
-                           __half * __restrict__ Kc, __half * __restrict__ Vc, const int * __restrict__ poss) {
+__global__ void kv_store_b_base(const float * __restrict__ k, const float * __restrict__ v,
+                                __half * __restrict__ Kc, __half * __restrict__ Vc,
+                                int pos_base, int pending_base) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x, col = blockIdx.y;
     const int n = N_HEAD_KV * HEAD_DIM;
     if (i < n) {
-        const int pos = poss[col];
+        const int pos = pos_base + col - pending_base;
         Kc[(size_t) pos * n + i] = __float2half(k[(size_t) col * n + i]);
         Vc[(size_t) pos * n + i] = __float2half(v[(size_t) col * n + i]);
     }
@@ -110,12 +114,14 @@ __global__ void concat2_b(const float * a, const float * b, float * y, int n) {
 }
 
 // batched attention: grid (head, col); per-col length = poss[col]+1
-__global__ void attn_1q_b(const float * __restrict__ q, const __half * __restrict__ Kc,
-                          const __half * __restrict__ Vc, float * __restrict__ out, const int * __restrict__ poss) {
+__global__ void attn_1q_b_base(const float * __restrict__ q, const __half * __restrict__ Kc,
+                               const __half * __restrict__ Vc, const __half * __restrict__ Kp,
+                               const __half * __restrict__ Vp, int pending_base,
+                               float * __restrict__ out, int pos_base) {
     const int h = blockIdx.x, col = blockIdx.y;
     const int kh = h / (N_HEAD / N_HEAD_KV);
     const int lane = threadIdx.x;
-    const int n_pos = poss[col] + 1;
+    const int n_pos = pos_base + col + 1;
     __shared__ float scores[ATTN_CHUNK];
     __shared__ float red[256];
     const float * qh = q + ((size_t) col * N_HEAD + h) * HEAD_DIM;
@@ -124,7 +130,8 @@ __global__ void attn_1q_b(const float * __restrict__ q, const __half * __restric
     for (int c0 = 0; c0 < n_pos; c0 += ATTN_CHUNK) {
         const int cn = min(ATTN_CHUNK, n_pos - c0);
         for (int p = lane; p < cn; p += blockDim.x) {
-            const __half * kp = Kc + ((size_t) (c0 + p) * N_HEAD_KV + kh) * HEAD_DIM;
+            const int pos = c0 + p;
+            const __half * kp = (pos >= pending_base ? Kp + (size_t) (pos - pending_base) * N_HEAD_KV * HEAD_DIM : Kc + (size_t) pos * N_HEAD_KV * HEAD_DIM) + (size_t) kh * HEAD_DIM;
             float s = 0.0f;
             #pragma unroll 8
             for (int i = 0; i < HEAD_DIM; ++i) s += qh[i] * __half2float(kp[i]);
@@ -162,7 +169,9 @@ __global__ void attn_1q_b(const float * __restrict__ q, const __half * __restric
         if (lane < HEAD_DIM) {
             float vsum = 0.0f;
             for (int p = 0; p < cn; ++p) {
-                vsum += scores[p] * __half2float(Vc[((size_t) (c0 + p) * N_HEAD_KV + kh) * HEAD_DIM + lane]);
+                const int pos = c0 + p;
+                const __half * vp = (pos >= pending_base ? Vp + (size_t) (pos - pending_base) * N_HEAD_KV * HEAD_DIM : Vc + (size_t) pos * N_HEAD_KV * HEAD_DIM) + (size_t) kh * HEAD_DIM;
+                vsum += scores[p] * __half2float(vp[lane]);
             }
             acc += scale_new * vsum;
         }

@@ -236,6 +236,52 @@ __global__ void df_kv_store(const float * __restrict__ k, const float * __restri
     }
 }
 
+__global__ void df_rope_base(float * __restrict__ x, int nh, int pos_base, int n_rot) {
+    const int h = blockIdx.x, col = blockIdx.y, i = threadIdx.x;
+    if (i >= n_rot / 2) return;
+    float * xh = x + ((size_t) col * nh + h) * DF_HDIM;
+    const float theta = (pos_base + col) * powf(DF_FBASE, -2.0f * i / n_rot);
+    const float c = cosf(theta), s = sinf(theta);
+    const float x0 = xh[i], x1 = xh[i + n_rot / 2];
+    xh[i]             = x0 * c - x1 * s;
+    xh[i + n_rot / 2] = x0 * s + x1 * c;
+}
+
+__global__ void df_kv_store_base(const float * __restrict__ k, const float * __restrict__ v,
+                                 __half * __restrict__ Kc, __half * __restrict__ Vc,
+                                 int pos_base, int pending_base, int ncols) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x, col = blockIdx.y;
+    const int n = DF_KV * DF_HDIM;
+    if (i < n && col < ncols) {
+        const int pos = pos_base + col - pending_base;
+        Kc[(size_t) pos * n + i] = __float2half(k[(size_t) col * n + i]);
+        Vc[(size_t) pos * n + i] = __float2half(v[(size_t) col * n + i]);
+    }
+}
+
+// Interleave the five target layer-input device rows into the DFlash encoder
+// layout. Pointers are kernel arguments, not a mutable shared table, so batched
+// multi-sequence calls cannot race while earlier rows are still in flight.
+__global__ void df_pack_layers5(const float * l0, const float * l1, const float * l2,
+                                const float * l3, const float * l4, float * out,
+                                int layer_width, int ncols) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x, col = blockIdx.y;
+    if (col >= ncols || i >= layer_width) return;
+    const size_t dst = (size_t) col * 5 * layer_width;
+    out[dst + i] = l0[(size_t) col * layer_width + i];
+    out[dst + layer_width + i] = l1[(size_t) col * layer_width + i];
+    out[dst + 2 * layer_width + i] = l2[(size_t) col * layer_width + i];
+    out[dst + 3 * layer_width + i] = l3[(size_t) col * layer_width + i];
+    out[dst + 4 * layer_width + i] = l4[(size_t) col * layer_width + i];
+}
+
+__global__ void df_sanitize(float * values, int n) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float v = values[i];
+    values[i] = v != v ? 0.0f : (isinf(v) ? (v > 0.0f ? 65504.0f : -65504.0f) : v);
+}
+
 // non-causal SWA attention for the 8-row block. Cache holds injected positions
 // 0..n_past-1 (valid) plus the block rows are provided separately (kb/vb) so all
 // 8 rows attend to: cache positions in (q_pos-2047 .. n_past-1) AND all 8 block

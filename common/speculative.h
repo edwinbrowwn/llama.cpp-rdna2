@@ -92,7 +92,11 @@ void common_speculative_accept(common_speculative * spec, llama_seq_id, uint16_t
 bool common_speculative_get_state(common_speculative * spec, llama_seq_id seq_id, std::vector<uint8_t> & data);
 bool common_speculative_set_state(common_speculative * spec, llama_seq_id seq_id, const std::vector<uint8_t> & data);
 void common_speculative_reset_state(common_speculative * spec, llama_seq_id seq_id);
+// Discard a state suffix without committing new target rows.
 bool common_speculative_truncate_state(common_speculative * spec, llama_seq_id seq_id, llama_pos pos_max);
+// Commit target rows that are known to be accepted (prompt/ordinary decode or
+// the accepted prefix of speculative verification).
+bool common_speculative_commit_state(common_speculative * spec, llama_seq_id seq_id, llama_pos pos_max);
 bool common_speculative_rebase_state(common_speculative * spec, llama_seq_id seq_id,
         llama_pos pos_min, llama_pos pos_max, llama_pos delta);
 

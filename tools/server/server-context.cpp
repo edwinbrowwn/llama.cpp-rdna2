@@ -4171,6 +4171,28 @@ private:
     }
 
     void post_decode(int32_t n_batch_tokens, int32_t off, llama_batch & batch_view) {
+        // Commit target rows that are unconditionally accepted (prompt rows and
+        // ordinary one-token generation). Speculative verification commits its
+        // accepted prefix later, after sampler rejection has completed.
+        auto commit_target_rows = [&](server_slot & slot) {
+            if (!slot.can_speculate()) {
+                return;
+            }
+            llama_pos pos_max = -1;
+            for (int32_t i = 0; i < batch_view.n_tokens; ++i) {
+                if (batch_view.n_seq_id[i] != 1 || batch_view.seq_id[i][0] != slot.id ||
+                        batch_view.pos == nullptr) {
+                    continue;
+                }
+                pos_max = std::max(pos_max, batch_view.pos[i] + 1);
+            }
+            if (pos_max < 0 || !common_speculative_commit_state(spec.get(), slot.id, pos_max)) {
+                if (pos_max >= 0) {
+                    SLT_WRN(slot, "%s", "speculative sidecar target commit failed; continuing target-only\n");
+                }
+            }
+        };
+
         // for checking if a given batch index is inside batch_view
         auto is_inside_view = [&](int32_t idx) {
             return idx >= off && idx < off + n_batch_tokens;
@@ -4197,6 +4219,10 @@ private:
                 if (slot.task->params.stream && slot.task->params.return_progress) {
                     send_partial_response(slot, {}, true);
                 }
+            }
+
+            if (slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_DONE_PROMPT) {
+                commit_target_rows(slot);
             }
 
             if (!is_inside_view(slot.i_batch)) {
@@ -4248,6 +4274,7 @@ private:
             slot.i_batch = -1;
 
             common_sampler_accept(slot.smpl.get(), id, true);
+            commit_target_rows(slot);
 
             // here we have synchronized the llama_context (due to the sampling above), so we can do time measurement
             const int64_t t_now = ggml_time_us();

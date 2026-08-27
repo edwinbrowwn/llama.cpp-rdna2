@@ -1,8 +1,9 @@
 // DFlash2 HIP drafter sidecar DLL — loaded by llama.cpp's impl_draft_dflash.
 // SPDX-License-Identifier: MIT
-// Release ABI 3 adds cursor/epoch state operations used by native checkpoints.
-// API: spec_dflash_init(dir) / spec_dflash_chunk(poss, feats, n) /
-//      spec_dflash_draft(id_last, n_past, out_ids[7]).
+// Release ABI 4 adds lazy accepted-prefix commits, device-input paths, and
+// sequence-scoped state operations used by native checkpoints.
+// API: spec_dflash_init(dir, n_seq) / spec_dflash_chunk(seq, poss, feats, n) /
+//      spec_dflash_draft(seq, id_last, n_past, out_ids[7]).
 #include "dflash_kernels.hip"
 #include "../artifact_manifest.h"
 #include "bridgespec/sidecar_abi.h"
@@ -58,10 +59,27 @@ struct DLayer {
     const void * down; bool down_q6;
     const float *attn_norm, *qn, *kn, *ffn_norm, *conv_a_base, *conv_f_base;
 };
+struct DSeqState {
+    __half * Kc[DF_LAYERS] = {};
+    __half * Vc[DF_LAYERS] = {};
+    __half * Kp[DF_LAYERS] = {};
+    __half * Vp[DF_LAYERS] = {};
+    int pending_capacity = 0;
+    int32_t pending_pos_min = 0;
+    int32_t pending_pos_max = 0;
+    int32_t state_pos_min = 0;
+    int32_t state_pos_max = 0; // exclusive; only committed target rows
+    uint64_t state_epoch = 1;
+    bool allocated = false;
+};
 struct DState {
     bool ok = false;
     std::vector<Tens> G;
-    hipStream_t st;
+    int32_t n_seq = 1;
+    int device = -1;
+    hipStream_t st = nullptr;
+    hipStream_t owned_st = nullptr;
+    bool owns_st = true;
     DLayer L[DF_LAYERS];
     const block_q4_K *W_fc, *W_selhid;
     const block_q4_0d *W_embd;
@@ -70,17 +88,22 @@ struct DState {
     std::vector<float> sel_prev, sel_next;
     std::vector<int32_t> remap;
     int n_head = 40960; // rows in the loaded target head (sliced or full)
-    float *feat_d, *henc, *x, *xn, *dyn_a, *dyn_f, *cg, *q, *k, *v, *att, *wo_out,
-          *fu, *fg, *ftmp, *resid, *tE, *logits, *selhid, *tk_pmax, *tk_vals;
-    int *pos_d, *tok_d, *tk_pidx, *tk_ids;
-    __half *Kc[DF_LAYERS], *Vc[DF_LAYERS];
+    float *feat_d = nullptr, *henc = nullptr, *x = nullptr, *xn = nullptr, *dyn_a = nullptr, *dyn_f = nullptr, *cg = nullptr, *q = nullptr, *k = nullptr, *v = nullptr, *att = nullptr, *wo_out = nullptr,
+          *fu = nullptr, *fg = nullptr, *ftmp = nullptr, *resid = nullptr, *tE = nullptr, *logits = nullptr, *selhid = nullptr, *tk_pmax = nullptr, *tk_vals = nullptr;
+    int *pos_d[8] = {}, *tok_d[8] = {}, *tk_pidx = nullptr, *tk_ids = nullptr;
     int max_pos = 16384;
-    int32_t state_pos_min = 0;
-    int32_t state_pos_max = 0; // exclusive; target chunks only
-    uint64_t state_epoch = 1;
+    DSeqState seq[8];
     int tkparts = 0;
 };
 DState S;
+
+static bool valid_seq(int32_t seq_id) {
+    return seq_id >= 0 && seq_id < S.n_seq && seq_id < 8;
+}
+
+static DSeqState * get_seq(int32_t seq_id) {
+    return valid_seq(seq_id) ? &S.seq[seq_id] : nullptr;
+}
 Tens * DT(const std::string & n) {
     return bridgespec_artifact::find_tensor(S.G, n.c_str());
 }
@@ -109,114 +132,181 @@ __global__ void shift_kv_rows(__half * kv, int src_min, int src_max, int delta, 
 #define DF_API extern "C"
 #endif
 
-static constexpr int32_t DF_RELEASE_ABI = 3;
+static constexpr int32_t DF_RELEASE_ABI = 4;
+
+static int ensure_seq_storage(DSeqState & q) {
+    if (q.allocated) return 0;
+    const size_t kv_bytes = (size_t) S.max_pos * DF_KV * DF_HDIM * sizeof(__half);
+    for (int il = 0; il < DF_LAYERS; ++il) {
+        DFC(hipMalloc(&q.Kc[il], kv_bytes));
+        DFC(hipMalloc(&q.Vc[il], kv_bytes));
+    }
+    q.allocated = true;
+    return 0;
+}
+
+static int ensure_pending_storage(DSeqState & q, int count) {
+    if (count <= q.pending_capacity) return 0;
+    if (q.pending_pos_max != q.state_pos_max) {
+        fprintf(stderr, "[dflash-sidecar] cannot resize pending KV while a commit is in flight\n");
+        return -1;
+    }
+    DFC(hipStreamSynchronize(S.st));
+    for (int il = 0; il < DF_LAYERS; ++il) {
+        if (q.Kp[il] != nullptr) DFC(hipFree(q.Kp[il]));
+        if (q.Vp[il] != nullptr) DFC(hipFree(q.Vp[il]));
+    }
+    const int capacity = std::max(count, std::max(8, q.pending_capacity * 2));
+    const size_t kv_bytes = (size_t) capacity * DF_KV * DF_HDIM * sizeof(__half);
+    for (int il = 0; il < DF_LAYERS; ++il) {
+        DFC(hipMalloc(&q.Kp[il], kv_bytes));
+        DFC(hipMalloc(&q.Vp[il], kv_bytes));
+    }
+    q.pending_capacity = capacity;
+    return 0;
+}
+
+static void discard_pending(DSeqState & q) {
+    q.pending_pos_min = q.state_pos_max;
+    q.pending_pos_max = q.state_pos_max;
+}
 
 DF_API int spec_dflash_release_abi() {
     return DF_RELEASE_ABI;
 }
 
-DF_API int spec_dflash_check(int32_t n_embd_enc, int32_t block_size) {
-    return (n_embd_enc == 25600 && block_size == DF_BLOCK) ? 0 : -1;
+DF_API int spec_dflash_check(int32_t n_embd_enc, int32_t block_size, int32_t n_seq) {
+    return (n_embd_enc == 25600 && block_size == DF_BLOCK && n_seq >= 1 && n_seq <= 8) ? 0 : -1;
 }
 
 DF_API int spec_dflash_state_size() {
     return (int) sizeof(bridgespec_sidecar_state);
 }
 
-DF_API int spec_dflash_get_state(void * data, int size) {
-    if (!S.ok || data == nullptr || size != (int) sizeof(bridgespec_sidecar_state)) {
+DF_API int spec_dflash_get_state(int32_t seq_id, void * data, int size) {
+    DSeqState * q = get_seq(seq_id);
+    if (!S.ok || q == nullptr || data == nullptr || size != (int) sizeof(bridgespec_sidecar_state)) {
         return -1;
     }
     bridgespec_sidecar_state state = {};
     state.magic   = BRIDGESPEC_STATE_MAGIC;
     state.version = BRIDGESPEC_STATE_VERSION;
     state.kind    = BRIDGESPEC_STATE_KIND_DFLASH;
-    state.pos_min = S.state_pos_min;
-    state.pos_max = S.state_pos_max;
-    state.epoch   = S.state_epoch;
+    state.pos_min = q->state_pos_min;
+    state.pos_max = q->state_pos_max;
+    state.epoch   = q->state_epoch;
     std::memcpy(data, &state, sizeof(state));
     return 0;
 }
 
-static bool spec_dflash_state_matches(const void * data, int size, bridgespec_sidecar_state & state) {
-    if (!S.ok || data == nullptr || size != (int) sizeof(state)) {
-        return false;
-    }
+static bool spec_dflash_state_matches(int32_t seq_id, const void * data, int size,
+        bridgespec_sidecar_state & state) {
+    DSeqState * q = get_seq(seq_id);
+    if (!S.ok || q == nullptr || data == nullptr || size != (int) sizeof(state)) return false;
     std::memcpy(&state, data, sizeof(state));
     return state.magic == BRIDGESPEC_STATE_MAGIC &&
            state.version == BRIDGESPEC_STATE_VERSION &&
            state.kind == BRIDGESPEC_STATE_KIND_DFLASH &&
-           state.epoch == S.state_epoch &&
-           state.pos_min == S.state_pos_min &&
+           state.epoch == q->state_epoch &&
+           state.pos_min == q->state_pos_min &&
            state.pos_min >= 0 && state.pos_min <= state.pos_max &&
-           state.pos_max <= S.state_pos_max &&
-           state.pos_max <= S.max_pos;
+           state.pos_max <= q->state_pos_max && state.pos_max <= S.max_pos;
 }
 
-DF_API int spec_dflash_set_state(const void * data, int size) {
+DF_API int spec_dflash_set_state(int32_t seq_id, const void * data, int size) {
+    DSeqState * q = get_seq(seq_id);
     bridgespec_sidecar_state state = {};
-    if (!spec_dflash_state_matches(data, size, state)) {
-        return -1;
-    }
-    S.state_pos_max = state.pos_max;
+    if (q == nullptr || !spec_dflash_state_matches(seq_id, data, size, state)) return -1;
+    q->state_pos_max = state.pos_max;
+    discard_pending(*q);
     return 0;
 }
 
-DF_API int spec_dflash_reset_state() {
-    if (!S.ok) {
-        return -1;
-    }
-    if (++S.state_epoch == 0) {
-        S.state_epoch = 1;
-    }
-    S.state_pos_min = 0;
-    S.state_pos_max = 0;
+DF_API int spec_dflash_reset_state(int32_t seq_id) {
+    DSeqState * q = get_seq(seq_id);
+    if (!S.ok || q == nullptr) return -1;
+    if (++q->state_epoch == 0) q->state_epoch = 1;
+    q->state_pos_min = 0;
+    q->state_pos_max = 0;
+    discard_pending(*q);
     return 0;
 }
 
-DF_API int spec_dflash_truncate_state(int32_t pos_max) {
-    if (!S.ok || pos_max < S.state_pos_min || pos_max > S.state_pos_max) {
-        return -1;
-    }
-    S.state_pos_max = pos_max;
+DF_API int spec_dflash_truncate_state(int32_t seq_id, int32_t pos_max) {
+    DSeqState * q = get_seq(seq_id);
+    if (!S.ok || q == nullptr || pos_max < q->state_pos_min || pos_max > q->state_pos_max) return -1;
+    q->state_pos_max = pos_max;
+    discard_pending(*q);
     return 0;
 }
 
-DF_API int spec_dflash_rebase_state(int32_t pos_min, int32_t pos_max, int32_t delta) {
-    if (!S.ok || pos_min < 0 || pos_min > pos_max || pos_max > S.max_pos) {
-        return -1;
-    }
-    if (delta == 0 || S.state_pos_max <= pos_min) {
-        if (delta != 0 && ++S.state_epoch == 0) {
-            S.state_epoch = 1;
+DF_API int spec_dflash_commit_state(int32_t seq_id, int32_t pos_max) {
+    DSeqState * q = get_seq(seq_id);
+    if (!S.ok || q == nullptr || pos_max < q->state_pos_max ||
+            pos_max > q->pending_pos_max || pos_max > S.max_pos) return -1;
+    if (pos_max > q->state_pos_max) {
+        if (!q->allocated || q->pending_pos_min != q->state_pos_max) return -1;
+        const size_t src_row = (size_t) (q->state_pos_max - q->pending_pos_min);
+        const size_t n_rows = (size_t) (pos_max - q->state_pos_max);
+        const size_t row_bytes = (size_t) DF_KV * DF_HDIM * sizeof(__half);
+        for (int il = 0; il < DF_LAYERS; ++il) {
+            DFC(hipMemcpyAsync(q->Kc[il] + (size_t) q->state_pos_max * DF_KV * DF_HDIM,
+                               q->Kp[il] + src_row * DF_KV * DF_HDIM,
+                               n_rows * row_bytes, hipMemcpyDeviceToDevice, S.st));
+            DFC(hipMemcpyAsync(q->Vc[il] + (size_t) q->state_pos_max * DF_KV * DF_HDIM,
+                               q->Vp[il] + src_row * DF_KV * DF_HDIM,
+                               n_rows * row_bytes, hipMemcpyDeviceToDevice, S.st));
         }
+        q->state_pos_max = pos_max;
+    }
+    discard_pending(*q);
+    return 0;
+}
+
+DF_API int spec_dflash_rebase_state(int32_t seq_id, int32_t pos_min, int32_t pos_max, int32_t delta) {
+    DSeqState * q = get_seq(seq_id);
+    if (!S.ok || q == nullptr || pos_min < 0 || pos_min > pos_max || pos_max > S.max_pos ||
+            q->pending_pos_max != q->state_pos_max) return -1;
+    if (delta == 0 || q->state_pos_max <= pos_min) {
+        if (delta != 0 && ++q->state_epoch == 0) q->state_epoch = 1;
         return 0;
     }
-    if (pos_max < S.state_pos_max) {
-        return -1;
-    }
+    if (pos_max < q->state_pos_max || !q->allocated) return -1;
 
     const int64_t new_min = (int64_t) pos_min + delta;
-    const int64_t new_max = (int64_t) S.state_pos_max + delta;
-    if (new_min < 0 || new_max < new_min || new_max > S.max_pos) {
-        return -1;
-    }
+    const int64_t new_max = (int64_t) q->state_pos_max + delta;
+    if (new_min < 0 || new_max < new_min || new_max > S.max_pos) return -1;
 
     DFC(hipStreamSynchronize(S.st));
     for (int il = 0; il < DF_LAYERS; ++il) {
-        shift_kv_rows<<<1, 256, 0, S.st>>>(S.Kc[il], pos_min, S.state_pos_max, delta, DF_KV * DF_HDIM);
+        shift_kv_rows<<<1, 256, 0, S.st>>>(q->Kc[il], pos_min, q->state_pos_max, delta, DF_KV * DF_HDIM);
         DFC(hipGetLastError());
-        shift_kv_rows<<<1, 256, 0, S.st>>>(S.Vc[il], pos_min, S.state_pos_max, delta, DF_KV * DF_HDIM);
+        shift_kv_rows<<<1, 256, 0, S.st>>>(q->Vc[il], pos_min, q->state_pos_max, delta, DF_KV * DF_HDIM);
         DFC(hipGetLastError());
     }
     DFC(hipStreamSynchronize(S.st));
+    if (q->state_pos_min >= pos_min) q->state_pos_min += delta;
+    q->state_pos_max = (int32_t) new_max;
+    discard_pending(*q);
+    if (++q->state_epoch == 0) q->state_epoch = 1;
+    return 0;
+}
 
-    if (S.state_pos_min >= pos_min) {
-        S.state_pos_min += delta;
+DF_API int spec_dflash_attach_target_stream(void * stream, int32_t device) {
+    if (!S.ok || device != S.device) return -1;
+    if (stream == nullptr) {
+        if (S.st != S.owned_st) {
+            DFC(hipStreamSynchronize(S.st));
+            S.st = S.owned_st;
+            S.owns_st = true;
+        }
+        return 0;
     }
-    S.state_pos_max = (int32_t) new_max;
-    if (++S.state_epoch == 0) {
-        S.state_epoch = 1;
+    const hipStream_t target = reinterpret_cast<hipStream_t>(stream);
+    if (target != S.st) {
+        DFC(hipStreamSynchronize(S.st));
+        S.st = target;
+        S.owns_st = false;
     }
     return 0;
 }
@@ -315,8 +405,11 @@ static bool validate_target_schema(const std::vector<Tens> & tensors, std::strin
     return true;
 }
 
-DF_API int spec_dflash_init(const char * dir) {
-    if (S.ok) return 0;
+DF_API int spec_dflash_init(const char * dir, int32_t n_seq) {
+    if (S.ok) return n_seq == S.n_seq ? 0 : -1;
+    if (n_seq < 1 || n_seq > 8) return -1;
+    S.n_seq = n_seq;
+    DFC(hipGetDevice(&S.device));
     char pb[1024];
     std::string validation_error;
     if (!bridgespec_artifact::make_path(pb, sizeof(pb), dir, "dflash_manifest.json") ||
@@ -486,7 +579,9 @@ DF_API int spec_dflash_init(const char * dir) {
         if (v > 131072) v = 131072;
         S.max_pos = (int) v;
     }
-    DFC(hipStreamCreate(&S.st));
+    DFC(hipStreamCreate(&S.owned_st));
+    S.st = S.owned_st;
+    S.owns_st = true;
     DFC(hipMalloc(&S.feat_d, (size_t) 8 * 25600 * 4));
     DFC(hipMalloc(&S.henc,   (size_t) 8 * DF_EMBD * 4));
     DFC(hipMalloc(&S.x,      (size_t) DF_BLOCK * DF_EMBD * 4));
@@ -506,30 +601,41 @@ DF_API int spec_dflash_init(const char * dir) {
     DFC(hipMalloc(&S.tE,     (size_t) DF_BLOCK * DF_EMBD * 4));
     DFC(hipMalloc(&S.logits, (size_t) DF_BLOCK * S.n_head * 4));
     DFC(hipMalloc(&S.selhid, (size_t) DF_BLOCK * DF_RANK * 4));
-    DFC(hipMalloc(&S.pos_d, 8 * 4));
-    DFC(hipMalloc(&S.tok_d, 8 * 4));
+    for (int seq_id = 0; seq_id < 8; ++seq_id) {
+        DFC(hipMalloc(&S.pos_d[seq_id], 8 * sizeof(int32_t)));
+        DFC(hipMalloc(&S.tok_d[seq_id], 8 * sizeof(int32_t)));
+    }
     S.tkparts = (S.n_head + 2047) / 2048;
     DFC(hipMalloc(&S.tk_pmax, (size_t) 8 * S.tkparts * 4));
     DFC(hipMalloc(&S.tk_pidx, (size_t) 8 * S.tkparts * 4));
     DFC(hipMalloc(&S.tk_ids,  8 * DF_TOPK * 4));
     DFC(hipMalloc(&S.tk_vals, 8 * DF_TOPK * 4));
-    for (int il = 0; il < DF_LAYERS; ++il) {
-        DFC(hipMalloc(&S.Kc[il], (size_t) S.max_pos * DF_KV * DF_HDIM * 2));
-        DFC(hipMalloc(&S.Vc[il], (size_t) S.max_pos * DF_KV * DF_HDIM * 2));
-    }
     S.ok = true;
     fprintf(stderr, "[dflash-sidecar] initialized (max_pos=%d)\n", S.max_pos);
     return 0;
 }
 
-// encoder + KV inject for up to n rows of target features
-DF_API int spec_dflash_chunk(const int32_t * poss, const float * feats, int n) {
-    if (!S.ok || n < 0 || (n > 0 && (!poss || !feats))) return -1;
+// Encoder + KV inject for up to n rows of target features. Target rows land in
+// a pending cache; only commit_state() copies the accepted prefix to Kc/Vc.
+static int spec_dflash_chunk_impl(int32_t seq_id, const int32_t * poss,
+        const float * feats, const void * const * layer_features_device,
+        int n_layers, int layer_width, bool device_features, int n) {
+    DSeqState * q = get_seq(seq_id);
+    if (!S.ok || q == nullptr || n < 0 ||
+            (n > 0 && (!poss || (device_features ? layer_features_device == nullptr : feats == nullptr)))) return -1;
     if (n == 0) return 0;
+    if (n > S.max_pos - q->state_pos_max || q->pending_pos_max != q->state_pos_max ||
+            ensure_seq_storage(*q) != 0 || ensure_pending_storage(*q, n) != 0) return -1;
+    if (device_features && (n_layers != DF_LAYERS || layer_width != DF_EMBD / DF_LAYERS)) return -1;
+    if (device_features) {
+        for (int il = 0; il < DF_LAYERS; ++il) {
+            if (layer_features_device[il] == nullptr) return -1;
+        }
+    }
     for (int r = 0; r < n; ++r) {
-        if (poss[r] < 0 || poss[r] >= S.max_pos || poss[r] != S.state_pos_max + r) {
-            fprintf(stderr, "[dflash-sidecar] chunk: non-contiguous position %d at row %d (expected %d)\n",
-                    poss[r], r, S.state_pos_max + r);
+        if (poss[r] < 0 || poss[r] >= S.max_pos || poss[r] != q->state_pos_max + r) {
+            fprintf(stderr, "[dflash-sidecar] seq %d chunk: non-contiguous position %d at row %d (expected %d)\n",
+                    seq_id, poss[r], r, q->state_pos_max + r);
             return -1;
         }
     }
@@ -538,10 +644,24 @@ DF_API int spec_dflash_chunk(const int32_t * poss, const float * feats, int n) {
     const bool dbg = getenv("LLAMA_SPEC_HIP_DEBUG") != nullptr;
     auto t0 = std::chrono::high_resolution_clock::now();
     const int NROT = 128;
+    q->pending_pos_min = q->state_pos_max;
+    q->pending_pos_max = q->state_pos_max + n;
     for (int off = 0; off < n; off += 8) {
         const int nb = std::min(8, n - off);
-        DFC(hipMemcpyAsync(S.feat_d, feats + (size_t) off * 25600, (size_t) nb * 25600 * 4, hipMemcpyHostToDevice, S.st));
-        DFC(hipMemcpyAsync(S.pos_d, poss + off, nb * 4, hipMemcpyHostToDevice, S.st));
+        if (device_features) {
+            const float * layer0 = static_cast<const float *>(layer_features_device[0]) + (size_t) off * layer_width;
+            const float * layer1 = static_cast<const float *>(layer_features_device[1]) + (size_t) off * layer_width;
+            const float * layer2 = static_cast<const float *>(layer_features_device[2]) + (size_t) off * layer_width;
+            const float * layer3 = static_cast<const float *>(layer_features_device[3]) + (size_t) off * layer_width;
+            const float * layer4 = static_cast<const float *>(layer_features_device[4]) + (size_t) off * layer_width;
+            df_pack_layers5<<<dim3((layer_width + 255) / 256, nb), 256, 0, S.st>>>(
+                    layer0, layer1, layer2, layer3, layer4, S.feat_d, layer_width, nb);
+            df_sanitize<<<(nb * DF_EMBD + 255) / 256, 256, 0, S.st>>>(S.feat_d, nb * DF_EMBD);
+        } else {
+            DFC(hipMemcpyAsync(S.feat_d, feats + (size_t) off * 25600,
+                               (size_t) nb * 25600 * sizeof(float), hipMemcpyHostToDevice, S.st));
+        }
+        const int pos_base = poss[off];
         DISPATCH_Q4K(nb, S.W_fc, S.feat_d, S.henc, 25600, DF_EMBD, S.st);
         df_rmsnorm<<<nb, 256, 0, S.st>>>(S.henc, S.w_enc_norm, S.xn, DF_EMBD);
         for (int il = 0; il < DF_LAYERS; ++il) {
@@ -549,13 +669,15 @@ DF_API int spec_dflash_chunk(const int32_t * poss, const float * feats, int n) {
             if (S.L[il].wv_q6) DISPATCH_Q6K(nb, (const block_q6_K *) S.L[il].wv, S.xn, S.v, DF_EMBD, DF_KV * DF_HDIM, S.st);
             else               DISPATCH_Q4K(nb, (const block_q4_K *) S.L[il].wv, S.xn, S.v, DF_EMBD, DF_KV * DF_HDIM, S.st);
             df_rmsnorm_head<<<dim3(DF_KV, nb), 128, 0, S.st>>>(S.k, S.L[il].kn, DF_KV);
-            df_rope<<<dim3(DF_KV, nb), NROT / 2, 0, S.st>>>(S.k, DF_KV, S.pos_d, NROT);
-            df_kv_store<<<dim3((DF_KV * DF_HDIM + 255) / 256, nb), 256, 0, S.st>>>(S.k, S.v, S.Kc[il], S.Vc[il], S.pos_d, nb);
+            df_rope_base<<<dim3(DF_KV, nb), NROT / 2, 0, S.st>>>(S.k, DF_KV, pos_base, NROT);
+            df_kv_store_base<<<dim3((DF_KV * DF_HDIM + 255) / 256, nb), 256, 0, S.st>>>(
+                    S.k, S.v, q->Kp[il], q->Vp[il], pos_base, q->pending_pos_min, nb);
         }
-        DFC(hipStreamSynchronize(S.st));
+        if (!device_features) DFC(hipStreamSynchronize(S.st));
     }
-    S.state_pos_max = poss[n - 1] + 1;
+    if (device_features) DFC(hipGetLastError());
     if (dbg) {
+        DFC(hipStreamSynchronize(S.st));
         auto t1 = std::chrono::high_resolution_clock::now();
         tot_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
         n_rows += n;
@@ -567,9 +689,20 @@ DF_API int spec_dflash_chunk(const int32_t * poss, const float * feats, int n) {
     return 0;
 }
 
-DF_API int spec_dflash_draft(int32_t id_last, int32_t n_past, int32_t * out_ids) {
-    if (!S.ok || !out_ids || id_last < 0 || id_last >= DF_VOCAB) return -1;
-    if (n_past < 1 || n_past != S.state_pos_max ||
+DF_API int spec_dflash_chunk(int32_t seq_id, const int32_t * poss, const float * feats, int n) {
+    return spec_dflash_chunk_impl(seq_id, poss, feats, nullptr, 0, 0, false, n);
+}
+
+DF_API int spec_dflash_chunk_device(int32_t seq_id, const int32_t * poss,
+        const void * const * layer_features_device, int n_layers, int layer_width, int n) {
+    return spec_dflash_chunk_impl(seq_id, poss, nullptr, layer_features_device,
+                                  n_layers, layer_width, true, n);
+}
+
+DF_API int spec_dflash_draft(int32_t seq_id, int32_t id_last, int32_t n_past, int32_t * out_ids) {
+    DSeqState * q = get_seq(seq_id);
+    if (!S.ok || q == nullptr || !out_ids || id_last < 0 || id_last >= DF_VOCAB) return -1;
+    if (n_past < 1 || n_past != q->state_pos_max || !q->allocated ||
             static_cast<uint64_t>(n_past) + DF_BLOCK > static_cast<uint64_t>(S.max_pos)) return -1;
     const int NROT = 128;
     static int n_calls = 0;
@@ -581,18 +714,18 @@ DF_API int spec_dflash_draft(int32_t id_last, int32_t n_past, int32_t * out_ids)
     toks[0] = id_last;
     for (int i = 1; i < 8; ++i) toks[i] = 248070;
     for (int i = 0; i < 8; ++i) poss[i] = n_past + i;
-    DFC(hipMemcpyAsync(S.tok_d, toks, 32, hipMemcpyHostToDevice, S.st));
-    DFC(hipMemcpyAsync(S.pos_d, poss, 32, hipMemcpyHostToDevice, S.st));
+    DFC(hipMemcpyAsync(S.tok_d[seq_id], toks, 32, hipMemcpyHostToDevice, S.st));
+    DFC(hipMemcpyAsync(S.pos_d[seq_id], poss, 32, hipMemcpyHostToDevice, S.st));
 
     // one hipGraph for the whole ~205-kernel draft: all kernel args are static
     // device pointers (contents vary per call), n_past is read from pos_d[0]
-    static hipGraphExec_t gexec = nullptr;
-    if (gexec != nullptr) {
-        DFC(hipGraphLaunch(gexec, S.st));
+    static hipGraphExec_t gexec[8] = {};
+    if (gexec[seq_id] != nullptr) {
+        DFC(hipGraphLaunch(gexec[seq_id], S.st));
         goto readback;
     }
     DFC(hipStreamBeginCapture(S.st, hipStreamCaptureModeThreadLocal));
-    df_embed_rows<<<dim3((DF_EMBD + 255) / 256, DF_BLOCK), 256, 0, S.st>>>(S.W_embd, S.tok_d, S.x, DF_EMBD);
+    df_embed_rows<<<dim3((DF_EMBD + 255) / 256, DF_BLOCK), 256, 0, S.st>>>(S.W_embd, S.tok_d[seq_id], S.x, DF_EMBD);
     for (int il = 0; il < DF_LAYERS; ++il) {
         auto & L = S.L[il];
         df_rmsnorm<<<DF_BLOCK, 256, 0, S.st>>>(S.x, L.attn_norm, S.xn, DF_EMBD);
@@ -604,9 +737,9 @@ DF_API int spec_dflash_draft(int32_t id_last, int32_t n_past, int32_t * out_ids)
         else         DISPATCH_Q4K(DF_BLOCK, (const block_q4_K *) L.wv, S.cg, S.v, DF_EMBD, DF_KV * DF_HDIM, S.st);
         df_rmsnorm_head<<<dim3(DF_HEADS, DF_BLOCK), 128, 0, S.st>>>(S.q, L.qn, DF_HEADS);
         df_rmsnorm_head<<<dim3(DF_KV, DF_BLOCK), 128, 0, S.st>>>(S.k, L.kn, DF_KV);
-        df_rope<<<dim3(DF_HEADS, DF_BLOCK), NROT / 2, 0, S.st>>>(S.q, DF_HEADS, S.pos_d, NROT);
-        df_rope<<<dim3(DF_KV, DF_BLOCK), NROT / 2, 0, S.st>>>(S.k, DF_KV, S.pos_d, NROT);
-        df_attn<<<dim3(DF_HEADS, DF_BLOCK), 256, 0, S.st>>>(S.q, S.Kc[il], S.Vc[il], S.k, S.v, S.att, n_past, S.pos_d);
+        df_rope<<<dim3(DF_HEADS, DF_BLOCK), NROT / 2, 0, S.st>>>(S.q, DF_HEADS, S.pos_d[seq_id], NROT);
+        df_rope<<<dim3(DF_KV, DF_BLOCK), NROT / 2, 0, S.st>>>(S.k, DF_KV, S.pos_d[seq_id], NROT);
+        df_attn<<<dim3(DF_HEADS, DF_BLOCK), 256, 0, S.st>>>(S.q, q->Kc[il], q->Vc[il], S.k, S.v, S.att, n_past, S.pos_d[seq_id]);
         DISPATCH_Q4K(DF_BLOCK, L.wo, S.att, S.wo_out, DF_HEADS * DF_HDIM, DF_EMBD, S.st);
         df_conv_gate<<<dim3((DF_EMBD + 255) / 256, DF_BLOCK), 256, 0, S.st>>>(S.wo_out, S.dyn_a, L.conv_a_base, S.cg, 1, DF_BLOCK);
         df_add<<<(DF_BLOCK * DF_EMBD + 255) / 256, 256, 0, S.st>>>(S.x, S.cg, DF_BLOCK * DF_EMBD);
@@ -631,10 +764,10 @@ DF_API int spec_dflash_draft(int32_t id_last, int32_t n_past, int32_t * out_ids)
     {
         hipGraph_t graph = nullptr;
         DFC(hipStreamEndCapture(S.st, &graph));
-        DFC(hipGraphInstantiate(&gexec, graph, nullptr, nullptr, 0));
+        DFC(hipGraphInstantiate(&gexec[seq_id], graph, nullptr, nullptr, 0));
         DFC(hipGraphDestroy(graph));
-        fprintf(stderr, "[dflash-sidecar] draft graph captured\n");
-        DFC(hipGraphLaunch(gexec, S.st));
+        fprintf(stderr, "[dflash-sidecar] draft graph captured for seq %d\n", seq_id);
+        DFC(hipGraphLaunch(gexec[seq_id], S.st));
     }
 readback:
     int   h_ids[8 * DF_TOPK];

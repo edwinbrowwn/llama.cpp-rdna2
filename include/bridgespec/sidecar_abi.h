@@ -42,43 +42,76 @@ static_assert(sizeof(bridgespec_sidecar_state) == 24,
               "BridgeSpec state ABI must remain a fixed 24-byte record");
 #endif
 
-// Qwen3.8-27B MTP sidecar ABI (release ABI 2).
+// Qwen3.8-27B MTP sidecar ABI (release ABI 3).
+// State and KV operations are sequence-scoped. catchup writes only pending
+// target rows; commit_state is the only operation that makes rows persistent.
+// hidden_device, when non-null, is the already-selected accepted hidden row.
 BRIDGESPEC_API int spec_hip_release_abi(void);
-BRIDGESPEC_API int spec_hip_check(int32_t n_embd, int32_t head_rows);
+BRIDGESPEC_API int spec_hip_check(int32_t n_embd, int32_t head_rows, int32_t n_seq);
 BRIDGESPEC_API int spec_hip_state_size(void);
-BRIDGESPEC_API int spec_hip_get_state(void * data, int size);
-BRIDGESPEC_API int spec_hip_set_state(const void * data, int size);
-BRIDGESPEC_API int spec_hip_reset_state(void);
-BRIDGESPEC_API int spec_hip_truncate_state(int32_t pos_max);
-BRIDGESPEC_API int spec_hip_rebase_state(int32_t pos_min, int32_t pos_max, int32_t delta);
-BRIDGESPEC_API int spec_hip_init(const char * weights_dir, const char * ids_path);
+BRIDGESPEC_API int spec_hip_get_state(int32_t seq_id, void * data, int size);
+BRIDGESPEC_API int spec_hip_set_state(int32_t seq_id, const void * data, int size);
+BRIDGESPEC_API int spec_hip_reset_state(int32_t seq_id);
+BRIDGESPEC_API int spec_hip_truncate_state(int32_t seq_id, int32_t pos_max);
+BRIDGESPEC_API int spec_hip_commit_state(int32_t seq_id, int32_t pos_max, const float * hidden_device);
+BRIDGESPEC_API int spec_hip_rebase_state(int32_t seq_id, int32_t pos_min, int32_t pos_max, int32_t delta);
+// stream is borrowed from the target HIP backend and must remain valid for
+// the sidecar lifetime. Passing null restores the sidecar-owned stream.
+BRIDGESPEC_API int spec_hip_attach_target_stream(void * stream, int32_t device);
+BRIDGESPEC_API int spec_hip_init(const char * weights_dir, const char * ids_path, int32_t n_seq);
 BRIDGESPEC_API int spec_hip_catchup(
+        int32_t seq_id,
         const int32_t * tokens,
         const int32_t * positions,
         const float * hidden_rows,
         int count);
+BRIDGESPEC_API int spec_hip_catchup_device(
+        int32_t seq_id,
+        const int32_t * tokens,
+        const int32_t * positions,
+        const float * hidden_rows_device,
+        int count);
 BRIDGESPEC_API int spec_hip_draft(
+        int32_t seq_id,
         int32_t last_token,
         int32_t past_tokens,
         const float * hidden,
         int max_draft,
         int32_t * output_ids);
+BRIDGESPEC_API int spec_hip_draft_device(
+        int32_t seq_id,
+        int32_t last_token,
+        int32_t past_tokens,
+        int max_draft,
+        int32_t * output_ids);
 
-// Qwen3.8-27B DFlash sidecar ABI (release ABI 3).
+// Qwen3.8-27B DFlash sidecar ABI (release ABI 4). Target chunks are staged
+// until commit_state; device-layer input pointers are borrowed for the call.
 BRIDGESPEC_API int spec_dflash_release_abi(void);
-BRIDGESPEC_API int spec_dflash_check(int32_t encoded_width, int32_t block_size);
+BRIDGESPEC_API int spec_dflash_check(int32_t encoded_width, int32_t block_size, int32_t n_seq);
 BRIDGESPEC_API int spec_dflash_state_size(void);
-BRIDGESPEC_API int spec_dflash_get_state(void * data, int size);
-BRIDGESPEC_API int spec_dflash_set_state(const void * data, int size);
-BRIDGESPEC_API int spec_dflash_reset_state(void);
-BRIDGESPEC_API int spec_dflash_truncate_state(int32_t pos_max);
-BRIDGESPEC_API int spec_dflash_rebase_state(int32_t pos_min, int32_t pos_max, int32_t delta);
-BRIDGESPEC_API int spec_dflash_init(const char * artifact_directory);
+BRIDGESPEC_API int spec_dflash_get_state(int32_t seq_id, void * data, int size);
+BRIDGESPEC_API int spec_dflash_set_state(int32_t seq_id, const void * data, int size);
+BRIDGESPEC_API int spec_dflash_reset_state(int32_t seq_id);
+BRIDGESPEC_API int spec_dflash_truncate_state(int32_t seq_id, int32_t pos_max);
+BRIDGESPEC_API int spec_dflash_commit_state(int32_t seq_id, int32_t pos_max);
+BRIDGESPEC_API int spec_dflash_rebase_state(int32_t seq_id, int32_t pos_min, int32_t pos_max, int32_t delta);
+BRIDGESPEC_API int spec_dflash_attach_target_stream(void * stream, int32_t device);
+BRIDGESPEC_API int spec_dflash_init(const char * artifact_directory, int32_t n_seq);
 BRIDGESPEC_API int spec_dflash_chunk(
+        int32_t seq_id,
         const int32_t * positions,
         const float * target_features,
         int count);
+BRIDGESPEC_API int spec_dflash_chunk_device(
+        int32_t seq_id,
+        const int32_t * positions,
+        const void * const * target_layer_features_device,
+        int n_layers,
+        int layer_width,
+        int count);
 BRIDGESPEC_API int spec_dflash_draft(
+        int32_t seq_id,
         int32_t last_token,
         int32_t past_tokens,
         int32_t * output_ids);

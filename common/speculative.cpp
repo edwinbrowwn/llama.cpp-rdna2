@@ -195,6 +195,7 @@ struct common_speculative_impl {
     virtual bool state_required(llama_seq_id /*seq_id*/) const { return false; }
     virtual bool reset_state(llama_seq_id /*seq_id*/) { return true; }
     virtual bool truncate_state(llama_seq_id /*seq_id*/, llama_pos /*pos_max*/) { return true; }
+    virtual bool commit_state(llama_seq_id /*seq_id*/, llama_pos /*pos_max*/) { return true; }
     virtual bool rebase_state(llama_seq_id /*seq_id*/, llama_pos /*pos_min*/, llama_pos /*pos_max*/, llama_pos /*delta*/) { return true; }
 };
 
@@ -1030,17 +1031,25 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         if (is_dflash2) {
             const char * library = std::getenv("LLAMA_SPEC_HIP_DFLASH");
             const char * artifact_dir = std::getenv("LLAMA_SPEC_HIP_DFLASH_DIR");
-            if (library != nullptr && artifact_dir != nullptr && n_seq == 1 &&
+            if (library != nullptr && artifact_dir != nullptr &&
                     n_embd_enc == 25600 && block_size == 8 &&
                     llama_vocab_n_tokens(llama_model_get_vocab(model_tgt)) == 248320) {
                 std::string error;
-                if (sidecar.load(library, artifact_dir, n_embd_enc, block_size, error)) {
+                if (sidecar.load(library, artifact_dir, n_embd_enc, block_size, (int32_t) n_seq, error)) {
+                    for (uint32_t k = 0; k < target_layer_ids_n; ++k) {
+                        if (target_layer_ids[k] == n_layer_tgt) {
+                            llama_set_embeddings_nextn_device_preferred(ctx_tgt, true);
+                        } else {
+                            llama_set_embeddings_layer_inp_device_preferred(
+                                    ctx_tgt, (uint32_t) target_layer_ids[k], true);
+                        }
+                    }
                     SPC_INF("DFlash sidecar active: %s\n", library);
                 } else {
                     SPC_WRN("DFlash sidecar unavailable (%s); using native DFlash\n", error.c_str());
                 }
             } else if (library != nullptr) {
-                SPC_WRN("%s", "DFlash sidecar requires Qwen3.8-27B DFlash2, -np 1, and LLAMA_SPEC_HIP_DFLASH_DIR; using native DFlash\n");
+                SPC_WRN("%s", "DFlash sidecar requires Qwen3.8-27B DFlash2, 1..8 sequences, and LLAMA_SPEC_HIP_DFLASH_DIR; using native DFlash\n");
             }
         }
 
@@ -1157,6 +1166,131 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         }
     }
 
+    bool process_sidecar(const llama_batch & batch_in,
+            const std::vector<int32_t> & i_batch_beg,
+            const std::vector<int32_t> & i_batch_end) {
+        auto * ctx_tgt = this->params.ctx_tgt;
+        std::vector<llama_device_view> layers(target_layer_ids_n);
+        bool direct = false;
+        void * stream = nullptr;
+        int32_t device = -1;
+#if defined(GGML_USE_HIP)
+        direct = true;
+#endif
+        for (uint32_t k = 0; k < target_layer_ids_n; ++k) {
+            const bool is_nextn = target_layer_ids[k] == n_layer_tgt;
+            const bool has_device_layer = is_nextn
+                    ? llama_get_embeddings_nextn_device(ctx_tgt, &layers[k])
+                    : llama_get_embeddings_layer_inp_device(ctx_tgt, (uint32_t) target_layer_ids[k], &layers[k]);
+            if (!has_device_layer || layers[k].row_stride != (size_t) n_embd_tgt * sizeof(float) ||
+                    layers[k].n_rows < (uint32_t) batch_in.n_tokens) {
+                direct = false;
+                break;
+            }
+            if (stream == nullptr) {
+                stream = layers[k].stream;
+                device = layers[k].device;
+            } else if (layers[k].stream != stream || layers[k].device != device) {
+                direct = false;
+                break;
+            }
+        }
+        if (direct && !sidecar.attach_target_stream(stream, device)) {
+            direct = false;
+        }
+
+        std::vector<bool> contiguous(n_seq, true);
+        for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
+            if (i_batch_beg[seq_id] < 0) continue;
+            for (int32_t i = i_batch_beg[seq_id]; i <= i_batch_end[seq_id]; ++i) {
+                if (batch_in.seq_id[i][0] != seq_id) {
+                    contiguous[seq_id] = false;
+                    break;
+                }
+            }
+        }
+
+        std::vector<std::vector<float>> host_layer_rows;
+        if (!direct) {
+            host_layer_rows.resize(target_layer_ids_n);
+            for (uint32_t k = 0; k < target_layer_ids_n; ++k) {
+                float * layer = target_layer_ids[k] == n_layer_tgt
+                        ? llama_get_embeddings_nextn(ctx_tgt)
+                        : llama_get_embeddings_layer_inp(ctx_tgt, (uint32_t) target_layer_ids[k]);
+                if (layer == nullptr) {
+                    sidecar.disable();
+                    sidecar_target_only = true;
+                    SPC_ERR("%s", "DFlash sidecar target layer output unavailable; entering target-only mode\n");
+                    return true;
+                }
+                host_layer_rows[k].assign(layer, layer +
+                        (size_t) batch_in.n_tokens * n_embd_tgt);
+            }
+        }
+
+        for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
+            const int32_t beg = i_batch_beg[seq_id];
+            const int32_t end = i_batch_end[seq_id];
+            if (beg < 0 || end < beg) continue;
+            std::vector<int32_t> indices;
+            if (!contiguous[seq_id]) {
+                for (int32_t i = 0; i < batch_in.n_tokens; ++i) {
+                    if (batch_in.seq_id[i][0] == seq_id) indices.push_back(i);
+                }
+            }
+            const int32_t n_rows = contiguous[seq_id] ? end - beg + 1 : (int32_t) indices.size();
+            if (n_rows <= 0) continue;
+            verify_rows[seq_id] = n_rows;
+            verify_pos_first[seq_id] = batch_in.pos[contiguous[seq_id] ? beg : indices.front()];
+
+            int rc = -1;
+            if (direct && contiguous[seq_id]) {
+                std::vector<const void *> layer_ptrs(target_layer_ids_n);
+                for (uint32_t k = 0; k < target_layer_ids_n; ++k) {
+                    layer_ptrs[k] = static_cast<const char *>(layers[k].data) +
+                            (size_t) beg * layers[k].row_stride;
+                }
+                rc = sidecar.chunk_device(seq_id, batch_in.pos + beg, layer_ptrs.data(),
+                        (int) target_layer_ids_n, n_embd_tgt, n_rows);
+            } else {
+                features_buf.resize((size_t) n_rows * n_embd_enc);
+                std::vector<int32_t> positions((size_t) n_rows);
+                for (int32_t r = 0; r < n_rows; ++r) {
+                    const int32_t i = contiguous[seq_id] ? beg + r : indices[r];
+                    positions[r] = batch_in.pos[i];
+                    for (uint32_t k = 0; k < target_layer_ids_n; ++k) {
+                        std::memcpy(features_buf.data() + (size_t) r * n_embd_enc +
+                                (size_t) k * n_embd_tgt,
+                                host_layer_rows[k].data() + (size_t) i * n_embd_tgt,
+                                (size_t) n_embd_tgt * sizeof(float));
+                    }
+                }
+                size_t n_bad = 0;
+                for (float & value : features_buf) {
+                    if (!std::isfinite(value)) {
+                        value = value != value ? 0.0f : (value > 0.0f ? 65504.0f : -65504.0f);
+                        ++n_bad;
+                    }
+                }
+                if (n_bad > 0) {
+                    static bool warned = false;
+                    if (!warned) {
+                        SPC_WRN("%s", "sanitized non-finite target features for DFlash sidecar\n");
+                        warned = true;
+                    }
+                }
+                rc = sidecar.chunk(seq_id, positions.data(), features_buf.data(), n_rows);
+            }
+            if (rc != 0) {
+                sidecar.disable();
+                sidecar_target_only = true;
+                SPC_ERR("%s", "DFlash sidecar target feature update failed; entering target-only mode\n");
+                return true;
+            }
+        }
+        return true;
+    }
+
     bool process(const llama_batch & batch_in) override {
         if (batch_in.n_tokens <= 0) {
             return true;
@@ -1193,6 +1327,19 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
             if (i_batch_beg[seq_id] < 0) {
                 i_batch_beg[seq_id] = k;
             }
+        }
+
+        if (sidecar.active()) {
+            if (batch_in.pos == nullptr) {
+                sidecar.disable();
+                sidecar_target_only = true;
+                SPC_ERR("%s", "DFlash sidecar requires explicit target positions; entering target-only mode\n");
+                return true;
+            }
+            return process_sidecar(batch_in, i_batch_beg, i_batch_end);
+        }
+        if (sidecar_target_only) {
+            return true;
         }
 
         auto * ctx_tgt = this->params.ctx_tgt;
@@ -1254,25 +1401,6 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                             warned = true;
                         }
                     }
-                }
-
-                if (sidecar.active()) {
-                    if (batch_in.pos == nullptr) {
-                        sidecar.disable();
-                        sidecar_target_only = true;
-                        SPC_ERR("%s", "DFlash sidecar requires explicit target positions; entering target-only mode\n");
-                        continue;
-                    }
-                    std::vector<int32_t> sidecar_pos(n_chunk);
-                    for (int32_t i = 0; i < n_chunk; ++i) {
-                        sidecar_pos[i] = batch_in.pos[i_batch_beg[seq_id] + offset + i];
-                    }
-                    if (sidecar.chunk(sidecar_pos.data(), features_buf.data(), n_chunk) != 0) {
-                        sidecar.disable();
-                        sidecar_target_only = true;
-                        SPC_ERR("%s", "DFlash sidecar chunk failed; entering target-only mode\n");
-                    }
-                    continue;
                 }
 
                 if (sidecar_target_only) {
@@ -1341,7 +1469,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                 }
 
                 int32_t ids[7] = {};
-                const int n = sidecar.draft(dp.id_last, (int32_t) dp.n_past, ids);
+                const int n = sidecar.draft(seq_id, dp.id_last, (int32_t) dp.n_past, ids);
                 if (n < 0 || n > 7) {
                     sidecar.disable();
                     sidecar_target_only = true;
@@ -1562,10 +1690,8 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
     }
 
     bool get_state(llama_seq_id seq_id, std::vector<uint8_t> & data) override {
-        if (seq_id != 0 || !sidecar.active()) {
-            return false;
-        }
-        if (!sidecar.get_state(data)) {
+        if (!sidecar.active()) return false;
+        if (!sidecar.get_state(seq_id, data)) {
             sidecar.disable();
             sidecar_target_only = true;
             SPC_ERR("%s", "DFlash sidecar state snapshot failed; entering target-only mode\n");
@@ -1575,10 +1701,8 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
     }
 
     bool set_state(llama_seq_id seq_id, const std::vector<uint8_t> & data) override {
-        if (!sidecar.active()) {
-            return true;
-        }
-        if (seq_id != 0 || !sidecar.set_state(data)) {
+        if (!sidecar.active()) return true;
+        if (!sidecar.set_state(seq_id, data)) {
             sidecar.disable();
             sidecar_target_only = true;
             SPC_ERR("%s", "DFlash sidecar state restore failed; entering target-only mode\n");
@@ -1588,10 +1712,8 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
     }
 
     bool reset_state(llama_seq_id seq_id) override {
-        if (!sidecar.active()) {
-            return true;
-        }
-        if (seq_id != 0 || !sidecar.reset_state()) {
+        if (!sidecar.active()) return true;
+        if (!sidecar.reset_state(seq_id)) {
             sidecar.disable();
             sidecar_target_only = true;
             SPC_ERR("%s", "DFlash sidecar state reset failed; entering target-only mode\n");
@@ -1601,10 +1723,8 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
     }
 
     bool truncate_state(llama_seq_id seq_id, llama_pos pos_max) override {
-        if (!sidecar.active()) {
-            return true;
-        }
-        if (seq_id != 0 || !sidecar.truncate_state(pos_max)) {
+        if (!sidecar.active()) return true;
+        if (!sidecar.truncate_state(seq_id, pos_max)) {
             sidecar.disable();
             sidecar_target_only = true;
             SPC_ERR("%s", "DFlash sidecar state truncate failed; entering target-only mode\n");
@@ -1613,11 +1733,20 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         return true;
     }
 
-    bool rebase_state(llama_seq_id seq_id, llama_pos pos_min, llama_pos pos_max, llama_pos delta) override {
-        if (!sidecar.active()) {
-            return true;
+    bool commit_state(llama_seq_id seq_id, llama_pos pos_max) override {
+        if (!sidecar.active()) return true;
+        if (!sidecar.commit_state(seq_id, pos_max)) {
+            sidecar.disable();
+            sidecar_target_only = true;
+            SPC_ERR("%s", "DFlash sidecar state commit failed; entering target-only mode\n");
+            return false;
         }
-        if (seq_id != 0 || !sidecar.rebase_state(pos_min, pos_max, delta)) {
+        return true;
+    }
+
+    bool rebase_state(llama_seq_id seq_id, llama_pos pos_min, llama_pos pos_max, llama_pos delta) override {
+        if (!sidecar.active()) return true;
+        if (!sidecar.rebase_state(seq_id, pos_min, pos_max, delta)) {
             sidecar.disable();
             sidecar_target_only = true;
             SPC_ERR("%s", "DFlash sidecar state rebase failed; entering target-only mode\n");
@@ -1627,16 +1756,11 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
     }
 
     void accept(llama_seq_id seq_id, uint16_t n_accepted, bool /*is_other*/) override {
-        if (!sidecar.active() || seq_id != 0 || verify_pos_first[seq_id] < 0 || verify_rows[seq_id] <= 0) {
+        if (seq_id < 0 || seq_id >= (llama_seq_id) n_seq || verify_pos_first[seq_id] < 0 || verify_rows[seq_id] <= 0) {
             return;
         }
         const int32_t n_commit = std::min<int32_t>((int32_t) n_accepted + 1, verify_rows[seq_id]);
-        const llama_pos pos_max = verify_pos_first[seq_id] + n_commit;
-        if (!sidecar.truncate_state(pos_max)) {
-            sidecar.disable();
-            sidecar_target_only = true;
-            SPC_ERR("%s", "DFlash sidecar state commit failed; entering target-only mode\n");
-        }
+        commit_state(seq_id, verify_pos_first[seq_id] + n_commit);
     }
 };
 
@@ -1645,6 +1769,8 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
 
     common_bridgespec_mtp_sidecar sidecar;
     bool sidecar_target_only = false; // runtime failure or unsupported sampling mode
+    std::vector<const float *> verify_h_device;
+    std::vector<size_t> verify_h_device_stride;
 
     llama_batch batch;
 
@@ -1771,7 +1897,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
 
         pending_h.assign(n_seq, std::vector<float>(n_embd, 0.0f));
 
-        if (n_seq == 1 && n_mtp_layers == 1 && !chain_heads && !is_mem_shared &&
+        if (n_mtp_layers == 1 && !chain_heads && !is_mem_shared &&
                 n_embd == 5120) {
             const char * library = std::getenv("LLAMA_SPEC_HIP_SIDECAR");
             const char * weights_dir = std::getenv("LLAMA_SPEC_HIP_WEIGHTS");
@@ -1781,13 +1907,14 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                 const std::string ids_path = ids_env != nullptr
                         ? ids_env : std::string(weights_dir) + "/draft_head_ids.bin";
                 std::string error;
-                if (sidecar.load(library, weights_dir, ids_path, n_embd, 40960, error)) {
+                if (sidecar.load(library, weights_dir, ids_path, n_embd, 40960, (int32_t) n_seq, error)) {
+                    llama_set_embeddings_nextn_device_preferred(ctx_tgt, true);
                     SPC_INF("MTP sidecar active: %s\n", library);
                 } else {
                     SPC_WRN("MTP sidecar unavailable (%s); using native MTP\n", error.c_str());
                 }
             } else if (library != nullptr) {
-                SPC_WRN("%s", "MTP sidecar requires Qwen3.8-27B, -np 1, and LLAMA_SPEC_HIP_WEIGHTS; using native MTP\n");
+                SPC_WRN("%s", "MTP sidecar requires Qwen3.8-27B, 1..8 sequences, and LLAMA_SPEC_HIP_WEIGHTS; using native MTP\n");
             }
         }
 
@@ -1798,6 +1925,8 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         verify_h.assign(n_seq, {});
         verify_h_rows.assign(n_seq, 0);
         verify_pos_first.assign(n_seq, -1);
+        verify_h_device.assign(n_seq, nullptr);
+        verify_h_device_stride.assign(n_seq, 0);
     }
 
     void prepare_process(const common_speculative_draft_params_vec & dparams) override {
@@ -1852,6 +1981,90 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         }
     }
 
+    bool process_sidecar(const llama_batch & batch_in,
+            const std::vector<int32_t> & i_batch_beg,
+            const std::vector<int32_t> & i_batch_end) {
+        auto * ctx_tgt = this->params.ctx_tgt;
+        llama_device_view device_view;
+        bool direct = false;
+#if defined(GGML_USE_HIP)
+        direct = llama_get_embeddings_nextn_device(ctx_tgt, &device_view) &&
+                device_view.row_stride == (size_t) n_embd * sizeof(float) &&
+                device_view.n_rows >= (uint32_t) batch_in.n_tokens &&
+                sidecar.attach_target_stream(device_view.stream, device_view.device);
+#endif
+
+        // If any sequence is interleaved, direct rows cannot be represented by
+        // one contiguous pointer for that sequence. The host fallback gathers
+        // only that sequence while other contiguous sequences retain D2D input.
+        std::vector<bool> contiguous(n_seq, true);
+        for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
+            if (i_batch_beg[seq_id] < 0) continue;
+            for (int32_t i = i_batch_beg[seq_id]; i <= i_batch_end[seq_id]; ++i) {
+                if (batch_in.seq_id[i][0] != seq_id) {
+                    contiguous[seq_id] = false;
+                    break;
+                }
+            }
+        }
+        bool need_host = false;
+        for (bool value : contiguous) need_host = need_host || !value;
+        float * host_h = nullptr;
+        if (!direct || need_host) {
+            host_h = llama_get_embeddings_nextn(ctx_tgt);
+        }
+
+        for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
+            const int32_t beg = i_batch_beg[seq_id];
+            const int32_t end = i_batch_end[seq_id];
+            if (beg < 0 || end < beg) continue;
+
+            std::vector<int32_t> indices;
+            if (!contiguous[seq_id]) {
+                for (int32_t i = 0; i < batch_in.n_tokens; ++i) {
+                    if (batch_in.seq_id[i][0] == seq_id) indices.push_back(i);
+                }
+            }
+            const int32_t n_rows = contiguous[seq_id] ? end - beg + 1 : (int32_t) indices.size();
+            if (n_rows <= 0) continue;
+            verify_h_rows[seq_id] = n_rows;
+            verify_pos_first[seq_id] = batch_in.pos[contiguous[seq_id] ? beg : indices.front()];
+            verify_h_device[seq_id] = nullptr;
+            verify_h_device_stride[seq_id] = 0;
+            verify_h[seq_id].clear();
+
+            int rc = -1;
+            if (direct && contiguous[seq_id]) {
+                const float * rows = static_cast<const float *>(device_view.data) +
+                        (size_t) beg * device_view.row_stride / sizeof(float);
+                verify_h_device[seq_id] = rows;
+                verify_h_device_stride[seq_id] = device_view.row_stride;
+                rc = sidecar.catchup_device(seq_id, batch_in.token + beg, batch_in.pos + beg,
+                        rows, n_rows);
+            } else {
+                std::vector<int32_t> tokens((size_t) n_rows);
+                std::vector<int32_t> positions((size_t) n_rows);
+                verify_h[seq_id].resize((size_t) n_rows * n_embd);
+                for (int32_t r = 0; r < n_rows; ++r) {
+                    const int32_t i = contiguous[seq_id] ? beg + r : indices[r];
+                    tokens[r] = batch_in.token[i];
+                    positions[r] = batch_in.pos[i];
+                    std::memcpy(verify_h[seq_id].data() + (size_t) r * n_embd,
+                            host_h + (size_t) i * n_embd, (size_t) n_embd * sizeof(float));
+                }
+                rc = sidecar.catchup(seq_id, tokens.data(), positions.data(),
+                        verify_h[seq_id].data(), n_rows);
+            }
+            if (rc != 0) {
+                sidecar.disable();
+                sidecar_target_only = true;
+                SPC_ERR("%s", "MTP sidecar catch-up failed; entering target-only mode\n");
+                return true;
+            }
+        }
+        return true;
+    }
+
     bool process(const llama_batch & batch_in) override {
         // If accept() did not consume a captured batch, the server took its
         // checkpoint/replay branch and restored the draft context. Do not let
@@ -1895,6 +2108,19 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                     }
                 }
             }
+        }
+
+        if (sidecar.active()) {
+            if (batch_in.pos == nullptr) {
+                sidecar.disable();
+                sidecar_target_only = true;
+                SPC_ERR("%s", "MTP sidecar requires explicit target positions; entering target-only mode\n");
+                return true;
+            }
+            return process_sidecar(batch_in, i_batch_beg, i_batch_end);
+        }
+        if (sidecar_target_only) {
+            return true;
         }
 
         auto * ctx_tgt = this->params.ctx_tgt;
@@ -1950,16 +2176,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                 set_h(i_batch_beg[seq_id], pending_h[seq_id].data());
             }
 
-            if (sidecar.active()) {
-                if (sidecar.catchup(batch.token, batch.pos, batch.embd, batch.n_tokens) != 0) {
-                    sidecar.disable();
-                    sidecar_target_only = true;
-                    SPC_ERR("%s", "MTP sidecar catch-up failed; entering target-only mode\n");
-                }
-            } else if (sidecar_target_only) {
-                // Do not touch the native draft context after a sidecar runtime
-                // failure: its cache may not correspond to the target batch.
-            } else if (defer_catchup) {
+            if (defer_catchup) {
                 deferred_tokens.assign(batch.token, batch.token + batch.n_tokens);
                 deferred_pos.assign(batch.pos, batch.pos + batch.n_tokens);
                 deferred_embd.assign(batch.embd, batch.embd + (size_t) batch.n_tokens * n_embd);
@@ -2047,8 +2264,10 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                     return;
                 }
                 std::vector<int32_t> ids((size_t) limit, -1);
-                const int n = sidecar.draft(dp.id_last, (int32_t) dp.n_past,
-                        pending_h[seq_id].data(), limit, ids.data());
+                const int n = verify_h_device[seq_id] != nullptr
+                        ? sidecar.draft_device(seq_id, dp.id_last, (int32_t) dp.n_past, limit, ids.data())
+                        : sidecar.draft(seq_id, dp.id_last, (int32_t) dp.n_past,
+                                pending_h[seq_id].data(), limit, ids.data());
                 if (n < 0 || n > limit) {
                     sidecar.disable();
                     sidecar_target_only = true;
@@ -2231,10 +2450,8 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
     }
 
     bool get_state(llama_seq_id seq_id, std::vector<uint8_t> & data) override {
-        if (seq_id != 0 || !sidecar.active()) {
-            return false;
-        }
-        if (!sidecar.get_state(data)) {
+        if (!sidecar.active()) return false;
+        if (!sidecar.get_state(seq_id, data)) {
             sidecar.disable();
             sidecar_target_only = true;
             SPC_ERR("%s", "MTP sidecar state snapshot failed; entering target-only mode\n");
@@ -2244,10 +2461,8 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
     }
 
     bool set_state(llama_seq_id seq_id, const std::vector<uint8_t> & data) override {
-        if (!sidecar.active()) {
-            return true;
-        }
-        if (seq_id != 0 || !sidecar.set_state(data)) {
+        if (!sidecar.active()) return true;
+        if (!sidecar.set_state(seq_id, data)) {
             sidecar.disable();
             sidecar_target_only = true;
             SPC_ERR("%s", "MTP sidecar state restore failed; entering target-only mode\n");
@@ -2257,10 +2472,8 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
     }
 
     bool reset_state(llama_seq_id seq_id) override {
-        if (!sidecar.active()) {
-            return true;
-        }
-        if (seq_id != 0 || !sidecar.reset_state()) {
+        if (!sidecar.active()) return true;
+        if (!sidecar.reset_state(seq_id)) {
             sidecar.disable();
             sidecar_target_only = true;
             SPC_ERR("%s", "MTP sidecar state reset failed; entering target-only mode\n");
@@ -2270,10 +2483,8 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
     }
 
     bool truncate_state(llama_seq_id seq_id, llama_pos pos_max) override {
-        if (!sidecar.active()) {
-            return true;
-        }
-        if (seq_id != 0 || !sidecar.truncate_state(pos_max)) {
+        if (!sidecar.active()) return true;
+        if (!sidecar.truncate_state(seq_id, pos_max)) {
             sidecar.disable();
             sidecar_target_only = true;
             SPC_ERR("%s", "MTP sidecar state truncate failed; entering target-only mode\n");
@@ -2282,11 +2493,45 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         return true;
     }
 
-    bool rebase_state(llama_seq_id seq_id, llama_pos pos_min, llama_pos pos_max, llama_pos delta) override {
-        if (!sidecar.active()) {
-            return true;
+    bool commit_state(llama_seq_id seq_id, llama_pos pos_max) override {
+        if (!sidecar.active()) return true;
+        if (seq_id < 0 || seq_id >= (llama_seq_id) n_seq) {
+            sidecar.disable();
+            sidecar_target_only = true;
+            SPC_ERR("%s", "MTP sidecar state commit sequence invalid; entering target-only mode\n");
+            return false;
         }
-        if (seq_id != 0 || !sidecar.rebase_state(pos_min, pos_max, delta)) {
+        const int32_t first = verify_pos_first[seq_id];
+        const int32_t rows = verify_h_rows[seq_id];
+        if (first < 0 || rows <= 0 ||
+                pos_max < first || pos_max > first + rows) {
+            sidecar.disable();
+            sidecar_target_only = true;
+            SPC_ERR("%s", "MTP sidecar state commit boundary invalid; entering target-only mode\n");
+            return false;
+        }
+        const int32_t row = (int32_t) (pos_max - first) - 1;
+        const float * hidden_device = verify_h_device[seq_id] != nullptr && row >= 0
+                ? verify_h_device[seq_id] + (size_t) row * verify_h_device_stride[seq_id] / sizeof(float)
+                : nullptr;
+        if (!sidecar.commit_state(seq_id, pos_max, hidden_device)) {
+            sidecar.disable();
+            sidecar_target_only = true;
+            SPC_ERR("%s", "MTP sidecar state commit failed; entering target-only mode\n");
+            return false;
+        }
+        if (hidden_device == nullptr && row >= 0 &&
+                (size_t) (row + 1) * n_embd <= verify_h[seq_id].size()) {
+            std::memcpy(pending_h[seq_id].data(),
+                    verify_h[seq_id].data() + (size_t) row * n_embd,
+                    (size_t) n_embd * sizeof(float));
+        }
+        return true;
+    }
+
+    bool rebase_state(llama_seq_id seq_id, llama_pos pos_min, llama_pos pos_max, llama_pos delta) override {
+        if (!sidecar.active()) return true;
+        if (!sidecar.rebase_state(seq_id, pos_min, pos_max, delta)) {
             sidecar.disable();
             sidecar_target_only = true;
             SPC_ERR("%s", "MTP sidecar state rebase failed; entering target-only mode\n");
@@ -2307,12 +2552,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
 
         if (sidecar.active()) {
             const int32_t n_commit = std::min<int32_t>((int32_t) n_accepted + 1, n_rows);
-            if (verify_pos_first[seq_id] < 0 ||
-                    !sidecar.truncate_state(verify_pos_first[seq_id] + n_commit)) {
-                sidecar.disable();
-                sidecar_target_only = true;
-                SPC_ERR("%s", "MTP sidecar state commit failed; entering target-only mode\n");
-            }
+            commit_state(seq_id, verify_pos_first[seq_id] + n_commit);
         }
 
         if (deferred_catchup_ready) {
@@ -2338,7 +2578,9 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
 
         const int32_t i_h = std::min<int32_t>(n_accepted, n_rows - 1);
         const size_t row_bytes = (size_t) n_embd * sizeof(float);
-        std::memcpy(pending_h[seq_id].data(), verify_h[seq_id].data() + (size_t) i_h * n_embd, row_bytes);
+        if (verify_h_device[seq_id] == nullptr) {
+            std::memcpy(pending_h[seq_id].data(), verify_h[seq_id].data() + (size_t) i_h * n_embd, row_bytes);
+        }
     }
 };
 
@@ -3574,6 +3816,17 @@ bool common_speculative_truncate_state(common_speculative * spec, llama_seq_id s
     bool result = true;
     for (auto & impl : spec->impls) {
         result = impl->truncate_state(seq_id, pos_max) && result;
+    }
+    return result;
+}
+
+bool common_speculative_commit_state(common_speculative * spec, llama_seq_id seq_id, llama_pos pos_max) {
+    if (spec == nullptr) {
+        return true;
+    }
+    bool result = true;
+    for (auto & impl : spec->impls) {
+        result = impl->commit_state(seq_id, pos_max) && result;
     }
     return result;
 }

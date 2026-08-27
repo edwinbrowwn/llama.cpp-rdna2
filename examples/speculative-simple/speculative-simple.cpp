@@ -137,6 +137,12 @@ int main(int argc, char ** argv) {
             LOG_ERR("%s", "failed to process speculative prompt\n");
             return 1;
         }
+        // Prompt rows are unconditionally accepted. Sidecars stage target KV
+        // until this explicit commit so their first draft starts at n_past.
+        if (!common_speculative_commit_state(spec, seq_id, (llama_pos) batch_prompt.n_tokens)) {
+            LOG_ERR("%s", "failed to commit speculative prompt state\n");
+            return 1;
+        }
     }
 
     // note: keep the last token separate!
@@ -206,6 +212,7 @@ int main(int argc, char ** argv) {
                 if (use_ckpt_tgt) {
                     ckpt.update_tgt(ctx_tgt, seq_id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
                 }
+                common_speculative_get_state(spec, seq_id, ckpt.data_spec);
             }
 
             // reset the draft context to the checkpoint before verification
@@ -241,6 +248,11 @@ int main(int argc, char ** argv) {
         // feed the batch to the speculative implementation(s) - this drives the draft model, MTP, Eagle3, etc.
         if (!common_speculative_process(spec, batch_tgt)) {
             LOG_ERR("%s", "failed to process speculative batch\n");
+            break;
+        }
+        if (draft.empty() && !common_speculative_commit_state(
+                    spec, seq_id, batch_tgt.pos[batch_tgt.n_tokens - 1] + 1)) {
+            LOG_ERR("%s", "failed to commit non-speculative target state\n");
             break;
         }
 
@@ -282,6 +294,9 @@ int main(int argc, char ** argv) {
 
             {
                 ckpt.load_tgt(ctx_tgt, seq_id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+                if (!common_speculative_set_state(spec, seq_id, ckpt.data_spec)) {
+                    LOG_WRN("%s", "failed to restore speculative sidecar state; continuing target-only\n");
+                }
 
                 llama_memory_seq_rm(llama_get_memory(ctx_tgt), seq_id, ckpt.pos_max + 1, -1);
             }
