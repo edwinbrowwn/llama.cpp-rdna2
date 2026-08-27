@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-"""Generate BridgeSpec sidecar assets from GGUF files already owned by the user.
+"""Generate speculative sidecar assets from GGUF files already owned by the user.
 
 The repository never ships model weights. Install llama.cpp's ``gguf-py``
 package before running this tool:
@@ -49,7 +49,7 @@ def temporary_output(destination: Path) -> Iterator[Path]:
 
 
 def model_output_name(target: Path, requested: str | None) -> str:
-    name = requested if requested is not None else f"{target.stem}-bridgespec.gguf"
+    name = requested if requested is not None else f"{target.stem}-spec-sidecar.gguf"
     forbidden = '<>:"/\\|?*'
     device = name.split(".", 1)[0].upper()
     reserved_names = {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
@@ -185,7 +185,7 @@ def write_blob(
                 offset += int(raw.nbytes)
         payload = {
             "schema": 1,
-            "generator": "BridgeSpec tools/prepare_assets.py",
+            "generator": "speculative sidecar tools/prepare_assets.py",
             "source_file": source.name,
             "source_sha256": source_hash,
             "tensors": entries,

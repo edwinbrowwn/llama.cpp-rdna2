@@ -6,11 +6,11 @@
 //      spec_dflash_draft(seq, id_last, n_past, out_ids[7]).
 #include "dflash_kernels.hip"
 #include "../artifact_manifest.h"
-#include "bridgespec/sidecar_abi.h"
+#include "spec_sidecar/sidecar_abi.h"
 
 #define DFC(x) do { hipError_t e_ = (x); if (e_ != hipSuccess) { fprintf(stderr, "[dflash-sidecar] %s @%d\n", hipGetErrorString(e_), __LINE__); return -1; } } while (0)
 
-using Tens = bridgespec_artifact::TensorDesc;
+using Tens = spec_sidecar_artifact::TensorDesc;
 
 static void deq_q4k_host(const uint8_t * src, float * dst, size_t n) {
     const block_q4_K * bs = (const block_q4_K *) src;
@@ -111,7 +111,7 @@ static DSeqState * get_seq(int32_t seq_id) {
     return valid_seq(seq_id) ? &S.seq[seq_id] : nullptr;
 }
 Tens * DT(const std::string & n) {
-    return bridgespec_artifact::find_tensor(S.G, n.c_str());
+    return spec_sidecar_artifact::find_tensor(S.G, n.c_str());
 }
 } // namespace
 
@@ -140,7 +140,7 @@ __global__ void shift_kv_rows(__half * kv, int src_min, int src_max, int delta, 
 
 static constexpr int32_t DF_RELEASE_ABI = 5;
 
-static_assert(DF_TOPK == BRIDGESPEC_DFLASH_DRAFT_TOP_K,
+static_assert(DF_TOPK == SPEC_SIDECAR_DFLASH_DRAFT_TOP_K,
               "DFlash stochastic top-k ABI mismatch");
 
 static int ensure_seq_storage(DSeqState & q) {
@@ -189,18 +189,18 @@ DF_API int spec_dflash_check(int32_t n_embd_enc, int32_t block_size, int32_t n_s
 }
 
 DF_API int spec_dflash_state_size() {
-    return (int) sizeof(bridgespec_sidecar_state);
+    return (int) sizeof(spec_sidecar_state);
 }
 
 DF_API int spec_dflash_get_state(int32_t seq_id, void * data, int size) {
     DSeqState * q = get_seq(seq_id);
-    if (!S.ok || q == nullptr || data == nullptr || size != (int) sizeof(bridgespec_sidecar_state)) {
+    if (!S.ok || q == nullptr || data == nullptr || size != (int) sizeof(spec_sidecar_state)) {
         return -1;
     }
-    bridgespec_sidecar_state state = {};
-    state.magic   = BRIDGESPEC_STATE_MAGIC;
-    state.version = BRIDGESPEC_STATE_VERSION;
-    state.kind    = BRIDGESPEC_STATE_KIND_DFLASH;
+    spec_sidecar_state state = {};
+    state.magic   = SPEC_SIDECAR_STATE_MAGIC;
+    state.version = SPEC_SIDECAR_STATE_VERSION;
+    state.kind    = SPEC_SIDECAR_STATE_KIND_DFLASH;
     state.pos_min = q->state_pos_min;
     state.pos_max = q->state_pos_max;
     state.epoch   = q->state_epoch;
@@ -209,13 +209,13 @@ DF_API int spec_dflash_get_state(int32_t seq_id, void * data, int size) {
 }
 
 static bool spec_dflash_state_matches(int32_t seq_id, const void * data, int size,
-        bridgespec_sidecar_state & state) {
+        spec_sidecar_state & state) {
     DSeqState * q = get_seq(seq_id);
     if (!S.ok || q == nullptr || data == nullptr || size != (int) sizeof(state)) return false;
     std::memcpy(&state, data, sizeof(state));
-    return state.magic == BRIDGESPEC_STATE_MAGIC &&
-           state.version == BRIDGESPEC_STATE_VERSION &&
-           state.kind == BRIDGESPEC_STATE_KIND_DFLASH &&
+    return state.magic == SPEC_SIDECAR_STATE_MAGIC &&
+           state.version == SPEC_SIDECAR_STATE_VERSION &&
+           state.kind == SPEC_SIDECAR_STATE_KIND_DFLASH &&
            state.epoch == q->state_epoch &&
            state.pos_min == q->state_pos_min &&
            state.pos_min >= 0 && state.pos_min <= state.pos_max &&
@@ -224,7 +224,7 @@ static bool spec_dflash_state_matches(int32_t seq_id, const void * data, int siz
 
 DF_API int spec_dflash_set_state(int32_t seq_id, const void * data, int size) {
     DSeqState * q = get_seq(seq_id);
-    bridgespec_sidecar_state state = {};
+    spec_sidecar_state state = {};
     if (q == nullptr || !spec_dflash_state_matches(seq_id, data, size, state)) return -1;
     q->state_pos_max = state.pos_max;
     discard_pending(*q);
@@ -323,12 +323,12 @@ DF_API int spec_dflash_attach_target_stream(void * stream, int32_t device) {
 static bool expect_tensor(const std::vector<Tens> & tensors, const std::string & name,
                           const char * dtype, std::initializer_list<int64_t> shape,
                           uint64_t nbytes, std::string & error) {
-    const Tens * tensor = bridgespec_artifact::find_tensor(tensors, name.c_str());
+    const Tens * tensor = spec_sidecar_artifact::find_tensor(tensors, name.c_str());
     if (tensor == nullptr) {
         error = "missing tensor: " + name;
         return false;
     }
-    if (!bridgespec_artifact::tensor_matches(*tensor, dtype, shape, nbytes)) {
+    if (!spec_sidecar_artifact::tensor_matches(*tensor, dtype, shape, nbytes)) {
         error = "tensor schema mismatch: " + name;
         return false;
     }
@@ -402,10 +402,10 @@ static bool validate_target_schema(const std::vector<Tens> & tensors, std::strin
     const size_t count = tensors.size() == 1 ? 1 : sizeof(EXPECTED) / sizeof(EXPECTED[0]);
     for (size_t i = 0; i < count; ++i) {
         const Exp & item = EXPECTED[i];
-        const Tens * tensor = bridgespec_artifact::find_tensor(tensors, item.name);
+        const Tens * tensor = spec_sidecar_artifact::find_tensor(tensors, item.name);
         const bool matches = tensor != nullptr && (item.ne1 == 0
-            ? bridgespec_artifact::tensor_matches(*tensor, item.dtype, {item.ne0}, item.nbytes)
-            : bridgespec_artifact::tensor_matches(*tensor, item.dtype, {item.ne0, item.ne1}, item.nbytes));
+            ? spec_sidecar_artifact::tensor_matches(*tensor, item.dtype, {item.ne0}, item.nbytes)
+            : spec_sidecar_artifact::tensor_matches(*tensor, item.dtype, {item.ne0, item.ne1}, item.nbytes));
         if (!matches) {
             error = std::string("target tensor schema mismatch: ") + item.name;
             return false;
@@ -421,8 +421,8 @@ DF_API int spec_dflash_init(const char * dir, int32_t n_seq) {
     DFC(hipGetDevice(&S.device));
     char pb[1024];
     std::string validation_error;
-    if (!bridgespec_artifact::make_path(pb, sizeof(pb), dir, "dflash_manifest.json") ||
-        !bridgespec_artifact::load_manifest(pb, S.G, validation_error)) {
+    if (!spec_sidecar_artifact::make_path(pb, sizeof(pb), dir, "dflash_manifest.json") ||
+        !spec_sidecar_artifact::load_manifest(pb, S.G, validation_error)) {
         fprintf(stderr, "[dflash-sidecar] invalid DFlash manifest: %s\n", validation_error.c_str());
         return -1;
     }
@@ -430,11 +430,11 @@ DF_API int spec_dflash_init(const char * dir, int32_t n_seq) {
         fprintf(stderr, "[dflash-sidecar] %s\n", validation_error.c_str());
         return -1;
     }
-    if (!bridgespec_artifact::make_path(pb, sizeof(pb), dir, "dflash_weights.bin")) return -1;
+    if (!spec_sidecar_artifact::make_path(pb, sizeof(pb), dir, "dflash_weights.bin")) return -1;
     FILE * wf = fopen(pb, "rb");
     uint64_t wf_size = 0;
-    if (!wf || !bridgespec_artifact::file_size(wf, wf_size) ||
-        !bridgespec_artifact::validate_blob_layout(S.G, wf_size, validation_error)) {
+    if (!wf || !spec_sidecar_artifact::file_size(wf, wf_size) ||
+        !spec_sidecar_artifact::validate_blob_layout(S.G, wf_size, validation_error)) {
         fprintf(stderr, "[dflash-sidecar] invalid DFlash weights layout: %s\n", validation_error.c_str());
         if (wf) fclose(wf);
         return -1;
@@ -444,19 +444,19 @@ DF_API int spec_dflash_init(const char * dir, int32_t n_seq) {
     // by this sidecar. prepare_assets emits either the embedding alone or the
     // complete 17-tensor MTP blob.
     std::vector<Tens> target_manifest;
-    if (!bridgespec_artifact::make_path(pb, sizeof(pb), dir, "drafter_manifest.json") ||
-        !bridgespec_artifact::load_manifest(pb, target_manifest, validation_error) ||
+    if (!spec_sidecar_artifact::make_path(pb, sizeof(pb), dir, "drafter_manifest.json") ||
+        !spec_sidecar_artifact::load_manifest(pb, target_manifest, validation_error) ||
         !validate_target_schema(target_manifest, validation_error)) {
         fprintf(stderr, "[dflash-sidecar] invalid target manifest: %s\n", validation_error.c_str());
         fclose(wf);
         return -1;
     }
-    const Tens * token_embedding = bridgespec_artifact::find_tensor(target_manifest, "token_embd.weight");
-    if (!bridgespec_artifact::make_path(pb, sizeof(pb), dir, "drafter_weights.bin")) { fclose(wf); return -1; }
+    const Tens * token_embedding = spec_sidecar_artifact::find_tensor(target_manifest, "token_embd.weight");
+    if (!spec_sidecar_artifact::make_path(pb, sizeof(pb), dir, "drafter_weights.bin")) { fclose(wf); return -1; }
     FILE * target_wf = fopen(pb, "rb");
     uint64_t target_wf_size = 0;
-    if (!target_wf || !bridgespec_artifact::file_size(target_wf, target_wf_size) ||
-        !bridgespec_artifact::validate_blob_layout(target_manifest, target_wf_size, validation_error)) {
+    if (!target_wf || !spec_sidecar_artifact::file_size(target_wf, target_wf_size) ||
+        !spec_sidecar_artifact::validate_blob_layout(target_manifest, target_wf_size, validation_error)) {
         fprintf(stderr, "[dflash-sidecar] invalid target weights layout: %s\n", validation_error.c_str());
         if (target_wf) fclose(target_wf);
         fclose(wf);
@@ -468,12 +468,12 @@ DF_API int spec_dflash_init(const char * dir, int32_t n_seq) {
     const bool full_head = getenv("LLAMA_SPEC_HIP_FULL_HEAD") != nullptr;
     const int expected_rows = full_head ? DF_VOCAB : 40960;
     const uint64_t expected_head_size = static_cast<uint64_t>(expected_rows) * 4200;
-    if (!bridgespec_artifact::make_path(pb, sizeof(pb), dir, full_head ? "target_head.bin" : "target_head_sliced.bin")) {
+    if (!spec_sidecar_artifact::make_path(pb, sizeof(pb), dir, full_head ? "target_head.bin" : "target_head_sliced.bin")) {
         fclose(target_wf); fclose(wf); return -1;
     }
     FILE * head_file = fopen(pb, "rb");
     uint64_t head_size = 0;
-    if (!head_file || !bridgespec_artifact::file_size(head_file, head_size) || head_size != expected_head_size) {
+    if (!head_file || !spec_sidecar_artifact::file_size(head_file, head_size) || head_size != expected_head_size) {
         fprintf(stderr, "[dflash-sidecar] target-head size mismatch: expected %llu bytes\n",
                 static_cast<unsigned long long>(expected_head_size));
         if (head_file) fclose(head_file);
@@ -485,22 +485,22 @@ DF_API int spec_dflash_init(const char * dir, int32_t n_seq) {
     if (full_head) {
         for (int i = 0; i < S.n_head; ++i) remap_h[i] = i;
     } else {
-        if (!bridgespec_artifact::make_path(pb, sizeof(pb), dir, "draft_head_ids.bin")) {
+        if (!spec_sidecar_artifact::make_path(pb, sizeof(pb), dir, "draft_head_ids.bin")) {
             fclose(head_file); fclose(target_wf); fclose(wf); return -1;
         }
         FILE * remap_file = fopen(pb, "rb");
         uint64_t remap_size = 0;
         const uint64_t expected_remap_size = static_cast<uint64_t>(S.n_head) * sizeof(int32_t);
-        if (!remap_file || !bridgespec_artifact::file_size(remap_file, remap_size) ||
+        if (!remap_file || !spec_sidecar_artifact::file_size(remap_file, remap_size) ||
             remap_size != expected_remap_size ||
-            !bridgespec_artifact::read_exact_at(remap_file, 0, remap_h.data(), expected_remap_size)) {
+            !spec_sidecar_artifact::read_exact_at(remap_file, 0, remap_h.data(), expected_remap_size)) {
             fprintf(stderr, "[dflash-sidecar] remap size/read mismatch\n");
             if (remap_file) fclose(remap_file);
             fclose(head_file); fclose(target_wf); fclose(wf);
             return -1;
         }
         fclose(remap_file);
-        if (!bridgespec_artifact::validate_remap(remap_h, DF_VOCAB, validation_error)) {
+        if (!spec_sidecar_artifact::validate_remap(remap_h, DF_VOCAB, validation_error)) {
             fprintf(stderr, "[dflash-sidecar] invalid remap: %s\n", validation_error.c_str());
             fclose(head_file); fclose(target_wf); fclose(wf);
             return -1;
@@ -512,7 +512,7 @@ DF_API int spec_dflash_init(const char * dir, int32_t n_seq) {
     std::vector<char> hb;
     for (auto & t : S.G) {
         hb.resize(static_cast<size_t>(t.nbytes));
-        if (!bridgespec_artifact::read_exact_at(wf, t.offset, hb.data(), t.nbytes)) { fclose(wf); return -1; }
+        if (!spec_sidecar_artifact::read_exact_at(wf, t.offset, hb.data(), t.nbytes)) { fclose(wf); return -1; }
         DFC(hipMalloc(&t.dev, static_cast<size_t>(t.nbytes)));
         DFC(hipMemcpy(t.dev, hb.data(), static_cast<size_t>(t.nbytes), hipMemcpyHostToDevice));
     }
@@ -524,7 +524,7 @@ DF_API int spec_dflash_init(const char * dir, int32_t n_seq) {
         Tens * t = DT(pr.first);
         if (!t) { fclose(wf); return -1; }
         hb.resize(static_cast<size_t>(t->nbytes));
-        if (!bridgespec_artifact::read_exact_at(wf, t->offset, hb.data(), t->nbytes)) { fclose(wf); return -1; }
+        if (!spec_sidecar_artifact::read_exact_at(wf, t->offset, hb.data(), t->nbytes)) { fclose(wf); return -1; }
         deq_q4k_host((const uint8_t *) hb.data(), pr.second, (size_t) DF_VOCAB * DF_RANK);
     }
     fclose(wf);
@@ -533,7 +533,7 @@ DF_API int spec_dflash_init(const char * dir, int32_t n_seq) {
     {
         void * hptr = nullptr;
         DFC(hipHostMalloc(&hptr, static_cast<size_t>(token_embedding->nbytes), hipHostMallocMapped));
-        if (!bridgespec_artifact::read_exact_at(target_wf, token_embedding->offset, hptr, token_embedding->nbytes)) {
+        if (!spec_sidecar_artifact::read_exact_at(target_wf, token_embedding->offset, hptr, token_embedding->nbytes)) {
             fclose(target_wf); return -1;
         }
         fclose(target_wf);
@@ -544,7 +544,7 @@ DF_API int spec_dflash_init(const char * dir, int32_t n_seq) {
     // target head: sliced 40960 rows + id remap by default; full head uses identity
     {
         std::vector<char> buf(static_cast<size_t>(head_size));
-        if (!bridgespec_artifact::read_exact_at(head_file, 0, buf.data(), head_size)) { fclose(head_file); return -1; }
+        if (!spec_sidecar_artifact::read_exact_at(head_file, 0, buf.data(), head_size)) { fclose(head_file); return -1; }
         fclose(head_file);
         void * d = nullptr;
         DFC(hipMalloc(&d, static_cast<size_t>(head_size)));
@@ -906,7 +906,7 @@ DF_API int spec_dflash_draft_stochastic(int32_t seq_id, int32_t id_last, int32_t
         }
         int selected = DF_TOPK - 1;
         double cumulative = 0.0;
-        const double u = bridgespec_stochastic_uniform(rng_key, (uint32_t) n_out);
+        const double u = spec_sidecar_stochastic_uniform(rng_key, (uint32_t) n_out);
         for (int kx = 0; kx < DF_TOPK; ++kx) {
             probs[kx] /= sum;
             cumulative += probs[kx];

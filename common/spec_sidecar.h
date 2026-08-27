@@ -7,26 +7,26 @@
 
 // Probe only the sidecar binary/artifact contract. This intentionally performs
 // no HIP initialization, model loading, or device allocation.
-bool common_bridgespec_mtp_probe(const std::string & library_path,
+bool common_spec_sidecar_mtp_probe(const std::string & library_path,
         const std::string & weights_dir, const std::string & ids_path,
         int32_t embedding_width, int32_t head_rows, int32_t n_seq,
         std::string & error);
-bool common_bridgespec_dflash_probe(const std::string & library_path,
+bool common_spec_sidecar_dflash_probe(const std::string & library_path,
         const std::string & artifact_dir, int32_t encoded_width,
         int32_t block_size, int32_t n_seq, std::string & error);
 
-// Host-side loader for the optional BridgeSpec Qwen3.8-27B sidecars.
+// Host-side loader for the optional speculative sidecar Qwen3.8-27B sidecars.
 // The sidecars are deliberately opt-in and model-specific. A loader object
 // keeps the library resident for the lifetime of the process because the
 // current release ABI has no shutdown operation. State/KV calls are serialized
 // by the speculative driver and sequence-scoped in ABI 4/5.
-class common_bridgespec_mtp_sidecar {
+class common_spec_sidecar_mtp {
 public:
-    common_bridgespec_mtp_sidecar();
-    ~common_bridgespec_mtp_sidecar();
+    common_spec_sidecar_mtp();
+    ~common_spec_sidecar_mtp();
 
-    common_bridgespec_mtp_sidecar(const common_bridgespec_mtp_sidecar &) = delete;
-    common_bridgespec_mtp_sidecar & operator=(const common_bridgespec_mtp_sidecar &) = delete;
+    common_spec_sidecar_mtp(const common_spec_sidecar_mtp &) = delete;
+    common_spec_sidecar_mtp & operator=(const common_spec_sidecar_mtp &) = delete;
 
     bool load(const std::string & library_path,
               const std::string & weights_dir,
@@ -69,13 +69,13 @@ private:
     std::unique_ptr<impl> pimpl;
 };
 
-class common_bridgespec_dflash_sidecar {
+class common_spec_sidecar_dflash {
 public:
-    common_bridgespec_dflash_sidecar();
-    ~common_bridgespec_dflash_sidecar();
+    common_spec_sidecar_dflash();
+    ~common_spec_sidecar_dflash();
 
-    common_bridgespec_dflash_sidecar(const common_bridgespec_dflash_sidecar &) = delete;
-    common_bridgespec_dflash_sidecar & operator=(const common_bridgespec_dflash_sidecar &) = delete;
+    common_spec_sidecar_dflash(const common_spec_sidecar_dflash &) = delete;
+    common_spec_sidecar_dflash & operator=(const common_spec_sidecar_dflash &) = delete;
 
     bool load(const std::string & library_path,
               const std::string & artifact_dir,

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-"""Validate BridgeSpec artifact structure without loading a model on the GPU."""
+"""Validate speculative sidecar artifact structure without loading a model on the GPU."""
 
 from __future__ import annotations
 

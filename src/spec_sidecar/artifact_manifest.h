@@ -13,7 +13,7 @@
 #include <utility>
 #include <vector>
 
-namespace bridgespec_artifact {
+namespace spec_sidecar_artifact {
 
 struct TensorDesc {
     std::string name;
@@ -475,4 +475,4 @@ inline bool tensor_matches(const TensorDesc & tensor, const char * dtype,
     return true;
 }
 
-} // namespace bridgespec_artifact
+} // namespace spec_sidecar_artifact

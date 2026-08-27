@@ -8,10 +8,10 @@
 #include "kernels.hip"
 #include "kernels_b.hip"
 #include "../artifact_manifest.h"
-#include "bridgespec/sidecar_abi.h"
+#include "spec_sidecar/sidecar_abi.h"
 
 // ---------------- host: weights ----------------
-using Tensor = bridgespec_artifact::TensorDesc;
+using Tensor = spec_sidecar_artifact::TensorDesc;
 static constexpr int SC_N_VOCAB = 248320;
 
 // ---------------- sidecar state ----------------
@@ -74,7 +74,7 @@ static SeqState * get_seq(int32_t seq_id) {
 }
 
 Tensor * find_tensor(const char * name) {
-    return bridgespec_artifact::find_tensor(S.tensors, name);
+    return spec_sidecar_artifact::find_tensor(S.tensors, name);
 }
 
 #define SC_CHECK(x) do { hipError_t e_ = (x); if (e_ != hipSuccess) { fprintf(stderr, "[hip-sidecar] %s at %s:%d\n", hipGetErrorString(e_), __FILE__, __LINE__); return -1; } } while (0)
@@ -156,7 +156,7 @@ void block_phase2(Scratch & c, hipStream_t st, int pos, int * tok_dst,
 
 static constexpr int32_t SC_RELEASE_ABI = 4;
 
-static_assert(MTP_DRAFT_TOP_K == BRIDGESPEC_MTP_DRAFT_TOP_K,
+static_assert(MTP_DRAFT_TOP_K == SPEC_SIDECAR_MTP_DRAFT_TOP_K,
               "MTP stochastic top-k ABI mismatch");
 
 static bool valid_seq(int32_t seq_id) {
@@ -214,18 +214,18 @@ SC_API int spec_hip_check(int32_t n_embd, int32_t head_rows, int32_t n_seq) {
 }
 
 SC_API int spec_hip_state_size() {
-    return (int) sizeof(bridgespec_sidecar_state);
+    return (int) sizeof(spec_sidecar_state);
 }
 
 SC_API int spec_hip_get_state(int32_t seq_id, void * data, int size) {
     SeqState * q = get_seq_checked(seq_id);
-    if (!S.ok || q == nullptr || data == nullptr || size != (int) sizeof(bridgespec_sidecar_state)) {
+    if (!S.ok || q == nullptr || data == nullptr || size != (int) sizeof(spec_sidecar_state)) {
         return -1;
     }
-    bridgespec_sidecar_state state = {};
-    state.magic   = BRIDGESPEC_STATE_MAGIC;
-    state.version = BRIDGESPEC_STATE_VERSION;
-    state.kind    = BRIDGESPEC_STATE_KIND_MTP;
+    spec_sidecar_state state = {};
+    state.magic   = SPEC_SIDECAR_STATE_MAGIC;
+    state.version = SPEC_SIDECAR_STATE_VERSION;
+    state.kind    = SPEC_SIDECAR_STATE_KIND_MTP;
     state.pos_min = q->state_pos_min;
     state.pos_max = q->state_pos_max;
     state.epoch   = q->state_epoch;
@@ -234,15 +234,15 @@ SC_API int spec_hip_get_state(int32_t seq_id, void * data, int size) {
 }
 
 static bool spec_hip_state_matches(int32_t seq_id, const void * data, int size,
-        bridgespec_sidecar_state & state) {
+        spec_sidecar_state & state) {
     SeqState * q = get_seq_checked(seq_id);
     if (!S.ok || q == nullptr || data == nullptr || size != (int) sizeof(state)) {
         return false;
     }
     std::memcpy(&state, data, sizeof(state));
-    return state.magic == BRIDGESPEC_STATE_MAGIC &&
-           state.version == BRIDGESPEC_STATE_VERSION &&
-           state.kind == BRIDGESPEC_STATE_KIND_MTP &&
+    return state.magic == SPEC_SIDECAR_STATE_MAGIC &&
+           state.version == SPEC_SIDECAR_STATE_VERSION &&
+           state.kind == SPEC_SIDECAR_STATE_KIND_MTP &&
            state.epoch == q->state_epoch &&
            state.pos_min == q->state_pos_min &&
            state.pos_min >= 0 && state.pos_min <= state.pos_max &&
@@ -252,7 +252,7 @@ static bool spec_hip_state_matches(int32_t seq_id, const void * data, int size,
 
 SC_API int spec_hip_set_state(int32_t seq_id, const void * data, int size) {
     SeqState * q = get_seq_checked(seq_id);
-    bridgespec_sidecar_state state = {};
+    spec_sidecar_state state = {};
     if (q == nullptr || !spec_hip_state_matches(seq_id, data, size, state)) {
         return -1;
     }
@@ -394,11 +394,11 @@ SC_API int spec_hip_init(const char * weights_dir, const char * ids_path, int32_
     SC_CHECK(hipGetDevice(&S.device));
     char pbuf[1024];
     std::string validation_error;
-    if (!bridgespec_artifact::make_path(pbuf, sizeof(pbuf), weights_dir, "drafter_manifest.json")) {
+    if (!spec_sidecar_artifact::make_path(pbuf, sizeof(pbuf), weights_dir, "drafter_manifest.json")) {
         fprintf(stderr, "[hip-sidecar] invalid or overlong weights directory\n");
         return -1;
     }
-    if (!bridgespec_artifact::load_manifest(pbuf, S.tensors, validation_error)) {
+    if (!spec_sidecar_artifact::load_manifest(pbuf, S.tensors, validation_error)) {
         fprintf(stderr, "[hip-sidecar] invalid manifest %s: %s\n", pbuf, validation_error.c_str());
         return -1;
     }
@@ -433,20 +433,20 @@ SC_API int spec_hip_init(const char * weights_dir, const char * ids_path, int32_
         Tensor * t = find_tensor(e.name);
         if (!t) { fprintf(stderr, "[hip-sidecar] missing tensor %s\n", e.name); return -1; }
         const bool matches = e.ne1 == 0
-            ? bridgespec_artifact::tensor_matches(*t, e.dtype, {e.ne0}, e.nbytes)
-            : bridgespec_artifact::tensor_matches(*t, e.dtype, {e.ne0, e.ne1}, e.nbytes);
+            ? spec_sidecar_artifact::tensor_matches(*t, e.dtype, {e.ne0}, e.nbytes)
+            : spec_sidecar_artifact::tensor_matches(*t, e.dtype, {e.ne0, e.ne1}, e.nbytes);
         if (!matches) {
             fprintf(stderr, "[hip-sidecar] tensor schema mismatch: %s\n", e.name);
             return -1;
         }
     }
 
-    if (!bridgespec_artifact::make_path(pbuf, sizeof(pbuf), weights_dir, "drafter_weights.bin")) return -1;
+    if (!spec_sidecar_artifact::make_path(pbuf, sizeof(pbuf), weights_dir, "drafter_weights.bin")) return -1;
     FILE * wf = fopen(pbuf, "rb");
     if (!wf) { fprintf(stderr, "[hip-sidecar] cannot open %s\n", pbuf); return -1; }
     uint64_t weights_size = 0;
-    if (!bridgespec_artifact::file_size(wf, weights_size) ||
-        !bridgespec_artifact::validate_blob_layout(S.tensors, weights_size, validation_error)) {
+    if (!spec_sidecar_artifact::file_size(wf, weights_size) ||
+        !spec_sidecar_artifact::validate_blob_layout(S.tensors, weights_size, validation_error)) {
         fprintf(stderr, "[hip-sidecar] invalid weights layout: %s\n", validation_error.c_str());
         fclose(wf);
         return -1;
@@ -459,8 +459,8 @@ SC_API int spec_hip_init(const char * weights_dir, const char * ids_path, int32_
     FILE * rf = ids_path == nullptr ? nullptr : fopen(ids_path, "rb");
     uint64_t remap_size = 0;
     const uint64_t expected_remap_size = static_cast<uint64_t>(N_HEAD_ROWS) * sizeof(int32_t);
-    if (!rf || !bridgespec_artifact::file_size(rf, remap_size) || remap_size != expected_remap_size ||
-        !bridgespec_artifact::read_exact_at(rf, 0, remap_h.data(), expected_remap_size)) {
+    if (!rf || !spec_sidecar_artifact::file_size(rf, remap_size) || remap_size != expected_remap_size ||
+        !spec_sidecar_artifact::read_exact_at(rf, 0, remap_h.data(), expected_remap_size)) {
         fprintf(stderr, "[hip-sidecar] invalid remap table (%s): expected %llu bytes\n",
                 ids_path ? ids_path : "null", static_cast<unsigned long long>(expected_remap_size));
         if (rf) fclose(rf);
@@ -468,7 +468,7 @@ SC_API int spec_hip_init(const char * weights_dir, const char * ids_path, int32_
         return -1;
     }
     fclose(rf);
-    if (!bridgespec_artifact::validate_remap(remap_h, SC_N_VOCAB, validation_error)) {
+    if (!spec_sidecar_artifact::validate_remap(remap_h, SC_N_VOCAB, validation_error)) {
         fprintf(stderr, "[hip-sidecar] invalid remap table: %s\n", validation_error.c_str());
         fclose(wf);
         return -1;
@@ -482,11 +482,11 @@ SC_API int spec_hip_init(const char * weights_dir, const char * ids_path, int32_
         if (host_resident) {
             void * hptr = nullptr;
             SC_CHECK(hipHostMalloc(&hptr, static_cast<size_t>(t.nbytes), hipHostMallocMapped));
-            if (!bridgespec_artifact::read_exact_at(wf, t.offset, hptr, t.nbytes)) { fclose(wf); fprintf(stderr, "[hip-sidecar] short read %s\n", t.name.c_str()); return -1; }
+            if (!spec_sidecar_artifact::read_exact_at(wf, t.offset, hptr, t.nbytes)) { fclose(wf); fprintf(stderr, "[hip-sidecar] short read %s\n", t.name.c_str()); return -1; }
             SC_CHECK(hipHostGetDevicePointer(&t.dev, hptr, 0));
         } else {
             hostbuf.resize(static_cast<size_t>(t.nbytes));
-            if (!bridgespec_artifact::read_exact_at(wf, t.offset, hostbuf.data(), t.nbytes)) { fclose(wf); fprintf(stderr, "[hip-sidecar] short read %s\n", t.name.c_str()); return -1; }
+            if (!spec_sidecar_artifact::read_exact_at(wf, t.offset, hostbuf.data(), t.nbytes)) { fclose(wf); fprintf(stderr, "[hip-sidecar] short read %s\n", t.name.c_str()); return -1; }
             SC_CHECK(hipMalloc(&t.dev, static_cast<size_t>(t.nbytes)));
             SC_CHECK(hipMemcpy(t.dev, hostbuf.data(), static_cast<size_t>(t.nbytes), hipMemcpyHostToDevice));
         }
@@ -832,7 +832,7 @@ static int spec_hip_draft_stochastic_impl(int32_t seq_id, int32_t id_last, int32
                 S.draft_ids + (size_t) j * MTP_DRAFT_TOP_K,
                 S.draft_logits + (size_t) j * MTP_DRAFT_TOP_K,
                 MTP_DRAFT_TOP_K, temperature, p_min,
-                bridgespec_stochastic_uniform(rng_key, (uint32_t) j), j,
+                spec_sidecar_stochastic_uniform(rng_key, (uint32_t) j), j,
                 S.tok_out, S.draft_probs, S.draft_count, S.draft_active);
     }
 

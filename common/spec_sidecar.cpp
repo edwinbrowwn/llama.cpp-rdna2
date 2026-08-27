@@ -1,5 +1,5 @@
-#include "bridgespec_sidecar.h"
-#include "../include/bridgespec/sidecar_abi.h"
+#include "spec_sidecar.h"
+#include "../include/spec_sidecar/sidecar_abi.h"
 
 #include <cctype>
 #include <cstdlib>
@@ -145,7 +145,7 @@ using dflash_draft_stochastic_fn = int (*)(int32_t, int32_t, int32_t, float, flo
 
 } // namespace
 
-bool common_bridgespec_mtp_probe(const std::string & library_path,
+bool common_spec_sidecar_mtp_probe(const std::string & library_path,
         const std::string & weights_dir, const std::string & ids_path,
         int32_t embedding_width, int32_t head_rows, int32_t n_seq,
         std::string & error) {
@@ -181,7 +181,7 @@ bool common_bridgespec_mtp_probe(const std::string & library_path,
         resolve_symbol(handle, "spec_hip_draft_stochastic_device", stochastic_device, error);
     const bool compatible = symbols && release() == 4 &&
             check(embedding_width, head_rows, n_seq) == 0 &&
-            top_k() == BRIDGESPEC_MTP_DRAFT_TOP_K;
+            top_k() == SPEC_SIDECAR_MTP_DRAFT_TOP_K;
     if (!compatible && error.empty()) {
         error = "MTP sidecar stochastic ABI probe failed";
     }
@@ -189,7 +189,7 @@ bool common_bridgespec_mtp_probe(const std::string & library_path,
     return compatible;
 }
 
-bool common_bridgespec_dflash_probe(const std::string & library_path,
+bool common_spec_sidecar_dflash_probe(const std::string & library_path,
         const std::string & artifact_dir, int32_t encoded_width,
         int32_t block_size, int32_t n_seq, std::string & error) {
     if (n_seq < 1 || n_seq > 8) {
@@ -231,7 +231,7 @@ bool common_bridgespec_dflash_probe(const std::string & library_path,
         resolve_symbol(handle, "spec_dflash_draft_stochastic", stochastic, error);
     const bool compatible = symbols && release() == 5 &&
             check(encoded_width, block_size, n_seq) == 0 &&
-            top_k() == BRIDGESPEC_DFLASH_DRAFT_TOP_K;
+            top_k() == SPEC_SIDECAR_DFLASH_DRAFT_TOP_K;
     if (!compatible && error.empty()) {
         error = "DFlash sidecar stochastic ABI probe failed";
     }
@@ -239,7 +239,7 @@ bool common_bridgespec_dflash_probe(const std::string & library_path,
     return compatible;
 }
 
-struct common_bridgespec_mtp_sidecar::impl {
+struct common_spec_sidecar_mtp::impl {
     void * handle = nullptr;
     bool active = false;
     state_size_fn_t state_size_fn = nullptr;
@@ -259,15 +259,15 @@ struct common_bridgespec_mtp_sidecar::impl {
     mtp_draft_stochastic_device_fn draft_stochastic_device_fn = nullptr;
 };
 
-common_bridgespec_mtp_sidecar::common_bridgespec_mtp_sidecar() : pimpl(new impl) {}
+common_spec_sidecar_mtp::common_spec_sidecar_mtp() : pimpl(new impl) {}
 
-common_bridgespec_mtp_sidecar::~common_bridgespec_mtp_sidecar() {
+common_spec_sidecar_mtp::~common_spec_sidecar_mtp() {
     // The release ABI currently has no shutdown function.  Keep a successfully
     // initialized library resident until process exit; unloading it would leave
     // its HIP allocations and static state without a supported teardown path.
 }
 
-bool common_bridgespec_mtp_sidecar::load(const std::string & library_path,
+bool common_spec_sidecar_mtp::load(const std::string & library_path,
         const std::string & weights_dir, const std::string & ids_path,
         int32_t embedding_width, int32_t head_rows, int32_t n_seq, std::string & error) {
     if (active()) {
@@ -323,12 +323,12 @@ bool common_bridgespec_mtp_sidecar::load(const std::string & library_path,
         close_library(handle);
         return false;
     }
-    if (pimpl->stochastic_top_k_fn() != BRIDGESPEC_MTP_DRAFT_TOP_K) {
+    if (pimpl->stochastic_top_k_fn() != SPEC_SIDECAR_MTP_DRAFT_TOP_K) {
         error = "MTP sidecar stochastic top-k mismatch";
         close_library(handle);
         return false;
     }
-    if (pimpl->state_size_fn() != static_cast<int>(sizeof(bridgespec_sidecar_state))) {
+    if (pimpl->state_size_fn() != static_cast<int>(sizeof(spec_sidecar_state))) {
         error = "MTP sidecar state ABI size mismatch";
         close_library(handle);
         pimpl->state_size_fn = nullptr;
@@ -360,22 +360,22 @@ bool common_bridgespec_mtp_sidecar::load(const std::string & library_path,
     return true;
 }
 
-bool common_bridgespec_mtp_sidecar::active() const {
+bool common_spec_sidecar_mtp::active() const {
     return pimpl != nullptr && pimpl->active;
 }
 
-void common_bridgespec_mtp_sidecar::disable() {
+void common_spec_sidecar_mtp::disable() {
     if (pimpl != nullptr) {
         pimpl->active = false;
     }
 }
 
-bool common_bridgespec_mtp_sidecar::get_state(int32_t seq_id, std::vector<uint8_t> & data) const {
+bool common_spec_sidecar_mtp::get_state(int32_t seq_id, std::vector<uint8_t> & data) const {
     if (!active() || pimpl->state_get_fn == nullptr || pimpl->state_size_fn == nullptr) {
         return false;
     }
     const int size = pimpl->state_size_fn();
-    if (size != static_cast<int>(sizeof(bridgespec_sidecar_state))) {
+    if (size != static_cast<int>(sizeof(spec_sidecar_state))) {
         data.clear();
         return false;
     }
@@ -387,62 +387,62 @@ bool common_bridgespec_mtp_sidecar::get_state(int32_t seq_id, std::vector<uint8_
     return true;
 }
 
-bool common_bridgespec_mtp_sidecar::set_state(int32_t seq_id, const std::vector<uint8_t> & data) const {
+bool common_spec_sidecar_mtp::set_state(int32_t seq_id, const std::vector<uint8_t> & data) const {
     return active() && pimpl->state_set_fn != nullptr &&
-           data.size() == sizeof(bridgespec_sidecar_state) &&
+           data.size() == sizeof(spec_sidecar_state) &&
            data.size() <= static_cast<size_t>(std::numeric_limits<int>::max()) &&
            pimpl->state_set_fn(seq_id, data.data(), static_cast<int>(data.size())) == 0;
 }
 
-bool common_bridgespec_mtp_sidecar::reset_state(int32_t seq_id) const {
+bool common_spec_sidecar_mtp::reset_state(int32_t seq_id) const {
     return active() && pimpl->state_reset_fn != nullptr && pimpl->state_reset_fn(seq_id) == 0;
 }
 
-bool common_bridgespec_mtp_sidecar::truncate_state(int32_t seq_id, int32_t pos_max) const {
+bool common_spec_sidecar_mtp::truncate_state(int32_t seq_id, int32_t pos_max) const {
     return active() && pimpl->state_truncate_fn != nullptr &&
            pimpl->state_truncate_fn(seq_id, pos_max) == 0;
 }
 
-bool common_bridgespec_mtp_sidecar::commit_state(int32_t seq_id, int32_t pos_max, const float * hidden_device) const {
+bool common_spec_sidecar_mtp::commit_state(int32_t seq_id, int32_t pos_max, const float * hidden_device) const {
     return active() && pimpl->state_commit_fn != nullptr &&
            pimpl->state_commit_fn(seq_id, pos_max, hidden_device) == 0;
 }
 
-bool common_bridgespec_mtp_sidecar::rebase_state(int32_t seq_id, int32_t pos_min, int32_t pos_max, int32_t delta) const {
+bool common_spec_sidecar_mtp::rebase_state(int32_t seq_id, int32_t pos_min, int32_t pos_max, int32_t delta) const {
     return active() && pimpl->state_rebase_fn != nullptr &&
            pimpl->state_rebase_fn(seq_id, pos_min, pos_max, delta) == 0;
 }
 
-bool common_bridgespec_mtp_sidecar::attach_target_stream(void * stream, int32_t device) const {
+bool common_spec_sidecar_mtp::attach_target_stream(void * stream, int32_t device) const {
     return active() && pimpl->attach_stream_fn != nullptr &&
            pimpl->attach_stream_fn(stream, device) == 0;
 }
 
-int common_bridgespec_mtp_sidecar::catchup(int32_t seq_id, const int32_t * tokens, const int32_t * positions,
+int common_spec_sidecar_mtp::catchup(int32_t seq_id, const int32_t * tokens, const int32_t * positions,
         const float * hidden_rows, int count) const {
     return active() && pimpl->catchup_fn != nullptr
         ? pimpl->catchup_fn(seq_id, tokens, positions, hidden_rows, count) : -1;
 }
 
-int common_bridgespec_mtp_sidecar::catchup_device(int32_t seq_id, const int32_t * tokens, const int32_t * positions,
+int common_spec_sidecar_mtp::catchup_device(int32_t seq_id, const int32_t * tokens, const int32_t * positions,
         const float * hidden_rows_device, int count) const {
     return active() && pimpl->catchup_device_fn != nullptr
         ? pimpl->catchup_device_fn(seq_id, tokens, positions, hidden_rows_device, count) : -1;
 }
 
-int common_bridgespec_mtp_sidecar::draft(int32_t seq_id, int32_t last_token, int32_t past_tokens,
+int common_spec_sidecar_mtp::draft(int32_t seq_id, int32_t last_token, int32_t past_tokens,
         const float * hidden, int max_draft, int32_t * output_ids) const {
     return active() && pimpl->draft_fn != nullptr
         ? pimpl->draft_fn(seq_id, last_token, past_tokens, hidden, max_draft, output_ids) : -1;
 }
 
-int common_bridgespec_mtp_sidecar::draft_device(int32_t seq_id, int32_t last_token, int32_t past_tokens,
+int common_spec_sidecar_mtp::draft_device(int32_t seq_id, int32_t last_token, int32_t past_tokens,
         int max_draft, int32_t * output_ids) const {
     return active() && pimpl->draft_device_fn != nullptr
         ? pimpl->draft_device_fn(seq_id, last_token, past_tokens, max_draft, output_ids) : -1;
 }
 
-int common_bridgespec_mtp_sidecar::draft_stochastic(int32_t seq_id, int32_t last_token,
+int common_spec_sidecar_mtp::draft_stochastic(int32_t seq_id, int32_t last_token,
         int32_t past_tokens, const float * hidden, float temperature, float p_min,
         uint64_t rng_key, int max_draft, int32_t * output_ids,
         int32_t * dist_ids, float * dist_probs) const {
@@ -451,7 +451,7 @@ int common_bridgespec_mtp_sidecar::draft_stochastic(int32_t seq_id, int32_t last
                 temperature, p_min, rng_key, max_draft, output_ids, dist_ids, dist_probs) : -1;
 }
 
-int common_bridgespec_mtp_sidecar::draft_stochastic_device(int32_t seq_id, int32_t last_token,
+int common_spec_sidecar_mtp::draft_stochastic_device(int32_t seq_id, int32_t last_token,
         int32_t past_tokens, float temperature, float p_min, uint64_t rng_key,
         int max_draft, int32_t * output_ids, int32_t * dist_ids, float * dist_probs) const {
     return active() && pimpl->draft_stochastic_device_fn != nullptr
@@ -459,7 +459,7 @@ int common_bridgespec_mtp_sidecar::draft_stochastic_device(int32_t seq_id, int32
                 temperature, p_min, rng_key, max_draft, output_ids, dist_ids, dist_probs) : -1;
 }
 
-struct common_bridgespec_dflash_sidecar::impl {
+struct common_spec_sidecar_dflash::impl {
     void * handle = nullptr;
     bool active = false;
     state_size_fn_t state_size_fn = nullptr;
@@ -477,14 +477,14 @@ struct common_bridgespec_dflash_sidecar::impl {
     dflash_draft_stochastic_fn draft_stochastic_fn = nullptr;
 };
 
-common_bridgespec_dflash_sidecar::common_bridgespec_dflash_sidecar() : pimpl(new impl) {}
+common_spec_sidecar_dflash::common_spec_sidecar_dflash() : pimpl(new impl) {}
 
-common_bridgespec_dflash_sidecar::~common_bridgespec_dflash_sidecar() {
+common_spec_sidecar_dflash::~common_spec_sidecar_dflash() {
     // See the MTP loader destructor: the current ABI intentionally remains
     // loaded until process exit because it cannot release HIP state.
 }
 
-bool common_bridgespec_dflash_sidecar::load(const std::string & library_path,
+bool common_spec_sidecar_dflash::load(const std::string & library_path,
         const std::string & artifact_dir, int32_t encoded_width, int32_t block_size,
         int32_t n_seq, std::string & error) {
     if (active()) {
@@ -537,12 +537,12 @@ bool common_bridgespec_dflash_sidecar::load(const std::string & library_path,
         close_library(handle);
         return false;
     }
-    if (pimpl->stochastic_top_k_fn() != BRIDGESPEC_DFLASH_DRAFT_TOP_K) {
+    if (pimpl->stochastic_top_k_fn() != SPEC_SIDECAR_DFLASH_DRAFT_TOP_K) {
         error = "DFlash sidecar stochastic top-k mismatch";
         close_library(handle);
         return false;
     }
-    if (pimpl->state_size_fn() != static_cast<int>(sizeof(bridgespec_sidecar_state))) {
+    if (pimpl->state_size_fn() != static_cast<int>(sizeof(spec_sidecar_state))) {
         error = "DFlash sidecar state ABI size mismatch";
         close_library(handle);
         pimpl->state_size_fn = nullptr;
@@ -574,22 +574,22 @@ bool common_bridgespec_dflash_sidecar::load(const std::string & library_path,
     return true;
 }
 
-bool common_bridgespec_dflash_sidecar::active() const {
+bool common_spec_sidecar_dflash::active() const {
     return pimpl != nullptr && pimpl->active;
 }
 
-void common_bridgespec_dflash_sidecar::disable() {
+void common_spec_sidecar_dflash::disable() {
     if (pimpl != nullptr) {
         pimpl->active = false;
     }
 }
 
-bool common_bridgespec_dflash_sidecar::get_state(int32_t seq_id, std::vector<uint8_t> & data) const {
+bool common_spec_sidecar_dflash::get_state(int32_t seq_id, std::vector<uint8_t> & data) const {
     if (!active() || pimpl->state_get_fn == nullptr || pimpl->state_size_fn == nullptr) {
         return false;
     }
     const int size = pimpl->state_size_fn();
-    if (size != static_cast<int>(sizeof(bridgespec_sidecar_state))) {
+    if (size != static_cast<int>(sizeof(spec_sidecar_state))) {
         data.clear();
         return false;
     }
@@ -601,57 +601,57 @@ bool common_bridgespec_dflash_sidecar::get_state(int32_t seq_id, std::vector<uin
     return true;
 }
 
-bool common_bridgespec_dflash_sidecar::set_state(int32_t seq_id, const std::vector<uint8_t> & data) const {
+bool common_spec_sidecar_dflash::set_state(int32_t seq_id, const std::vector<uint8_t> & data) const {
     return active() && pimpl->state_set_fn != nullptr &&
-           data.size() == sizeof(bridgespec_sidecar_state) &&
+           data.size() == sizeof(spec_sidecar_state) &&
            data.size() <= static_cast<size_t>(std::numeric_limits<int>::max()) &&
            pimpl->state_set_fn(seq_id, data.data(), static_cast<int>(data.size())) == 0;
 }
 
-bool common_bridgespec_dflash_sidecar::reset_state(int32_t seq_id) const {
+bool common_spec_sidecar_dflash::reset_state(int32_t seq_id) const {
     return active() && pimpl->state_reset_fn != nullptr && pimpl->state_reset_fn(seq_id) == 0;
 }
 
-bool common_bridgespec_dflash_sidecar::truncate_state(int32_t seq_id, int32_t pos_max) const {
+bool common_spec_sidecar_dflash::truncate_state(int32_t seq_id, int32_t pos_max) const {
     return active() && pimpl->state_truncate_fn != nullptr &&
            pimpl->state_truncate_fn(seq_id, pos_max) == 0;
 }
 
-bool common_bridgespec_dflash_sidecar::commit_state(int32_t seq_id, int32_t pos_max) const {
+bool common_spec_sidecar_dflash::commit_state(int32_t seq_id, int32_t pos_max) const {
     return active() && pimpl->state_commit_fn != nullptr &&
            pimpl->state_commit_fn(seq_id, pos_max) == 0;
 }
 
-bool common_bridgespec_dflash_sidecar::rebase_state(int32_t seq_id, int32_t pos_min, int32_t pos_max, int32_t delta) const {
+bool common_spec_sidecar_dflash::rebase_state(int32_t seq_id, int32_t pos_min, int32_t pos_max, int32_t delta) const {
     return active() && pimpl->state_rebase_fn != nullptr &&
            pimpl->state_rebase_fn(seq_id, pos_min, pos_max, delta) == 0;
 }
 
-bool common_bridgespec_dflash_sidecar::attach_target_stream(void * stream, int32_t device) const {
+bool common_spec_sidecar_dflash::attach_target_stream(void * stream, int32_t device) const {
     return active() && pimpl->attach_stream_fn != nullptr &&
            pimpl->attach_stream_fn(stream, device) == 0;
 }
 
-int common_bridgespec_dflash_sidecar::chunk(int32_t seq_id, const int32_t * positions,
+int common_spec_sidecar_dflash::chunk(int32_t seq_id, const int32_t * positions,
         const float * target_features, int count) const {
     return active() && pimpl->chunk_fn != nullptr
         ? pimpl->chunk_fn(seq_id, positions, target_features, count) : -1;
 }
 
-int common_bridgespec_dflash_sidecar::chunk_device(int32_t seq_id, const int32_t * positions,
+int common_spec_sidecar_dflash::chunk_device(int32_t seq_id, const int32_t * positions,
         const void * const * target_layer_features_device, int n_layers, int layer_width, int count) const {
     return active() && pimpl->chunk_device_fn != nullptr
         ? pimpl->chunk_device_fn(seq_id, positions, target_layer_features_device,
                                  n_layers, layer_width, count) : -1;
 }
 
-int common_bridgespec_dflash_sidecar::draft(int32_t seq_id, int32_t last_token, int32_t past_tokens,
+int common_spec_sidecar_dflash::draft(int32_t seq_id, int32_t last_token, int32_t past_tokens,
         int32_t * output_ids) const {
     return active() && pimpl->draft_fn != nullptr
         ? pimpl->draft_fn(seq_id, last_token, past_tokens, output_ids) : -1;
 }
 
-int common_bridgespec_dflash_sidecar::draft_stochastic(int32_t seq_id, int32_t last_token,
+int common_spec_sidecar_dflash::draft_stochastic(int32_t seq_id, int32_t last_token,
         int32_t past_tokens, float temperature, float p_min, uint64_t rng_key,
         int max_draft, int32_t * output_ids, int32_t * dist_ids, float * dist_probs) const {
     return active() && pimpl->draft_stochastic_fn != nullptr

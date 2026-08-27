@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: MIT
 #include "artifact_manifest.h"
-#include "bridgespec_sidecar.h"
-#include "../include/bridgespec/sidecar_abi.h"
+#include "spec_sidecar.h"
+#include "../include/spec_sidecar/sidecar_abi.h"
 
 #include <cstddef>
 #include <cstdio>
 #include <string>
 #include <vector>
 
-using bridgespec_artifact::ManifestParser;
-using bridgespec_artifact::TensorDesc;
+using spec_sidecar_artifact::ManifestParser;
+using spec_sidecar_artifact::TensorDesc;
 
 static bool parses(const char * json, std::vector<TensorDesc> & tensors) {
     const std::string text(json);
@@ -26,22 +26,22 @@ static int require(bool condition, const char * label) {
 
 int main() {
     int failures = 0;
-    failures += require(sizeof(bridgespec_sidecar_state) == 24,
+    failures += require(sizeof(spec_sidecar_state) == 24,
                         "sidecar state ABI is a fixed 24-byte record");
-    failures += require(BRIDGESPEC_STATE_VERSION == 1 &&
-                        BRIDGESPEC_STATE_KIND_MTP == 1 && BRIDGESPEC_STATE_KIND_DFLASH == 2,
+    failures += require(SPEC_SIDECAR_STATE_VERSION == 1 &&
+                        SPEC_SIDECAR_STATE_KIND_MTP == 1 && SPEC_SIDECAR_STATE_KIND_DFLASH == 2,
                         "sidecar state ABI constants are stable");
-    failures += require(offsetof(bridgespec_sidecar_state, pos_min) == 8 &&
-                        offsetof(bridgespec_sidecar_state, pos_max) == 12 &&
-                        offsetof(bridgespec_sidecar_state, epoch) == 16,
+    failures += require(offsetof(spec_sidecar_state, pos_min) == 8 &&
+                        offsetof(spec_sidecar_state, pos_max) == 12 &&
+                        offsetof(spec_sidecar_state, epoch) == 16,
                         "sidecar state ABI field offsets are stable");
-    failures += require(BRIDGESPEC_MTP_DRAFT_TOP_K == 32 &&
-                        BRIDGESPEC_DFLASH_DRAFT_TOP_K == 16,
+    failures += require(SPEC_SIDECAR_MTP_DRAFT_TOP_K == 32 &&
+                        SPEC_SIDECAR_DFLASH_DRAFT_TOP_K == 16,
                         "sidecar stochastic top-k constants are stable");
-    const double u0 = bridgespec_stochastic_uniform(UINT64_C(1234), 0);
+    const double u0 = spec_sidecar_stochastic_uniform(UINT64_C(1234), 0);
     failures += require(u0 >= 0.0 && u0 < 1.0 &&
-                        u0 == bridgespec_stochastic_uniform(UINT64_C(1234), 0) &&
-                        u0 != bridgespec_stochastic_uniform(UINT64_C(1234), 1),
+                        u0 == spec_sidecar_stochastic_uniform(UINT64_C(1234), 0) &&
+                        u0 != spec_sidecar_stochastic_uniform(UINT64_C(1234), 1),
                         "sidecar proposal RNG is deterministic and bounded");
 
     std::vector<TensorDesc> tensors;
@@ -51,7 +51,7 @@ int main() {
     failures += require(parses(valid, tensors), "valid manifest parses");
     std::string error;
     failures += require(tensors.size() == 1 &&
-                        bridgespec_artifact::validate_blob_layout(tensors, 8, error),
+                        spec_sidecar_artifact::validate_blob_layout(tensors, 8, error),
                         "valid contiguous layout passes");
 
     tensors.clear();
@@ -96,7 +96,7 @@ int main() {
         "{\"name\":\"a\",\"dtype\":\"0\",\"shape\":[1],\"offset\":4,\"nbytes\":4}]}",
         tensors), "duplicate-name fixture parses structurally");
     error.clear();
-    failures += require(!bridgespec_artifact::validate_blob_layout(tensors, 8, error),
+    failures += require(!spec_sidecar_artifact::validate_blob_layout(tensors, 8, error),
                         "duplicate tensor name is rejected by layout validation");
 
     tensors.clear();
@@ -105,30 +105,30 @@ int main() {
         "{\"name\":\"a\",\"dtype\":\"0\",\"shape\":[1],\"offset\":4,\"nbytes\":4}]}",
         tensors), "gapped-layout fixture parses structurally");
     error.clear();
-    failures += require(!bridgespec_artifact::validate_blob_layout(tensors, 8, error),
+    failures += require(!spec_sidecar_artifact::validate_blob_layout(tensors, 8, error),
                         "gapped tensor range is rejected");
 
     error.clear();
-    failures += require(bridgespec_artifact::validate_remap({0, 3, 2}, 4, error),
+    failures += require(spec_sidecar_artifact::validate_remap({0, 3, 2}, 4, error),
                         "unique in-range remap passes");
     error.clear();
-    failures += require(!bridgespec_artifact::validate_remap({0, 3, 3}, 4, error),
+    failures += require(!spec_sidecar_artifact::validate_remap({0, 3, 3}, 4, error),
                         "duplicate remap id is rejected");
     error.clear();
-    failures += require(!bridgespec_artifact::validate_remap({0, 4}, 4, error),
+    failures += require(!spec_sidecar_artifact::validate_remap({0, 4}, 4, error),
                         "out-of-range remap id is rejected");
     error.clear();
-    failures += require(!bridgespec_artifact::validate_remap({0, -1}, 4, error),
+    failures += require(!spec_sidecar_artifact::validate_remap({0, -1}, 4, error),
                         "negative remap id is rejected");
 
-    common_bridgespec_mtp_sidecar mtp;
+    common_spec_sidecar_mtp mtp;
     error.clear();
     failures += require(!mtp.load("relative-sidecar.so", "/absolute/artifacts", "/absolute/ids.bin", 5120, 40960, 1, error) &&
                         error.find("absolute path") != std::string::npos,
                         "MTP loader rejects relative library paths");
     failures += require(!mtp.active(), "MTP loader remains inactive after path rejection");
 
-    common_bridgespec_dflash_sidecar dflash;
+    common_spec_sidecar_dflash dflash;
     error.clear();
     failures += require(!dflash.load("relative-sidecar.so", "/absolute/artifacts", 25600, 8, 1, error) &&
                         error.find("absolute path") != std::string::npos,

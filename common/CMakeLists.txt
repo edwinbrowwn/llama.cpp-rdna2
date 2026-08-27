@@ -100,8 +100,8 @@ add_library(${TARGET}
     sampling.h
     speculative.cpp
     speculative.h
-    bridgespec_sidecar.cpp
-    bridgespec_sidecar.h
+    spec_sidecar.cpp
+    spec_sidecar.h
     subproc.cpp
     subproc.h
     trie.cpp

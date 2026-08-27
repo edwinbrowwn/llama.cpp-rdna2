@@ -9,8 +9,8 @@
 #include "ngram-map.h"
 #include "ngram-mod.h"
 #include "sampling.h"
-#include "bridgespec_sidecar.h"
-#include "../include/bridgespec/sidecar_abi.h"
+#include "spec_sidecar.h"
+#include "../include/spec_sidecar/sidecar_abi.h"
 
 #include "../src/llama-ext.h" // staging API: llama_set_embeddings_nextn / llama_get_embeddings_nextn_ith (used by MTP)
 
@@ -40,7 +40,14 @@ static bool common_speculative_rdna2_auto_enabled() {
             std::strcmp(value, "false") != 0);
 }
 
-static uint64_t common_bridgespec_stochastic_key(uint32_t seed, llama_seq_id seq_id,
+// Sidecar acceleration is an explicit experimental opt-in. Artifact paths or
+// libraries in the environment must never activate it by themselves.
+static bool common_speculative_sidecar_enabled() {
+    const char * value = std::getenv("SPEC_SIDECAR");
+    return value != nullptr && std::strcmp(value, "1") == 0;
+}
+
+static uint64_t common_spec_sidecar_stochastic_key(uint32_t seed, llama_seq_id seq_id,
         llama_pos n_past, uint32_t kind) {
     if (seed == LLAMA_DEFAULT_SEED) {
         seed = (uint32_t) std::chrono::high_resolution_clock::now().time_since_epoch().count();
@@ -49,10 +56,10 @@ static uint64_t common_bridgespec_stochastic_key(uint32_t seed, llama_seq_id seq
     key ^= (uint64_t) (uint32_t) seq_id * UINT64_C(0x632be59bd9b4e019);
     key ^= (uint64_t) (uint32_t) n_past * UINT64_C(0x8cb92ba72f3d8dd7);
     key ^= (uint64_t) kind * UINT64_C(0x9e3779b97f4a7c15);
-    return bridgespec_stochastic_mix64(key);
+    return spec_sidecar_stochastic_mix64(key);
 }
 
-static bool common_bridgespec_validate_distribution(const int32_t * ids, const float * probs,
+static bool common_spec_sidecar_validate_distribution(const int32_t * ids, const float * probs,
         int count, int32_t n_vocab, common_speculative_token_dist & dist) {
     if (ids == nullptr || probs == nullptr || count <= 0) {
         return false;
@@ -972,7 +979,7 @@ struct common_speculative_impl_draft_eagle3 : public common_speculative_impl {
 };
 
 // DFlash: block-diffusion drafting with a draft-side KV cache injection
-static constexpr int32_t BRIDGESPEC_DFLASH_TARGET_LAYER_IDS[] = { 6, 20, 34, 48, 62 };
+static constexpr int32_t SPEC_SIDECAR_DFLASH_TARGET_LAYER_IDS[] = { 6, 20, 34, 48, 62 };
 
 struct common_speculative_impl_draft_dflash : public common_speculative_impl {
     common_params_speculative_draft params;
@@ -1012,7 +1019,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
     std::vector<llama_pos> verify_pos_first;
     std::vector<int32_t> verify_rows;
 
-    common_bridgespec_dflash_sidecar sidecar;
+    common_spec_sidecar_dflash sidecar;
     bool sidecar_target_only = false; // runtime failure or unsupported sampling mode
 
     common_speculative_impl_draft_dflash(const common_params_speculative & params, uint32_t n_seq,
@@ -1035,9 +1042,9 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
             target_layer_ids   = llama_model_target_layer_ids  (model_dft);
             target_layer_ids_n = llama_model_target_layer_ids_n(model_dft);
         } else {
-            target_layer_ids   = BRIDGESPEC_DFLASH_TARGET_LAYER_IDS;
-            target_layer_ids_n = sizeof(BRIDGESPEC_DFLASH_TARGET_LAYER_IDS) /
-                    sizeof(BRIDGESPEC_DFLASH_TARGET_LAYER_IDS[0]);
+            target_layer_ids   = SPEC_SIDECAR_DFLASH_TARGET_LAYER_IDS;
+            target_layer_ids_n = sizeof(SPEC_SIDECAR_DFLASH_TARGET_LAYER_IDS) /
+                    sizeof(SPEC_SIDECAR_DFLASH_TARGET_LAYER_IDS[0]);
         }
         GGML_ASSERT(target_layer_ids_n > 0 && "DFlash model has no target_layer_ids");
 
@@ -1061,7 +1068,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                 is_dflash2 = selector_top_k > 0;
             }
         } else if (sidecar_only) {
-            selector_top_k = BRIDGESPEC_DFLASH_DRAFT_TOP_K;
+            selector_top_k = SPEC_SIDECAR_DFLASH_DRAFT_TOP_K;
             is_dflash2 = true;
         }
         mask_token_id = model_dft != nullptr
@@ -1083,7 +1090,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
             this->params.n_min = std::min(this->params.n_min, n_draft_max);
         }
 
-        // BridgeSpec's DFlash DLL is selected only after the preflight probe.
+        // speculative sidecar's DFlash DLL is selected only after the preflight probe.
         // A sidecar-only construction has no native draft context to fall back
         // to if HIP initialization fails, so it enters target-only mode.
         if (sidecar_only && is_dflash2) {
@@ -1560,15 +1567,15 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                 std::vector<int32_t> dist_ids;
                 std::vector<float> dist_probs;
                 if (stochastic) {
-                    dist_ids.resize((size_t) limit * BRIDGESPEC_DFLASH_DRAFT_TOP_K, -1);
-                    dist_probs.resize((size_t) limit * BRIDGESPEC_DFLASH_DRAFT_TOP_K, 0.0f);
+                    dist_ids.resize((size_t) limit * SPEC_SIDECAR_DFLASH_DRAFT_TOP_K, -1);
+                    dist_probs.resize((size_t) limit * SPEC_SIDECAR_DFLASH_DRAFT_TOP_K, 0.0f);
                 } else if (dp.dists != nullptr) {
                     dp.dists->clear();
                 }
                 const int n = stochastic
                         ? sidecar.draft_stochastic(seq_id, dp.id_last, (int32_t) dp.n_past,
                                 dp.temperature, params.p_min,
-                                common_bridgespec_stochastic_key(dp.seed, seq_id, dp.n_past, 2),
+                                common_spec_sidecar_stochastic_key(dp.seed, seq_id, dp.n_past, 2),
                                 limit, ids, dist_ids.data(), dist_probs.data())
                         : sidecar.draft(seq_id, dp.id_last, (int32_t) dp.n_past, ids);
                 if (n < 0 || n > (stochastic ? limit : 7)) {
@@ -1597,10 +1604,10 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                     result.push_back((llama_token) ids[i]);
                     if (stochastic) {
                         common_speculative_token_dist dist;
-                        if (!common_bridgespec_validate_distribution(
-                                    dist_ids.data() + (size_t) i * BRIDGESPEC_DFLASH_DRAFT_TOP_K,
-                                    dist_probs.data() + (size_t) i * BRIDGESPEC_DFLASH_DRAFT_TOP_K,
-                                    BRIDGESPEC_DFLASH_DRAFT_TOP_K, n_vocab, dist)) {
+                        if (!common_spec_sidecar_validate_distribution(
+                                    dist_ids.data() + (size_t) i * SPEC_SIDECAR_DFLASH_DRAFT_TOP_K,
+                                    dist_probs.data() + (size_t) i * SPEC_SIDECAR_DFLASH_DRAFT_TOP_K,
+                                    SPEC_SIDECAR_DFLASH_DRAFT_TOP_K, n_vocab, dist)) {
                             result.clear();
                             dp.dists->clear();
                             sidecar.disable();
@@ -1888,7 +1895,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
 struct common_speculative_impl_draft_mtp : public common_speculative_impl {
     common_params_speculative_draft params; // reuses the draft-model params slot (ctx_tgt/ctx_dft)
 
-    common_bridgespec_mtp_sidecar sidecar;
+    common_spec_sidecar_mtp sidecar;
     bool sidecar_target_only = false; // runtime failure or unsupported sampling mode
     std::vector<const float *> verify_h_device;
     std::vector<size_t> verify_h_device_stride;
@@ -2423,8 +2430,8 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                 std::vector<int32_t> dist_ids;
                 std::vector<float> dist_probs;
                 if (stochastic) {
-                    dist_ids.resize((size_t) limit * BRIDGESPEC_MTP_DRAFT_TOP_K, -1);
-                    dist_probs.resize((size_t) limit * BRIDGESPEC_MTP_DRAFT_TOP_K, 0.0f);
+                    dist_ids.resize((size_t) limit * SPEC_SIDECAR_MTP_DRAFT_TOP_K, -1);
+                    dist_probs.resize((size_t) limit * SPEC_SIDECAR_MTP_DRAFT_TOP_K, 0.0f);
                 } else if (dp.dists != nullptr) {
                     dp.dists->clear();
                 }
@@ -2432,11 +2439,11 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                         ? (verify_h_device[seq_id] != nullptr
                             ? sidecar.draft_stochastic_device(seq_id, dp.id_last, (int32_t) dp.n_past,
                                     dp.temperature, params.p_min,
-                                    common_bridgespec_stochastic_key(dp.seed, seq_id, dp.n_past, 1),
+                                    common_spec_sidecar_stochastic_key(dp.seed, seq_id, dp.n_past, 1),
                                     limit, ids.data(), dist_ids.data(), dist_probs.data())
                             : sidecar.draft_stochastic(seq_id, dp.id_last, (int32_t) dp.n_past,
                                     pending_h[seq_id].data(), dp.temperature, params.p_min,
-                                    common_bridgespec_stochastic_key(dp.seed, seq_id, dp.n_past, 1),
+                                    common_spec_sidecar_stochastic_key(dp.seed, seq_id, dp.n_past, 1),
                                     limit, ids.data(), dist_ids.data(), dist_probs.data()))
                         : (verify_h_device[seq_id] != nullptr
                             ? sidecar.draft_device(seq_id, dp.id_last, (int32_t) dp.n_past, limit, ids.data())
@@ -2468,10 +2475,10 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                     result.push_back((llama_token) ids[i]);
                     if (stochastic) {
                         common_speculative_token_dist dist;
-                        if (!common_bridgespec_validate_distribution(
-                                    dist_ids.data() + (size_t) i * BRIDGESPEC_MTP_DRAFT_TOP_K,
-                                    dist_probs.data() + (size_t) i * BRIDGESPEC_MTP_DRAFT_TOP_K,
-                                    BRIDGESPEC_MTP_DRAFT_TOP_K, n_vocab, dist)) {
+                        if (!common_spec_sidecar_validate_distribution(
+                                    dist_ids.data() + (size_t) i * SPEC_SIDECAR_MTP_DRAFT_TOP_K,
+                                    dist_probs.data() + (size_t) i * SPEC_SIDECAR_MTP_DRAFT_TOP_K,
+                                    SPEC_SIDECAR_MTP_DRAFT_TOP_K, n_vocab, dist)) {
                             result.clear();
                             dp.dists->clear();
                             sidecar.disable();
@@ -3378,6 +3385,9 @@ static bool common_speculative_target_file_candidate(const std::string & path) {
 
 bool common_speculative_sidecar_candidate(const common_params_speculative & params,
         const std::string & target_model_path, uint32_t n_seq) {
+    if (!common_speculative_sidecar_enabled()) {
+        return false;
+    }
     if (!common_speculative_target_file_candidate(target_model_path)) {
         return false;
     }
@@ -3396,7 +3406,7 @@ bool common_speculative_sidecar_candidate(const common_params_speculative & para
             const char * ids_env = std::getenv("LLAMA_DRAFT_HEAD_IDS");
             const std::string ids = ids_env != nullptr
                     ? ids_env : std::string(weights) + "/draft_head_ids.bin";
-            if (common_bridgespec_mtp_probe(library, weights, ids, 5120, 40960,
+            if (common_spec_sidecar_mtp_probe(library, weights, ids, 5120, 40960,
                     n_probe_seq, error)) {
                 return true;
             }
@@ -3406,7 +3416,7 @@ bool common_speculative_sidecar_candidate(const common_params_speculative & para
         const char * library = std::getenv("LLAMA_SPEC_HIP_DFLASH");
         const char * artifacts = std::getenv("LLAMA_SPEC_HIP_DFLASH_DIR");
         if (library != nullptr && artifacts != nullptr &&
-                common_bridgespec_dflash_probe(library, artifacts, 25600, 8,
+                common_spec_sidecar_dflash_probe(library, artifacts, 25600, 8,
                         n_probe_seq, error)) {
             return true;
         }
@@ -3417,6 +3427,12 @@ bool common_speculative_sidecar_candidate(const common_params_speculative & para
 common_speculative_type common_speculative_sidecar_preflight(
         common_params_speculative & params, const llama_model * model_tgt,
         uint32_t n_seq, std::string & error) {
+    if (!common_speculative_sidecar_enabled()) {
+        params.draft.sidecar_only = false;
+        params.draft.sidecar_type = COMMON_SPECULATIVE_TYPE_NONE;
+        error.clear();
+        return COMMON_SPECULATIVE_TYPE_NONE;
+    }
     params.draft.sidecar_only = false;
     params.draft.sidecar_type = COMMON_SPECULATIVE_TYPE_NONE;
     error.clear();
@@ -3447,7 +3463,7 @@ common_speculative_type common_speculative_sidecar_preflight(
             const char * ids_env = std::getenv("LLAMA_DRAFT_HEAD_IDS");
             const std::string ids = ids_env != nullptr
                     ? ids_env : std::string(weights) + "/draft_head_ids.bin";
-            if (common_bridgespec_mtp_probe(library, weights, ids, 5120, 40960,
+            if (common_spec_sidecar_mtp_probe(library, weights, ids, 5120, 40960,
                     (int32_t) n_seq, probe_error)) {
                 params.draft.sidecar_only = true;
                 params.draft.sidecar_type = COMMON_SPECULATIVE_TYPE_DRAFT_MTP;
@@ -3460,7 +3476,7 @@ common_speculative_type common_speculative_sidecar_preflight(
         const char * library = std::getenv("LLAMA_SPEC_HIP_DFLASH");
         const char * artifacts = std::getenv("LLAMA_SPEC_HIP_DFLASH_DIR");
         if (library != nullptr && artifacts != nullptr &&
-                common_bridgespec_dflash_probe(library, artifacts, 25600, 8,
+                common_spec_sidecar_dflash_probe(library, artifacts, 25600, 8,
                         (int32_t) n_seq, probe_error)) {
             params.draft.sidecar_only = true;
             params.draft.sidecar_type = COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH;
