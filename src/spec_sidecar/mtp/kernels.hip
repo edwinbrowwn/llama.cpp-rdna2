@@ -8,6 +8,7 @@
 //   sliced head 40960 rows, all mats Q4_0, norms f32, rms_eps 1e-6, freq_base 1e7.
 //   attn_q output is q/gate interleaved per head: [q 256 | gate 256] x 24.
 #include <hip/hip_runtime.h>
+#include <rocprim/block/block_radix_sort.hpp>
 #include <hip/hip_fp16.h>
 #include <cstdio>
 #include <cstdint>
@@ -301,93 +302,83 @@ __global__ void argmax_final(const float * pmax, const int * pidx, int nparts, i
     out[0] = token >= 0 && token < vocab ? token : -1;
 }
 
-// Select the top MTP_DRAFT_TOP_K logits without returning the
-// sliced head to the host. Each partition keeps its local top-k; the final
-// one-thread merge is exact because every global top-k item is present in its
-// partition's local top-k.
+// Convert a non-NaN float and original row index into one descending radix key.
+// The upper word preserves IEEE float order; the lower word makes smaller row
+// indices win exact ties, matching the scalar reference implementation.
+__device__ __forceinline__ uint64_t topk_radix_key(float value, int index) {
+    if (index < 0 || value != value) {
+        return 0;
+    }
+    // IEEE +0 and -0 compare equal in the scalar reference; canonicalize the
+    // sign bit before radix ordering so the original index remains the tie-break.
+    if (value == 0.0f) value = 0.0f;
+    const uint32_t bits = __float_as_uint(value);
+    const uint32_t ordered = (bits & 0x80000000u) ? ~bits : (bits ^ 0x80000000u);
+    return (static_cast<uint64_t>(ordered) << 32) |
+            static_cast<uint32_t>(0xffffffffu - static_cast<uint32_t>(index));
+}
+
+// Each partition sorts 2,048 rows in registers/shared memory and publishes its
+// first 32. Every global top-32 row must occur in one partition's local top 32.
+// This replaces the old 32 serial winner reductions (256 barriers per block).
 __global__ void topk_partial(const float * __restrict__ x, int n,
                              float * __restrict__ pvals, int * __restrict__ pidx) {
-    __shared__ float sm[256];
-    __shared__ int si[256];
-    __shared__ int selected[MTP_DRAFT_TOP_K];
-    const int tid = threadIdx.x;
+    using sort_type = rocprim::block_radix_sort<uint64_t, 256, 8, int>;
+    __shared__ typename sort_type::storage_type storage;
+    uint64_t keys[8];
+    int indices[8];
     const int base = blockIdx.x * blockDim.x * 8;
-
-    if (tid < MTP_DRAFT_TOP_K) {
-        selected[tid] = -1;
+    #pragma unroll
+    for (int k = 0; k < 8; ++k) {
+        const int i = base + k * blockDim.x + threadIdx.x;
+        const float value = i < n ? x[i] : -INFINITY;
+        indices[k] = i < n ? i : -1;
+        keys[k] = topk_radix_key(value, indices[k]);
     }
-    __syncthreads();
-
-    for (int slot = 0; slot < MTP_DRAFT_TOP_K; ++slot) {
-        float best = -1e30f;
-        int best_i = -1;
-        for (int k = 0; k < 8; ++k) {
-            const int i = base + k * blockDim.x + tid;
-            if (i >= n) {
-                continue;
-            }
-            bool already_selected = false;
-            for (int j = 0; j < slot; ++j) {
-                already_selected = already_selected || selected[j] == i;
-            }
-            const float value = x[i];
-            if (!already_selected && value == value &&
-                    (best_i < 0 || value > best || (value == best && i < best_i))) {
-                best = value;
-                best_i = i;
-            }
+    sort_type().sort_desc(keys, indices, storage);
+    #pragma unroll
+    for (int k = 0; k < 8; ++k) {
+        const int rank = static_cast<int>(threadIdx.x) * 8 + k;
+        if (rank < MTP_DRAFT_TOP_K) {
+            const int index = indices[k];
+            pidx[blockIdx.x * MTP_DRAFT_TOP_K + rank] = index;
+            pvals[blockIdx.x * MTP_DRAFT_TOP_K + rank] = index >= 0 ? x[index] : -INFINITY;
         }
-        sm[tid] = best;
-        si[tid] = best_i;
-        __syncthreads();
-        for (int off = blockDim.x / 2; off > 0; off >>= 1) {
-            if (tid < off && si[tid + off] >= 0 &&
-                    (si[tid] < 0 || sm[tid + off] > sm[tid] ||
-                     (sm[tid + off] == sm[tid] && si[tid + off] < si[tid]))) {
-                sm[tid] = sm[tid + off];
-                si[tid] = si[tid + off];
-            }
-            __syncthreads();
-        }
-        if (tid == 0) {
-            selected[slot] = si[0];
-            pvals[blockIdx.x * MTP_DRAFT_TOP_K + slot] = sm[0];
-            pidx[blockIdx.x * MTP_DRAFT_TOP_K + slot] = si[0];
-        }
-        __syncthreads();
     }
 }
 
+// At most 20 partitions are used for the 40,960-row head, so one 256-thread
+// block with three items per thread sorts all 640 local candidates.
 __global__ void topk_final(const float * __restrict__ pvals, const int * __restrict__ pidx,
                            int nparts, const int * __restrict__ remap, int vocab,
                            int * __restrict__ out_ids, float * __restrict__ out_vals) {
-    if (blockIdx.x != 0 || threadIdx.x != 0) {
-        return;
+    using sort_type = rocprim::block_radix_sort<uint64_t, 256, 3, int>;
+    __shared__ typename sort_type::storage_type storage;
+    uint64_t keys[3];
+    int slots[3];
+    const int count = nparts * MTP_DRAFT_TOP_K;
+    #pragma unroll
+    for (int k = 0; k < 3; ++k) {
+        const int slot = static_cast<int>(threadIdx.x) * 3 + k;
+        const int index = slot < count ? pidx[slot] : -1;
+        const float value = slot < count ? pvals[slot] : -INFINITY;
+        slots[k] = slot < count ? slot : -1;
+        keys[k] = topk_radix_key(value, index);
     }
-    int selected[MTP_DRAFT_TOP_K];
-    for (int slot = 0; slot < MTP_DRAFT_TOP_K; ++slot) {
-        float best = -1e30f;
-        int best_i = -1;
-        for (int i = 0; i < nparts * MTP_DRAFT_TOP_K; ++i) {
-            const int candidate = pidx[i];
-            const float value = pvals[i];
-            bool already_selected = false;
-            for (int j = 0; j < slot; ++j) {
-                already_selected = already_selected || selected[j] == candidate;
+    sort_type().sort_desc(keys, slots, storage);
+    #pragma unroll
+    for (int k = 0; k < 3; ++k) {
+        const int rank = static_cast<int>(threadIdx.x) * 3 + k;
+        if (rank < MTP_DRAFT_TOP_K) {
+            const int slot = slots[k];
+            const int index = slot >= 0 ? pidx[slot] : -1;
+            out_vals[rank] = slot >= 0 ? pvals[slot] : -INFINITY;
+            if (index < 0) {
+                out_ids[rank] = -1;
+            } else {
+                const int token = remap ? remap[index] : index;
+                out_ids[rank] = token >= 0 && token < vocab ? token : -1;
             }
-            if (!already_selected && candidate >= 0 && value == value &&
-                    (best_i < 0 || value > best || (value == best && candidate < best_i))) {
-                best = value;
-                best_i = candidate;
-            }
-        }
-        selected[slot] = best_i;
-        out_vals[slot] = best;
-        if (best_i < 0) {
-            out_ids[slot] = -1;
-        } else {
-            const int token = remap ? remap[best_i] : best_i;
-            out_ids[slot] = token >= 0 && token < vocab ? token : -1;
         }
     }
 }
