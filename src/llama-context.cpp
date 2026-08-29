@@ -970,18 +970,47 @@ bool llama_context::get_embeddings_nextn_device(llama_device_view & view) const 
     view = {};
 #if defined(GGML_USE_HIP)
     if (!device_views_valid || !embd_nextn_device.valid || embd_nextn_device.tensor == nullptr ||
-            embd_nextn_device.backend == nullptr || !ggml_backend_is_cuda(embd_nextn_device.backend)) {
+            embd_nextn_device.backend == nullptr) {
         return false;
     }
-    const auto * tensor = embd_nextn_device.tensor;
-    if (tensor->type != GGML_TYPE_F32) {
+    const ggml_tensor * tensor = embd_nextn_device.tensor;
+    ggml_backend_t backend = embd_nextn_device.backend;
+    ggml_tensor * simple_tensor = nullptr;
+    const auto backend_dev = ggml_backend_get_device(backend);
+    const bool is_meta = backend_dev != nullptr &&
+            ggml_backend_dev_type(backend_dev) == GGML_BACKEND_DEVICE_TYPE_META;
+    if (!ggml_backend_is_cuda(backend) && !is_meta) {
+        return false;
+    }
+    if (is_meta) {
+        // The Meta output is normally mirrored across the participating HIP
+        // backends. Select the last full-width shard, which keeps the view on
+        // the target's final output device while rejecting split tensors that
+        // cannot be consumed as one contiguous hidden row.
+        for (size_t i = ggml_backend_meta_n_backends(backend); i-- > 0;) {
+            ggml_backend_t candidate_backend = ggml_backend_meta_simple_backend(backend, i);
+            if (!ggml_backend_is_cuda(candidate_backend) ||
+                    !ggml_backend_meta_get_simple_tensor_view(
+                        backend, tensor, i, &simple_tensor) ||
+                    simple_tensor == nullptr || simple_tensor->type != GGML_TYPE_F32 ||
+                    simple_tensor->ne[0] != tensor->ne[0] ||
+                    simple_tensor->ne[1] < (int64_t) embd_nextn_device.n_rows) {
+                simple_tensor = nullptr;
+                continue;
+            }
+            tensor = simple_tensor;
+            backend = candidate_backend;
+            break;
+        }
+    }
+    if (!ggml_backend_is_cuda(backend) || tensor == nullptr || tensor->type != GGML_TYPE_F32) {
         return false;
     }
     view.data       = tensor->data;
     view.row_stride = tensor->nb[1];
     view.n_rows     = embd_nextn_device.n_rows;
-    view.device     = ggml_backend_cuda_get_device(embd_nextn_device.backend);
-    view.stream     = ggml_backend_cuda_get_stream(embd_nextn_device.backend);
+    view.device     = ggml_backend_cuda_get_device(backend);
+    view.stream     = ggml_backend_cuda_get_stream(backend);
     return view.data != nullptr && view.row_stride >= ggml_row_size(tensor->type, tensor->ne[0]) &&
            view.n_rows > 0 && view.stream != nullptr && view.device >= 0;
 #else
@@ -1997,7 +2026,10 @@ int llama_context::decode(const llama_batch & batch_inp) {
             ggml_backend_t backend_h = ggml_backend_sched_get_tensor_backend(sched.get(), t_h_nextn);
             if (backend_h != nullptr) {
 #if defined(GGML_USE_HIP)
-                if (ggml_backend_is_cuda(backend_h)) {
+                const auto backend_dev = ggml_backend_get_device(backend_h);
+                const bool is_meta = backend_dev != nullptr &&
+                        ggml_backend_dev_type(backend_dev) == GGML_BACKEND_DEVICE_TYPE_META;
+                if (ggml_backend_is_cuda(backend_h) || is_meta) {
                     embd_nextn_device = { t_h_nextn, backend_h, ubatch.n_tokens, true };
                 }
 #endif

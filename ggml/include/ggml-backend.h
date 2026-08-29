@@ -69,6 +69,15 @@ extern "C" {
     GGML_API bool                           ggml_backend_buffer_is_meta       (ggml_backend_buffer_t buffer);
     GGML_API struct ggml_tensor *           ggml_backend_meta_get_simple_tensor(const struct ggml_tensor * tensor, size_t index);
 
+    // Access the concrete backend/tensor shard for a compute tensor owned by a
+    // Meta backend. This is used by integrations that can consume a mirrored
+    // device tensor directly without materializing it through the host.
+    GGML_API size_t                         ggml_backend_meta_n_backends      (ggml_backend_t meta_backend);
+    GGML_API ggml_backend_t                 ggml_backend_meta_simple_backend  (ggml_backend_t meta_backend, size_t index);
+    GGML_API bool                           ggml_backend_meta_get_simple_tensor_view(
+            ggml_backend_t meta_backend, const struct ggml_tensor * tensor,
+            size_t index, struct ggml_tensor ** simple_tensor);
+
     // tensor copy between different backends
     GGML_API void ggml_backend_tensor_copy(const struct ggml_tensor * src, struct ggml_tensor * dst);
 

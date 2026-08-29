@@ -132,6 +132,12 @@ target_include_directories(${TARGET} PUBLIC .)
 target_link_libraries     (${TARGET} PUBLIC vendor::nlohmann vendor::sheredom)
 target_compile_features   (${TARGET} PUBLIC cxx_std_17)
 
+# common/speculative.cpp uses the HIP device-view path for sidecar catch-up.
+# GGML_USE_HIP is otherwise scoped to the ggml-hip backend target.
+if (GGML_HIP AND NOT GGML_BACKEND_DL)
+    target_compile_definitions(${TARGET} PRIVATE GGML_USE_HIP)
+endif()
+
 if (LLAMA_SUBPROCESS)
     target_compile_definitions(${TARGET} PUBLIC LLAMA_SUBPROCESS)
 endif()

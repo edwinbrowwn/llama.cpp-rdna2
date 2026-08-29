@@ -57,6 +57,14 @@ target_compile_definitions(llama PRIVATE
     LLAMA_COMMIT="${LLAMA_BUILD_COMMIT}"
 )
 
+# The optional HIP sidecar integration uses the public ggml CUDA/HIP backend
+# stream/device view API from the host-side llama context.  GGML_USE_HIP is
+# normally scoped to the ggml-hip backend target, so propagate the capability
+# to llama for the backend-linked HIP build used by the device-view path.
+if (GGML_HIP AND NOT GGML_BACKEND_DL)
+    target_compile_definitions(llama PRIVATE GGML_USE_HIP)
+endif()
+
 target_include_directories(llama PRIVATE .)
 target_include_directories(llama PUBLIC ../include)
 target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
