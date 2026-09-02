@@ -1,55 +1,31 @@
-# Release process
+# BeeLlama.cpp release process
 
-llama.cpp uses [semantic versioning](https://semver.org) (`MAJOR.MINOR.PATCH`).
+BeeLlama releases are built by the three workflows in `.github/workflows`:
 
-## Version bump guidelines
+- `release-preview-dispatch.yml` dispatches a preview when a `v*` branch is pushed.
+- `release-dispatch.yml` dispatches a stable release when a `v*` tag is pushed.
+- `release.yml` runs on `main` and builds, packages, and publishes the exact source commit supplied by the dispatcher.
 
-| Change type | Version component |
-|---|---|
-| Breaking change to the public C API (`include/llama.h`)         | `MAJOR` |
-| Backward-compatible features, model support, or API addition    | `MINOR` |
-| Bug fix with no API change                                      | `PATCH` |
+The dispatchers record the source ref and SHA. Before publishing, `release.yml` verifies that a preview branch has not moved or that a stable tag resolves to the requested commit and remains reachable from `origin/main`. Packages and container metadata use the same resolved SHA.
 
-The version is set in the three variables at the top of the root `CMakeLists.txt`:
+## Version
+
+The BeeLlama version is set at the top of `CMakeLists.txt`:
 
 ```cmake
 set(LLAMA_VERSION_MAJOR 0)
-set(LLAMA_VERSION_MINOR 1)
-set(LLAMA_VERSION_PATCH 0)
+set(LLAMA_VERSION_MINOR 4)
+set(LLAMA_VERSION_PATCH 4)
 ```
 
-_A version bump should be included in the PR that introduces the change, or in a
-dedicated bump commit merged before the release is cut._
+Development builds use the default `LLAMA_BUILD_IS_DEV=ON` and report a `-dev` suffix. The release workflow passes `-DLLAMA_BUILD_IS_DEV=OFF` for previews and stable packages, and rejects a requested `vX.Y.Z` that does not match these source version fields.
 
-_TODO: add PR labels (`semver: patch`, `semver: minor`, `semver: major`) to help
-identify which PRs require a version bump before cutting a release._
+## Release preparation
 
-## Making a release
+1. Create the `vX.Y.Z` branch from the intended `main` commit.
+2. Update the version in `CMakeLists.txt` and add the matching section to `CHANGELOG.md`.
+3. Complete the release build, test, runtime, and benchmark gates on that branch.
+4. Push the branch to produce the rolling `preview-vX.Y.Z` build.
+5. Merge the validated branch into `main`, then create and push the matching `vX.Y.Z` tag to dispatch the stable release.
 
-Releases are created by running the [make-release](.github/workflows/make-release.yml)
-which is a manual workflow.
-
-The workflow runs against the branch selected in the "Run workflow" dialog
-(default `master`) and takes an optional `commit` SHA. When a commit is given,
-the workflow validates that the commit belongs to the branch and is not older
-than 3 days from the branch HEAD, then releases that commit instead of the
-branch HEAD.
-
-The workflow creates an annotated git tag (e.g. `v0.1.0`) and pushes it to the
-remote. No GitHub Release object is created, the tag is the release artifact.
-
-## Building a release
-
-By default, `LLAMA_BUILD_IS_DEV=ON` which appends a `-dev` suffix to `LLAMA_VERSION`,
-marking the build as a nightly/development build. Distributors building from a
-release tag must pass `-DLLAMA_BUILD_IS_DEV=OFF` to produce a clean version string
-(e.g. `0.1.0` instead of `0.1.0-dev`).
-
-## How releases reach users
-Currently releases are not published to github releases, only nightly/development
-builds are available there. The way users can access releases are using the following
-channels:
-
-- **llama-install.sh**  — downloads pre-built binaries built from the release tag.
-- **Package managers**  — consume the git tag directly.
-- **Build from source** — users clone the repo and check out the tag.
+Do not publish from a moved branch, an unmerged tag, or a locally inferred source SHA. The workflow validation is part of the release contract.

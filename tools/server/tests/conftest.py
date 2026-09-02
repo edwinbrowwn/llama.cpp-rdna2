@@ -15,7 +15,17 @@ def stop_server_after_each_test():
         server.stop()
 
 
-@pytest.fixture(scope="session", autouse=True)
-def load_server_presets():
-    # this will be run once per test session, before any tests
-    ServerPreset.load_all()
+_server_presets_loaded = False
+
+
+@pytest.fixture(scope="module", autouse=True)
+def load_server_presets(request):
+    global _server_presets_loaded
+
+    # Local-model suites validate and provide their own immutable fixture and
+    # must not download or launch the unrelated preset inventory.
+    if getattr(request.module, "NO_PRELOAD_SERVER_PRESETS", False):
+        return
+    if not _server_presets_loaded:
+        ServerPreset.load_all()
+        _server_presets_loaded = True

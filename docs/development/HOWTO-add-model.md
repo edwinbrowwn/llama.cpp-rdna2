@@ -1,9 +1,9 @@
-# Add a new model architecture to `llama.cpp`
+# Add a new model architecture to BeeLlama.cpp
 
 Adding a model requires few steps:
 
 1. Convert the model to GGUF
-2. Define the model architecture in `llama.cpp`
+2. Define the model architecture using BeeLlama's upstream-compatible conventions
 3. Build the GGML graph implementation
 4. Optional: Add multimodal encoder implementation
 
@@ -29,7 +29,6 @@ The required steps to implement for an HF model are:
 
 ```python
 @ModelBase.register("MyModelForCausalLM")
-@ModelBase.example("user/model")
 class MyModel(TextModel):
     model_arch = gguf.MODEL_ARCH.MYMODEL
 ```
@@ -38,12 +37,9 @@ or
 
 ```python
 @ModelBase.register("MyModelForConditionalGeneration")
-@ModelBase.example("user/model")
 class MyModel(MmprojModel):
     model_arch = gguf.MODEL_ARCH.MYMODEL
 ```
-
-The `example` should point to a valid Hugging Face model that will be used for testing. You can add multiple models if necessary. Prefer a non-gated model, or tiny random weights if no such model exists.
 
 2. Define the layout of the GGUF tensors in [constants.py](/gguf-py/gguf/constants.py)
 

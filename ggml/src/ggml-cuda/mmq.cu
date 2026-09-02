@@ -39,6 +39,24 @@ static void ggml_cuda_mul_mat_q_switch_type(ggml_backend_cuda_context & ctx, con
         case GGML_TYPE_Q5_1:
             mul_mat_q_case<GGML_TYPE_Q5_1>(ctx, args, stream);
             break;
+        case GGML_TYPE_Q6_0:
+            mul_mat_q_case<GGML_TYPE_Q6_0>(ctx, args, stream);
+            break;
+        case GGML_TYPE_Q6_1:
+            mul_mat_q_case<GGML_TYPE_Q6_1>(ctx, args, stream);
+            break;
+        case GGML_TYPE_Q3_0:
+            mul_mat_q_case<GGML_TYPE_Q3_0>(ctx, args, stream);
+            break;
+        case GGML_TYPE_Q3_1:
+            mul_mat_q_case<GGML_TYPE_Q3_1>(ctx, args, stream);
+            break;
+        case GGML_TYPE_Q2_0S:
+            mul_mat_q_case<GGML_TYPE_Q2_0S>(ctx, args, stream);
+            break;
+        case GGML_TYPE_Q2_1:
+            mul_mat_q_case<GGML_TYPE_Q2_1>(ctx, args, stream);
+            break;
         case GGML_TYPE_Q8_0:
             mul_mat_q_case<GGML_TYPE_Q8_0>(ctx, args, stream);
             break;
@@ -301,6 +319,12 @@ bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11, int64_t
         case GGML_TYPE_Q4_1:
         case GGML_TYPE_Q5_0:
         case GGML_TYPE_Q5_1:
+        case GGML_TYPE_Q6_0:
+        case GGML_TYPE_Q6_1:
+        case GGML_TYPE_Q3_0:
+        case GGML_TYPE_Q3_1:
+        case GGML_TYPE_Q2_0S:
+        case GGML_TYPE_Q2_1:
         case GGML_TYPE_Q8_0:
 // -------------------------------------------------
         case GGML_TYPE_Q2_K:
@@ -368,7 +392,8 @@ bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11, int64_t
         if (n_experts > 64 || ne11 <= 128) {
             return true;
         }
-        if (type == GGML_TYPE_Q4_0 || type == GGML_TYPE_Q4_1 || type == GGML_TYPE_Q5_0 || type == GGML_TYPE_Q5_1) {
+        if (type == GGML_TYPE_Q4_0 || type == GGML_TYPE_Q4_1 || type == GGML_TYPE_Q5_0 || type == GGML_TYPE_Q5_1 || type == GGML_TYPE_Q6_0 ||
+            type == GGML_TYPE_Q6_1 || type == GGML_TYPE_Q3_0 || type == GGML_TYPE_Q3_1 || type == GGML_TYPE_Q2_0S || type == GGML_TYPE_Q2_1) {
             return true;
         }
         if (ne11 <= 256 && (type == GGML_TYPE_Q4_K || type == GGML_TYPE_Q5_K)) {

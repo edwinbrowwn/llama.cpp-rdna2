@@ -28,7 +28,12 @@ public:
                llama_swa_type   swa_type,
         const layer_filter_cb & filter_mla,
         const layer_filter_cb & filter_lid,
-        const  layer_reuse_cb & reuse);
+        const  layer_reuse_cb & reuse,
+                     uint32_t   n_ubatch = 0,
+                     uint32_t   tail_tokens = 0,
+                    ggml_type   tail_type = GGML_TYPE_F16,
+                     uint32_t   tail_tokens_requested = UINT32_MAX,
+                     uint32_t   tail_rollback_tokens = 0);
 
     ~llama_kv_cache_dsa() = default;
 
@@ -46,10 +51,16 @@ public:
     llama_memory_context_ptr init_update(llama_context * lctx, bool optimize) override;
 
     bool get_can_shift() const override;
+    seq_rm_capability get_seq_rm_capability() const override;
 
     void clear(bool data) override;
 
+    bool can_seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) const override;
     bool seq_rm  (llama_seq_id seq_id,                              llama_pos p0, llama_pos p1) override;
+    bool seq_rm_cell(llama_seq_id seq_id, uint32_t cell_idx) override;
+
+    int cells_at_pos(llama_seq_id seq_id, llama_pos pos, uint32_t * cell_indices, int n_max) override;
+
     void seq_cp  (llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) override;
     void seq_keep(llama_seq_id seq_id)                                                          override;
     void seq_add (llama_seq_id seq_id,                              llama_pos p0, llama_pos p1, llama_pos shift) override;
@@ -59,9 +70,15 @@ public:
     llama_pos seq_pos_max(llama_seq_id seq_id) const override;
 
     std::map<ggml_backend_buffer_type_t, size_t> memory_breakdown() const override;
+    uint32_t get_kv_tail_group_count() const override;
+    bool get_kv_tail_coverage(uint32_t group_index, llama_seq_id seq_id,
+            llama_kv_tail_coverage_info & out) const override;
+    void reset_kv_tail_planner_timing() override;
+    uint64_t get_kv_tail_planner_timing_ns() const override;
 
     // state write/load
 
+    bool requires_state_for_partial_restore() const override;
     void state_write(llama_io_write_i & io, llama_seq_id seq_id = -1, llama_state_seq_flags flags = 0) const override;
     void state_read (llama_io_read_i  & io, llama_seq_id seq_id = -1, llama_state_seq_flags flags = 0) override;
 
@@ -113,6 +130,8 @@ public:
 
     bool next()  override;
     bool apply() override;
+    void graph_compute_start() override;
+    void graph_compute_finish(ggml_status status) override;
 
     llama_memory_status  get_status() const override;
     const llama_ubatch & get_ubatch() const override;

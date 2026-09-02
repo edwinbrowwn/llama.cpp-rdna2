@@ -67,6 +67,11 @@ json format_error_response(const std::string & message, const enum error_type ty
 json server_slot_stats::to_json() const {
     json base = {
         {"cache_n",                n_prompt_cached},
+        {"cache_lcp_n",            cache_lcp_n},
+        {"cache_planned_n",        cache_planned_n},
+        {"cache_reprocessed_n",    cache_reprocessed_n},
+        {"cache_source",           cache_source},
+        {"cache_reason",           cache_reason},
 
         {"prompt_n",               n_prompt_processed},
         {"prompt_ms",              t_prompt_ms()},

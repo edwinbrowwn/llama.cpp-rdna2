@@ -1,0 +1,58 @@
+name: Dispatch Stable Release
+
+run-name: Dispatch release ${{ github.ref_name }}
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  dispatch:
+    name: Dispatch main-owned release workflow
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Clone
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release inputs
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          source_ref="${GITHUB_REF_NAME}"
+          tag_name="${GITHUB_REF_NAME}"
+
+          if [[ "${GITHUB_REF}" != refs/tags/v* ]]; then
+            echo "Unsupported ref ${GITHUB_REF}; stable release dispatch requires a v* tag." >&2
+            exit 1
+          fi
+          source_sha="$(git rev-list -n 1 "${tag_name}")"
+
+          {
+            echo "source_ref=${source_ref}"
+            echo "source_sha=${source_sha}"
+            echo "tag_name=${tag_name}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Dispatch main-owned release workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_REF: ${{ steps.meta.outputs.source_ref }}
+          SOURCE_SHA: ${{ steps.meta.outputs.source_sha }}
+          TAG_NAME: ${{ steps.meta.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          gh workflow run release.yml \
+            --ref main \
+            --field source_ref="${SOURCE_REF}" \
+            --field source_sha="${SOURCE_SHA}" \
+            --field tag_name="${TAG_NAME}" \
+            --field publish_release="true"

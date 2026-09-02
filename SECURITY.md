@@ -3,7 +3,7 @@
  - [**Reporting a vulnerability**](#reporting-a-vulnerability)
  - [**Requirements**](#requirements)
  - [**Covered Topics**](#covered-topics)
- - [**Using llama.cpp securely**](#using-llamacpp-securely)
+ - [**Using BeeLlama.cpp securely**](#using-beellamacpp-securely)
    - [Untrusted models](#untrusted-models)
    - [Untrusted inputs](#untrusted-inputs)
    - [Data privacy](#data-privacy)
@@ -17,22 +17,18 @@
 
 If you have discovered a security vulnerability in this project that falls inside the [covered topics](#covered-topics), please report it privately. **Do not disclose it as a public issue.** This gives us time to work with you to fix the issue before public exposure, reducing the chance that the exploit will be used before a patch is released.
 
-Please disclose it as a private [security advisory](https://github.com/ggml-org/llama.cpp/security/advisories/new).
+Please disclose it as a private [security advisory](https://github.com/Anbeeld/beellama.cpp/security/advisories/new).
 
 A team of volunteers on a reasonable-effort basis maintains this project. As such, please give us at least 90 days to work on a fix before public exposure.
 
-### AI-powered code scan
-
-llama.cpp has an AI security scanner that scans the code periodically. The full prompts and tool set can be found in [ggml-org/security-scan-prompt](https://github.com/ggml-org/security-scan-prompt).
-
-We greatly appreciate reports that reflect genuine research effort, and we are happy to spend our time reviewing them. Findings that an autonomous AI agent can surface on its own add little on top of the scans we already run.
+> [!IMPORTANT]
+> For collaborators: review private security disclosures through this fork's GitHub security advisory workflow.
 
 ### Requirements
 
 Before submitting your report, ensure you meet the following requirements:
 
 - You have read this policy and fully understand it.
-- You have searched for existing discussions of the issue. If it has already been reported, your report will likely be rejected as a duplicate.
 - AI is only permitted in an assistive capacity as stated in [AGENTS.md](AGENTS.md). We do not accept reports that are written exclusively by AI.
 - Your report must include a working Proof-of-Concept in the form of a script and/or attached files.
 
@@ -51,13 +47,11 @@ Only vulnerabilities that fall within these parts of the project are considered 
     - Features not recommended for use in untrusted environments (e.g., router, MCP)
     - Bugs that can lead to Denial-of-Service attack
 
-Note that none of the topics under [Using llama.cpp securely](#using-llamacpp-securely) are considered vulnerabilities in LLaMA C++.
-
-Denial-of-Service (DoS) bugs are generally not treated as vulnerabilities. We don't reject them outright, but we look at them case-by-case and only accept those that are genuinely worth fixing.
+Note that none of the topics under [Using BeeLlama.cpp securely](#using-beellamacpp-securely) are considered vulnerabilities in BeeLlama.cpp by themselves.
 
 For vulnerabilities that fall within the `vendor` directory, please report them directly to the third-party project.
 
-## Using llama.cpp securely
+## Using BeeLlama.cpp securely
 
 ### Untrusted models
 Be careful when running untrusted models. This classification includes models created by unknown developers or utilizing data obtained from unknown sources.
@@ -75,7 +69,7 @@ For maximum security when handling untrusted inputs, you may need to employ the 
 
 * Sandboxing: Isolate the environment where the inference happens.
 * Pre-analysis: Check how the model performs by default when exposed to prompt injection (e.g. using [fuzzing for prompt injection](https://github.com/FonduAI/awesome-prompt-injection?tab=readme-ov-file#tools)). This will give you leads on how hard you will have to work on the next topics.
-* Updates: Keep both LLaMA C++ and your libraries updated with the latest security patches.
+* Updates: Keep BeeLlama.cpp, inherited llama.cpp components, and your libraries updated with the latest security patches.
 * Input Sanitation: Before feeding data to the model, sanitize inputs rigorously. This involves techniques such as:
     * Validation: Enforce strict rules on allowed characters and data types.
     * Filtering: Remove potentially malicious scripts or code fragments.

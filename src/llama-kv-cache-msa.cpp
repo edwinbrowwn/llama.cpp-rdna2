@@ -24,7 +24,12 @@ llama_kv_cache_msa::llama_kv_cache_msa(
            llama_swa_type   swa_type,
     const layer_filter_cb & filter,
     const layer_filter_cb & filter_idx,
-    const  layer_reuse_cb & reuse) :
+    const  layer_reuse_cb & reuse,
+                 uint32_t   n_ubatch,
+                 uint32_t   tail_tokens,
+                ggml_type   tail_type,
+                 uint32_t   tail_tokens_requested,
+                 uint32_t   tail_rollback_tokens) :
     hparams_idx(model.hparams),
     n_stream(unified ? 1 : n_seq_max), n_seq_max(n_seq_max), n_pad(n_pad),
     n_swa(n_swa), swa_type(swa_type) {
@@ -34,7 +39,8 @@ llama_kv_cache_msa::llama_kv_cache_msa(
     kv_base = std::make_unique<llama_kv_cache>(
             model, model.hparams, type_k, type_v,
             v_trans, offload, unified, kv_size, n_seq_max, n_pad,
-            n_swa, swa_type, nullptr, filter, reuse, nullptr);
+            n_swa, swa_type, nullptr, filter, reuse, nullptr,
+            n_ubatch, tail_tokens, tail_type, tail_tokens_requested, false, tail_rollback_tokens);
 
     // the MSA indexer uses a single key head per layer
     std::fill(hparams_idx.n_head_kv_arr.begin(), hparams_idx.n_head_kv_arr.end(), 1);
@@ -44,7 +50,7 @@ llama_kv_cache_msa::llama_kv_cache_msa(
     LLAMA_LOG_INFO("%s: creating indexer KV cache, size = %u cells\n", __func__, kv_size);
 
     kv_idx = std::make_unique<llama_kv_cache>(
-            model, hparams_idx, type_k, type_v,
+            model, hparams_idx, GGML_TYPE_F32, GGML_TYPE_F32,
             v_trans, offload, unified, kv_size, n_seq_max, n_pad,
             n_swa, swa_type, nullptr, filter_idx, reuse, nullptr);
 }
@@ -54,13 +60,34 @@ void llama_kv_cache_msa::clear(bool data) {
     kv_idx ->clear(data);
 }
 
+bool llama_kv_cache_msa::can_seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) const {
+    return kv_base->can_seq_rm(seq_id, p0, p1) &&
+           kv_idx ->can_seq_rm(seq_id, p0, p1);
+}
+
 bool llama_kv_cache_msa::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
-    bool res = true;
+    if (!can_seq_rm(seq_id, p0, p1)) {
+        return false;
+    }
 
-    res = res & kv_base->seq_rm(seq_id, p0, p1);
-    res = res & kv_idx ->seq_rm(seq_id, p0, p1);
+    if (!kv_base->seq_rm(seq_id, p0, p1)) {
+        return false;
+    }
 
-    return res;
+    return kv_idx->seq_rm(seq_id, p0, p1);
+}
+
+bool llama_kv_cache_msa::seq_rm_cell(llama_seq_id seq_id, uint32_t cell_idx) {
+    if (!kv_base->seq_rm_cell(seq_id, cell_idx)) {
+        return false;
+    }
+
+    return kv_idx->seq_rm_cell(seq_id, cell_idx);
+}
+
+int llama_kv_cache_msa::cells_at_pos(
+        llama_seq_id seq_id, llama_pos pos, uint32_t * cell_indices, int n_max) {
+    return kv_base->cells_at_pos(seq_id, pos, cell_indices, n_max);
 }
 
 void llama_kv_cache_msa::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) {
@@ -97,6 +124,23 @@ std::map<ggml_backend_buffer_type_t, size_t> llama_kv_cache_msa::memory_breakdow
         mb[buft_size.first] += buft_size.second;
     }
     return mb;
+}
+
+uint32_t llama_kv_cache_msa::get_kv_tail_group_count() const {
+    return kv_base->get_kv_tail_group_count();
+}
+
+bool llama_kv_cache_msa::get_kv_tail_coverage(
+        uint32_t group_index, llama_seq_id seq_id, llama_kv_tail_coverage_info & out) const {
+    return kv_base->get_kv_tail_coverage(group_index, seq_id, out);
+}
+
+void llama_kv_cache_msa::reset_kv_tail_planner_timing() {
+    kv_base->reset_kv_tail_planner_timing();
+}
+
+uint64_t llama_kv_cache_msa::get_kv_tail_planner_timing_ns() const {
+    return kv_base->get_kv_tail_planner_timing_ns();
 }
 
 llama_memory_context_ptr llama_kv_cache_msa::init_batch(
@@ -155,6 +199,15 @@ bool llama_kv_cache_msa::get_can_shift() const {
     return kv_base->get_can_shift() &&
            kv_idx ->get_can_shift() &&
            kv_base->get_size() == kv_idx->get_size();
+}
+
+llama_memory_i::seq_rm_capability llama_kv_cache_msa::get_seq_rm_capability() const {
+    return llama_memory_seq_rm_capability_all({ kv_base.get(), kv_idx.get() });
+}
+
+bool llama_kv_cache_msa::requires_state_for_partial_restore() const {
+    return kv_base->requires_state_for_partial_restore() ||
+           kv_idx ->requires_state_for_partial_restore();
 }
 
 void llama_kv_cache_msa::state_write(llama_io_write_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) const {
@@ -235,6 +288,16 @@ bool llama_kv_cache_msa_context::apply() {
     res = res & ctx_idx ->apply();
 
     return res;
+}
+
+void llama_kv_cache_msa_context::graph_compute_start() {
+    ctx_base->graph_compute_start();
+    ctx_idx ->graph_compute_start();
+}
+
+void llama_kv_cache_msa_context::graph_compute_finish(ggml_status compute_status) {
+    ctx_base->graph_compute_finish(compute_status);
+    ctx_idx ->graph_compute_finish(compute_status);
 }
 
 llama_memory_status llama_kv_cache_msa_context::get_status() const {

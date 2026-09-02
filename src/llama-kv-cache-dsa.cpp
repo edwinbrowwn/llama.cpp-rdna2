@@ -25,7 +25,12 @@ llama_kv_cache_dsa::llama_kv_cache_dsa(
            llama_swa_type   swa_type,
     const layer_filter_cb & filter_mla,
     const layer_filter_cb & filter_lid,
-    const  layer_reuse_cb & reuse) :
+    const  layer_reuse_cb & reuse,
+                 uint32_t   n_ubatch,
+                 uint32_t   tail_tokens,
+                ggml_type   tail_type,
+                 uint32_t   tail_tokens_requested,
+                 uint32_t   tail_rollback_tokens) :
     hparams_lid(model.hparams), n_stream(unified ? 1 : n_seq_max) {
 
     LLAMA_LOG_INFO("%s: creating main KV cache, size = %u cells\n", __func__, kv_size);
@@ -33,7 +38,8 @@ llama_kv_cache_dsa::llama_kv_cache_dsa(
     kv_mla = std::make_unique<llama_kv_cache>(
             model, model.hparams, type_k, type_v,
             v_trans, offload, unified, kv_size, n_seq_max, n_pad,
-            n_swa, swa_type, nullptr, filter_mla, reuse, nullptr);
+            n_swa, swa_type, nullptr, filter_mla, reuse, nullptr,
+            n_ubatch, tail_tokens, tail_type, tail_tokens_requested, false, tail_rollback_tokens);
 
     // we use llama_kv_cache for caching indexer keys
     // by hand-tweaking some hparams we fool it to create
@@ -58,13 +64,33 @@ void llama_kv_cache_dsa::clear(bool data) {
     kv_lid->clear(data);
 }
 
+bool llama_kv_cache_dsa::can_seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) const {
+    return kv_mla->can_seq_rm(seq_id, p0, p1) &&
+           kv_lid->can_seq_rm(seq_id, p0, p1);
+}
+
 bool llama_kv_cache_dsa::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
-    bool res = true;
+    if (!can_seq_rm(seq_id, p0, p1)) {
+        return false;
+    }
 
-    res = res & kv_mla->seq_rm(seq_id, p0, p1);
-    res = res & kv_lid->seq_rm(seq_id, p0, p1);
+    if (!kv_mla->seq_rm(seq_id, p0, p1)) {
+        return false;
+    }
 
-    return res;
+    return kv_lid->seq_rm(seq_id, p0, p1);
+}
+
+bool llama_kv_cache_dsa::seq_rm_cell(llama_seq_id seq_id, uint32_t cell_idx) {
+    if (!kv_mla->seq_rm_cell(seq_id, cell_idx)) {
+        return false;
+    }
+
+    return kv_lid->seq_rm_cell(seq_id, cell_idx);
+}
+
+int llama_kv_cache_dsa::cells_at_pos(llama_seq_id seq_id, llama_pos pos, uint32_t * cell_indices, int n_max) {
+    return kv_mla->cells_at_pos(seq_id, pos, cell_indices, n_max);
 }
 
 void llama_kv_cache_dsa::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) {
@@ -101,6 +127,28 @@ std::map<ggml_backend_buffer_type_t, size_t> llama_kv_cache_dsa::memory_breakdow
         mb[buft_size.first] += buft_size.second;
     }
     return mb;
+}
+
+uint32_t llama_kv_cache_dsa::get_kv_tail_group_count() const {
+    return kv_mla->get_kv_tail_group_count();
+}
+
+bool llama_kv_cache_dsa::get_kv_tail_coverage(
+        uint32_t group_index, llama_seq_id seq_id, llama_kv_tail_coverage_info & out) const {
+    return kv_mla->get_kv_tail_coverage(group_index, seq_id, out);
+}
+
+void llama_kv_cache_dsa::reset_kv_tail_planner_timing() {
+    kv_mla->reset_kv_tail_planner_timing();
+}
+
+uint64_t llama_kv_cache_dsa::get_kv_tail_planner_timing_ns() const {
+    return kv_mla->get_kv_tail_planner_timing_ns();
+}
+
+bool llama_kv_cache_dsa::requires_state_for_partial_restore() const {
+    return kv_mla->requires_state_for_partial_restore() ||
+           kv_lid->requires_state_for_partial_restore();
 }
 
 llama_memory_context_ptr llama_kv_cache_dsa::init_batch(
@@ -159,6 +207,10 @@ bool llama_kv_cache_dsa::get_can_shift() const {
     return kv_mla->get_can_shift() &&
            kv_lid->get_can_shift() &&
            kv_mla->get_size() == kv_lid->get_size();
+}
+
+llama_memory_i::seq_rm_capability llama_kv_cache_dsa::get_seq_rm_capability() const {
+    return llama_memory_seq_rm_capability_all({ kv_mla.get(), kv_lid.get() });
 }
 
 void llama_kv_cache_dsa::state_write(llama_io_write_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) const {
@@ -237,6 +289,16 @@ bool llama_kv_cache_dsa_context::apply() {
     res = res & ctx_lid->apply();
 
     return res;
+}
+
+void llama_kv_cache_dsa_context::graph_compute_start() {
+    ctx_mla->graph_compute_start();
+    ctx_lid->graph_compute_start();
+}
+
+void llama_kv_cache_dsa_context::graph_compute_finish(ggml_status compute_status) {
+    ctx_mla->graph_compute_finish(compute_status);
+    ctx_lid->graph_compute_finish(compute_status);
 }
 
 llama_memory_status llama_kv_cache_dsa_context::get_status() const {

@@ -1,0 +1,91 @@
+name: Save rolling ccache
+description: Delete the previous exact ccache key and save the refreshed cache under the same key.
+inputs:
+  key:
+    description: Exact GitHub cache key to replace.
+    required: true
+  ref:
+    description: Git ref that owns the cache, for example refs/heads/main.
+    required: true
+  path:
+    description: ccache directory to save.
+    required: false
+    default: .ccache
+  evict-old-files:
+    description: Age threshold for evicting stale cache entries before saving (e.g. 1d, 3600s). Empty to skip.
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: Normalize ccache path
+      id: ccache-path
+      shell: bash
+      env:
+        INPUT_PATH: ${{ inputs.path }}
+      run: |
+        case "${INPUT_PATH}" in
+          /*|[A-Za-z]:/*|[A-Za-z]:\\*) CCACHE_DIR_ABS="${INPUT_PATH}" ;;
+          *) CCACHE_DIR_ABS="${GITHUB_WORKSPACE}/${INPUT_PATH}" ;;
+        esac
+        echo "path=${CCACHE_DIR_ABS}" >> "$GITHUB_OUTPUT"
+        echo "Resolved ccache path: ${CCACHE_DIR_ABS}"
+
+    - name: Evict old cache files
+      if: inputs.evict-old-files != ''
+      shell: bash
+      env:
+        CCACHE_DIR: ${{ steps.ccache-path.outputs.path }}
+        EVICT_AGE: ${{ inputs.evict-old-files }}
+      run: |
+        if command -v ccache >/dev/null 2>&1; then
+          ccache --evict-older-than "${EVICT_AGE}"
+        fi
+
+    - name: Delete previous cache
+      uses: actions/github-script@v8
+      env:
+        CACHE_KEY: ${{ inputs.key }}
+        CACHE_REF: ${{ inputs.ref }}
+      with:
+        script: |
+          const key = process.env.CACHE_KEY;
+          const ref = process.env.CACHE_REF;
+          const { owner, repo } = context.repo;
+          let deleted = 0;
+
+          for (let page = 1; ; page += 1) {
+            const { data } = await github.rest.actions.getActionsCacheList({
+              owner,
+              repo,
+              ref,
+              key,
+              per_page: 100,
+              page,
+            });
+            const caches = data.actions_caches ?? [];
+            for (const cache of caches) {
+              if (cache.key !== key) {
+                continue;
+              }
+              await github.rest.actions.deleteActionsCacheById({
+                owner,
+                repo,
+                cache_id: cache.id,
+              });
+              deleted += 1;
+            }
+            if (caches.length < 100) {
+              break;
+            }
+          }
+
+          core.info(deleted === 0
+            ? `No previous cache found for ${key} on ${ref}.`
+            : `Deleted ${deleted} previous cache entr${deleted === 1 ? "y" : "ies"} for ${key} on ${ref}.`);
+
+    - name: Save refreshed cache
+      uses: actions/cache/save@v5
+      with:
+        path: ${{ steps.ccache-path.outputs.path }}
+        key: ${{ inputs.key }}

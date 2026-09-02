@@ -354,6 +354,13 @@ struct server_slot_stats {
     uint64_t n_prompt_processed = 0;
     uint64_t n_gen              = 0;
 
+    // prompt-cache transaction details for the public timings object
+    uint64_t cache_lcp_n         = 0;
+    uint64_t cache_planned_n     = 0;
+    uint64_t cache_reprocessed_n = 0;
+    std::string cache_source     = "none";
+    std::string cache_reason     = "none";
+
     // speculative decoding stats
     // note: the per-position breakdown lives in server_slot, it is not needed in a task result
     uint64_t n_draft_tokens      = 0;
@@ -478,6 +485,22 @@ struct server_metrics {
     uint64_t n_draft_accepted    = 0; // Draft tokens actually accepted
     uint64_t n_draft_verif_steps = 0; // Total draft token verification steps by the target model
     std::vector<uint64_t> n_accepted_per_pos; // Accepted tokens per draft position
+
+    // Bee cache observability. Tail values are instantaneous snapshots; prompt
+    // cache transaction values are cumulative for the cache lifetime.
+    uint64_t kv_tail_requested          = 0;
+    uint64_t kv_tail_exact              = 0;
+    uint64_t kv_tail_complete_groups    = 0;
+    uint64_t kv_tail_partial_groups     = 0;
+    uint64_t kv_tail_none_groups        = 0;
+    uint64_t kv_tail_degraded_sequences = 0;
+    uint64_t prompt_cache_admission_attempts  = 0;
+    uint64_t prompt_cache_admission_successes = 0;
+    uint64_t prompt_cache_admission_failures  = 0;
+    uint64_t prompt_cache_restore_attempts    = 0;
+    uint64_t prompt_cache_restore_successes   = 0;
+    uint64_t prompt_cache_restore_failures    = 0;
+    uint64_t prompt_cache_accounted_bytes     = 0;
 
     void init() {
         t_start = ggml_time_us();

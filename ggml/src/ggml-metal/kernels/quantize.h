@@ -19,6 +19,99 @@ void quantize_q1_0(device const float * src, device block_q1_0 & dst) {
     }
 }
 
+void quantize_q6_0(device const float * src, device block_q6_0 & dst) {
+    float amax = 0.0f;
+    float vmax = 0.0f;
+    for (int j = 0; j < QK6_0; ++j) {
+        if (fabs(src[j]) > amax) {
+            amax = fabs(src[j]);
+            vmax = src[j];
+        }
+    }
+    float d = vmax / -32.0f;
+    const float id = d != 0.0f ? 1.0f / d : 0.0f;
+    float sumqx = 0.0f;
+    float sumq2 = 0.0f;
+    for (int j = 0; j < QK6_0 / 4; ++j) dst.qh[j] = 0;
+    for (int j = 0; j < QK6_0 / 2; ++j) {
+        const uint8_t q0 = (uint8_t) clamp((int) floor(src[j] * id + 32.5f), 0, 63);
+        const uint8_t q1 = (uint8_t) clamp((int) floor(src[j + 16] * id + 32.5f), 0, 63);
+        dst.qs[j] = (q0 & 0x0F) | ((q1 & 0x0F) << 4);
+        dst.qh[j % 8] |= ((q0 >> 4) | ((q1 >> 4) << 2)) << (4 * (j / 8));
+
+        const float v0 = (float) q0 - 32.0f;
+        const float v1 = (float) q1 - 32.0f;
+        const float w0 = src[j] * src[j];
+        const float w1 = src[j + 16] * src[j + 16];
+        sumqx += w0 * v0 * src[j] + w1 * v1 * src[j + 16];
+        sumq2 += w0 * v0 * v0 + w1 * v1 * v1;
+    }
+    if (sumq2 > 0.0f) d = sumqx / sumq2;
+    dst.d = d;
+}
+
+void quantize_q6_1(device const float * src, device block_q6_1 & dst) {
+    float vmin = FLT_MAX;
+    float vmax = -FLT_MAX;
+    for (int j = 0; j < QK6_1; ++j) {
+        vmin = min(vmin, src[j]);
+        vmax = max(vmax, src[j]);
+    }
+    const float d = (vmax - vmin) / 63.0f;
+    const float id = d != 0.0f ? 1.0f / d : 0.0f;
+    dst.d = d;
+    dst.m = vmin;
+    for (int j = 0; j < QK6_1 / 4; ++j) dst.qh[j] = 0;
+    for (int j = 0; j < QK6_1 / 2; ++j) {
+        const uint8_t q0 = (uint8_t) clamp((int) floor((src[j] - vmin) * id + 0.5f), 0, 63);
+        const uint8_t q1 = (uint8_t) clamp((int) floor((src[j + 16] - vmin) * id + 0.5f), 0, 63);
+        dst.qs[j] = (q0 & 0x0F) | ((q1 & 0x0F) << 4);
+        dst.qh[j % 8] |= ((q0 >> 4) | ((q1 >> 4) << 2)) << (4 * (j / 8));
+    }
+}
+
+template <int levels, bool affine>
+void quantize_planar_values(device const float * src, thread float & d, thread float & m,
+                            thread uint8_t (&qs)[8], thread uint8_t (&qh)[4]) {
+    float vmin = FLT_MAX;
+    float vmax = -FLT_MAX;
+    float amax = 0.0f;
+    float signed_max = 0.0f;
+    for (int j = 0; j < 32; ++j) {
+        vmin = min(vmin, src[j]);
+        vmax = max(vmax, src[j]);
+        if (fabs(src[j]) > amax) {
+            amax = fabs(src[j]);
+            signed_max = src[j];
+        }
+    }
+    m = affine ? vmin : 0.0f;
+    d = affine ? (vmax - vmin) / (levels - 1) : signed_max / -(levels / 2);
+    const float id = d != 0.0f ? 1.0f / d : 0.0f;
+    for (int j = 0; j < 8; ++j) qs[j] = 0;
+    for (int j = 0; j < 4; ++j) qh[j] = 0;
+    for (int j = 0; j < 32; ++j) {
+        const float shifted = affine ? (src[j] - m) * id + 0.5f : src[j] * id + levels / 2 + 0.5f;
+        const uint8_t q = (uint8_t) clamp((int) floor(shifted), 0, levels - 1);
+        qs[j % 8] |= (q & 3) << (2 * (j / 8));
+        if (levels == 8) qh[j / 8] |= ((q >> 2) & 1) << (j % 8);
+    }
+}
+
+void quantize_q3_0(device const float * src, device block_q3_0 & dst) {
+    float d, m; uint8_t qs[8], qh[4];
+    quantize_planar_values<8, false>(src, d, m, qs, qh);
+    dst.d = d;
+    for (int j = 0; j < 8; ++j) dst.qs[j] = qs[j];
+    for (int j = 0; j < 4; ++j) dst.qh[j] = qh[j];
+}
+void quantize_q3_1(device const float * src, device block_q3_1 & dst) {
+    float d, m; uint8_t qs[8], qh[4];
+    quantize_planar_values<8, true>(src, d, m, qs, qh);
+    dst.d = d; dst.m = m;
+    for (int j = 0; j < 8; ++j) dst.qs[j] = qs[j];
+    for (int j = 0; j < 4; ++j) dst.qh[j] = qh[j];
+}
 void quantize_q2_0(device const float * src, device block_q2_0 & dst) {
     float amax = 0.0f;
     for (int j = 0; j < QK2_0; j++) {

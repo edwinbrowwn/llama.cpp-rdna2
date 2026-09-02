@@ -1,5 +1,135 @@
 llama_add_compile_flags()
 
+find_package(Python3 COMPONENTS Interpreter QUIET)
+
+if (Python3_Interpreter_FOUND)
+    add_test(
+        NAME test-release-workflow-static
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/test-release-workflow-static.py)
+    set_property(TEST test-release-workflow-static PROPERTY LABELS main)
+
+    add_test(
+        NAME test-release-cache-parent
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/test-release-cache-parent.py)
+    set_property(TEST test-release-cache-parent PROPERTY LABELS main)
+
+    add_test(
+        NAME test-verify-windows-package
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/test-verify-windows-package.py)
+    set_property(TEST test-verify-windows-package PROPERTY LABELS main)
+
+    add_test(
+        NAME test-backend-ops-seed-static
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/test-backend-ops-seed-static.py)
+    set_property(TEST test-backend-ops-seed-static PROPERTY LABELS main)
+
+    add_test(
+        NAME test-arm-cpu-feats-static
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/test-arm-cpu-feats-static.py)
+    set_property(TEST test-arm-cpu-feats-static PROPERTY LABELS main)
+
+    add_test(
+        NAME test-cuda-graph-source-properties-static
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/test-cuda-graph-source-properties-static.py)
+    set_property(TEST test-cuda-graph-source-properties-static PROPERTY LABELS cuda)
+
+    add_test(
+        NAME test-std-kv-tail-static
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/test-std-kv-tail-static.py)
+    set_property(TEST test-std-kv-tail-static PROPERTY LABELS main)
+
+    add_test(
+        NAME test-removed-cache-types-static
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/test-removed-cache-types-static.py)
+    set_property(TEST test-removed-cache-types-static PROPERTY LABELS main)
+
+    add_test(
+        NAME test-cache-type-redirects-static
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/test-cache-type-redirects-static.py)
+    set_property(TEST test-cache-type-redirects-static PROPERTY LABELS main)
+
+    add_test(
+        NAME test-issue41-regressions-static
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/test-issue41-regressions-static.py)
+    set_property(TEST test-issue41-regressions-static PROPERTY LABELS cuda)
+
+    add_test(
+        NAME test-cuda-mmq-low-bit-static
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/test-cuda-mmq-low-bit-static.py)
+    set_property(TEST test-cuda-mmq-low-bit-static PROPERTY LABELS cuda)
+
+    add_test(
+        NAME test-fattn-vec-dispatch-generated
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/gen-fattn-vec-dispatch.py --check)
+    set_property(TEST test-fattn-vec-dispatch-generated PROPERTY LABELS cuda)
+
+    add_test(
+        NAME test-hip-shuffle-compat-static
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/test-hip-shuffle-compat-static.py)
+    set_property(TEST test-hip-shuffle-compat-static PROPERTY LABELS hip)
+
+    add_test(
+        NAME test-upstream-dflash-only-static
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/test-upstream-dflash-only-static.py)
+    set_property(TEST test-upstream-dflash-only-static PROPERTY LABELS main)
+
+    add_test(
+        NAME test-server-loop-guard-checkpoint-static
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/test-server-loop-guard-checkpoint-static.py)
+    set_property(TEST test-server-loop-guard-checkpoint-static PROPERTY LABELS main)
+
+    add_test(
+        NAME test-spec-cession-static
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/test-spec-cession-static.py)
+    set_property(TEST test-spec-cession-static PROPERTY LABELS main)
+
+    add_test(
+        NAME test-upstream-merge-keepers-static
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/test-upstream-merge-keepers-static.py)
+    set_property(TEST test-upstream-merge-keepers-static PROPERTY LABELS main)
+
+    add_test(
+        NAME test-kvarn-eager-workspace-static
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/test-kvarn-eager-workspace-static.py)
+    set_property(TEST test-kvarn-eager-workspace-static PROPERTY LABELS cuda)
+
+    add_test(
+        NAME test-kvarn-rollback-static
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/test-kvarn-rollback-static.py)
+    set_property(TEST test-kvarn-rollback-static PROPERTY LABELS main)
+
+    add_test(
+        NAME test-kvarn-hip-tail-capability-static
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/test-kvarn-hip-tail-capability-static.py)
+    set_property(TEST test-kvarn-hip-tail-capability-static PROPERTY LABELS hip)
+
+    add_test(
+        NAME test-kvarn-hip-runtime-validation
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/test-kvarn-hip-runtime-validation.py ${PROJECT_SOURCE_DIR})
+    set_property(TEST test-kvarn-hip-runtime-validation PROPERTY LABELS main)
+endif()
+
 function(llama_build source)
     set(TEST_SOURCES ${source} ${ARGN})
 
@@ -200,6 +330,12 @@ if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
     # llama_build_and_test(test-double-float.cpp) # SLOW
 
     llama_build_and_test(test-llama-archs.cpp)
+    llama_test(
+        test-llama-archs
+        NAME test-mtp-ubatch-sync
+        LABEL main
+        ARGS --test-mtp-ubatch-sync
+    )
 
     set(MODEL_DIR "${CMAKE_CURRENT_BINARY_DIR}/test-models/")
     file(MAKE_DIRECTORY "${MODEL_DIR}")
@@ -292,6 +428,50 @@ llama_build_and_test(test-thread-safety.cpp ARGS -m "${MODEL_DEST}" -ngl 99 -p "
 set_tests_properties(test-thread-safety PROPERTIES FIXTURES_REQUIRED test-download-model)
 
 llama_build_and_test(test-arg-parser.cpp)
+llama_build_and_test(test-kv-cache-tail.cpp ../src/llama-kv-cache-tail.cpp)
+target_include_directories(test-kv-cache-tail PRIVATE ${PROJECT_SOURCE_DIR}/src)
+llama_build_and_test(test-kv-tail-request.cpp ../src/llama-kv-tail-request.cpp ../src/llama-kvarn.cpp)
+target_include_directories(test-kv-tail-request PRIVATE ${PROJECT_SOURCE_DIR}/src)
+
+llama_build_and_test(test-fit-kvarn-tail.cpp ../common/fit-kvarn-tail.cpp)
+target_include_directories(test-fit-kvarn-tail PRIVATE ${PROJECT_SOURCE_DIR}/common)
+llama_build_and_test(test-kv-cache-placement.cpp ../src/llama-kv-cache-placement.cpp)
+target_include_directories(test-kv-cache-placement PRIVATE ${PROJECT_SOURCE_DIR}/src)
+llama_build_and_test(test-std-kv-tail-graph.cpp ../src/llama-kv-cache-tail.cpp)
+target_include_directories(test-std-kv-tail-graph PRIVATE ${PROJECT_SOURCE_DIR}/src)
+
+add_executable(test-kvarn test-kvarn.cpp ../src/llama-kvarn.cpp)
+target_include_directories(test-kvarn PRIVATE ${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/include)
+target_compile_features(test-kvarn PRIVATE cxx_std_17)
+target_link_libraries(test-kvarn PRIVATE ggml)
+if (LLAMA_TESTS_INSTALL)
+    install(TARGETS test-kvarn RUNTIME)
+endif()
+add_test(NAME test-kvarn WORKING_DIRECTORY . COMMAND $<TARGET_FILE:test-kvarn>)
+set_property(TEST test-kvarn PROPERTY LABELS main)
+
+llama_build_and_test(test-adaptive-dm.cpp)
+llama_build_and_test(test-perplexity-plumbing.cpp ARGS ${PROJECT_SOURCE_DIR})
+llama_build_and_test(test-cuda-fattn-route-policy.cpp ARGS ${PROJECT_SOURCE_DIR})
+llama_build_and_test(test-cuda-fattn-vec-policy.cpp ARGS ${PROJECT_SOURCE_DIR})
+llama_build_and_test(test-cuda-zero-dim-gemm.cpp ARGS ${PROJECT_SOURCE_DIR}/ggml/src/ggml-cuda/ggml-cuda.cu)
+llama_build_and_test(test-cpu-out-prod.cpp)
+llama_build_and_test(test-cpu-fattn-support.cpp)
+
+# The tests subdirectory is configured before tools/server, so server-context
+# is not a CMake target yet at this point.  Match test-chat above and gate on
+# the build option instead; the target is resolved when the full project is
+# generated.
+if (LLAMA_BUILD_SERVER)
+    llama_build_and_test(test-server-loop-guard.cpp)
+    target_include_directories(test-server-loop-guard PRIVATE ${PROJECT_SOURCE_DIR}/tools/server)
+    target_link_libraries(test-server-loop-guard PRIVATE server-context)
+
+    llama_build_and_test(test-server-prompt-checkpoint.cpp)
+    target_include_directories(test-server-prompt-checkpoint PRIVATE ${PROJECT_SOURCE_DIR}/tools/server ${PROJECT_SOURCE_DIR}/tools/mtmd)
+    target_link_libraries(test-server-prompt-checkpoint PRIVATE server-context)
+endif()
+# Upstream model-resolution coverage serves repositories through cpp-httplib.
 llama_build_and_test(test-model-resolution.cpp)
 # the test serves its repos from an httplib server, and the library links it privately
 target_link_libraries(test-model-resolution PRIVATE cpp-httplib)
@@ -345,6 +525,9 @@ target_include_directories(test-tensor-split PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
 llama_build_and_test(test-tp-output-policy.cpp)
 target_include_directories(test-tp-output-policy PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 
+llama_build_and_test(test-kv-tail-copy-transaction.cpp)
+target_include_directories(test-kv-tail-copy-transaction PRIVATE ${PROJECT_SOURCE_DIR}/src)
+
 llama_build_and_test(test-model-load-cancel.cpp LABEL "model")
 llama_build_and_test(test-autorelease.cpp       LABEL "model")
 llama_build_and_test(test-backend-sampler.cpp   LABEL "model")
@@ -367,6 +550,30 @@ llama_build(test-state-restore-equivalence.cpp)
 # AllReduce. It captures raw full-vocabulary logits and uses an external GGUF.
 llama_build(test-dsv4-bf16-allreduce-equivalence.cpp)
 
+# QuantFactory packages the Apache-2.0 SmolLM2 base model at a pinned revision.
+# Its 64-element attention heads are compatible with standard q4_0 KV tails.
+set(TAIL_MODEL_NAME "SmolLM2-135M.Q4_0.gguf")
+set(TAIL_MODEL_DEST "${CMAKE_BINARY_DIR}/kv-tail-fixtures/${TAIL_MODEL_NAME}")
+set(TAIL_MODEL_URL "https://huggingface.co/QuantFactory/SmolLM2-135M-GGUF/resolve/cccdc4886cdd3ff1c4caedb20148dcbf6b547904/SmolLM2-135M.Q4_0.gguf?download=true")
+set(TAIL_MODEL_HASH "SHA256=6f96e054a48f8fcdb5814abc1203ca12c0f9cce2791ca9a5153caad8c3b5479b")
+add_test(NAME test-download-tail-model COMMAND ${CMAKE_COMMAND}
+    -DDEST=${TAIL_MODEL_DEST}
+    -DNAME=${TAIL_MODEL_NAME}
+    -DHASH=${TAIL_MODEL_HASH}
+    -DURL=${TAIL_MODEL_URL}
+    -P ${CMAKE_SOURCE_DIR}/cmake/download-models.cmake
+)
+set_tests_properties(test-download-tail-model PROPERTIES FIXTURES_SETUP test-download-tail-model)
+add_test(NAME test-save-load-state-tail COMMAND test-save-load-state
+    -m "${TAIL_MODEL_DEST}"
+    --kv-tail-tokens 128
+    --cache-type-k q4_0
+    --cache-type-v q4_0
+)
+set_tests_properties(test-save-load-state-tail PROPERTIES
+    LABELS "model"
+    FIXTURES_REQUIRED test-download-tail-model
+)
 if (APPLE)
     llama_build(test-rset-release.cpp)
 endif()
@@ -428,3 +635,9 @@ if (TARGET gguf-model-data)
     target_link_libraries(test-export-graph-ops PRIVATE gguf-model-data)
     target_compile_definitions(test-export-graph-ops PRIVATE LLAMA_HF_FETCH)
 endif()
+
+add_executable(test-ggml-op-coverage test-ggml-op-coverage.cpp)
+target_include_directories(test-ggml-op-coverage PRIVATE ${PROJECT_SOURCE_DIR}/ggml/include)
+target_link_libraries(test-ggml-op-coverage PRIVATE ggml)
+add_test(NAME test-ggml-op-coverage COMMAND $<TARGET_FILE:test-ggml-op-coverage>)
+set_property(TEST test-ggml-op-coverage PROPERTY LABELS main)

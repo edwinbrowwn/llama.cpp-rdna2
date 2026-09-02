@@ -1,12 +1,12 @@
 # Speculative Decoding
 
-llama.cpp supports speculative decoding, a technique that can significantly accelerate token generation by predicting multiple tokens ahead of the main model.
+BeeLlama.cpp uses llama.cpp's speculative-decoding architecture. The target verifies several predicted tokens in one batch, which can improve generation speed when the draft is accepted often enough.
 
-[Speculative decoding](https://en.wikipedia.org/wiki/Transformer_(deep_learning)#Speculative_decoding) leverages the fact that computing n tokens in a batch (as in prompt processing) is more efficient than computing n sequentially (as in response generation). By generating draft tokens quickly and then verifying them with the target model in a single batch, this approach can achieve substantial speedups when the draft predictions are frequently correct.
+[Speculative decoding](https://en.wikipedia.org/wiki/Transformer_(deep_learning)#Speculative_decoding) is upstream-owned in this fork. Bee keeps upstream task, sampler, checkpoint, DFlash, DSpark, MTP, EAGLE-3, and n-gram behavior, then adds its maintained server controls around those paths.
 
 ## Implementations
 
-The `llama-server` application supports several implementations of speculative decoding. An implementation with draft model can be mixed with an implementation without draft model.
+Bee's `llama-server` supports the upstream implementations below. A draft-model implementation can be combined with a draftless implementation.
 
 ### Draft Model (`draft`)
 
@@ -120,10 +120,6 @@ acceptance (from the draft's confidence head, if present) falls below `P` (defau
 Drafts with a Qwen3 backbone and drafts with a DeepSeek-V4 backbone (MLA + MoE +
 hyper-connections, as used by DeepSeek-V4-Flash-DSpark) are supported; support for other
 backbones (e.g. Gemma4) is planned.
-
-DSpark drafts exported in the [speculators](https://github.com/vllm-project/speculators) format
-(for example [`RedHatAI/gemma-4-31B-it-speculator.dspark`](https://huggingface.co/RedHatAI/gemma-4-31B-it-speculator.dspark))
-convert the same way.
 
 See:
 
@@ -313,11 +309,11 @@ Use exactly one of these options:
 ```
 --spec-draft-type-k, -ctkd, --cache-type-k-draft  TYPE
                                         KV cache data type for K for the draft model
-                                        allowed values: f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1
+                                        allowed values: f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1, q6_0, q6_1, q3_0, q3_1, q2_0, q2_1
                                         (env: LLAMA_ARG_SPEC_DRAFT_CACHE_TYPE_K)
 --spec-draft-type-v, -ctvd, --cache-type-v-draft  TYPE
                                         KV cache data type for V for the draft model
-                                        allowed values: f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1
+                                        allowed values: f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1, q6_0, q6_1, q3_0, q3_1, q2_0, q2_1
                                         (env: LLAMA_ARG_SPEC_DRAFT_CACHE_TYPE_V)
 --spec-draft-override-tensor, -otd, --override-tensor-draft  <tensor name pattern>=<buffer type>,...
                                         override tensor buffer type for draft model

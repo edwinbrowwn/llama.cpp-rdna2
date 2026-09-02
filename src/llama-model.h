@@ -738,6 +738,8 @@ struct llama_model {
 
     bool is_tensor_parallel_output_head(const ggml_tensor * tensor) const;
     bool is_tensor_parallel_output_head_vocab_sharded(const ggml_tensor * tensor) const;
+    virtual bool graph_consumes_exact_kv_tail() const;
+    bool self_attention_uses_explicit_bias(uint32_t il) const;
 
     std::map<ggml_backend_buffer_type_t, size_t> memory_breakdown() const;
 

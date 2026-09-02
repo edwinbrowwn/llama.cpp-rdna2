@@ -2,6 +2,7 @@ set(BUILD_NUMBER 0)
 set(BUILD_COMMIT "unknown")
 set(BUILD_COMPILER "unknown")
 set(BUILD_TARGET "unknown")
+set(BUILD_DIRTY 0)
 
 # Look for git
 find_package(Git)
@@ -36,6 +37,14 @@ if(Git_FOUND)
     )
     if (RES EQUAL 0)
         set(BUILD_NUMBER ${COUNT})
+    endif()
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} diff --quiet
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        RESULT_VARIABLE RES
+    )
+    if (NOT RES EQUAL 0)
+        set(BUILD_DIRTY 1)
     endif()
 endif()
 

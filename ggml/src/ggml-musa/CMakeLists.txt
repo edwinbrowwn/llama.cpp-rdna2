@@ -30,9 +30,13 @@ if (MUSAToolkit_FOUND)
     list(APPEND GGML_HEADERS_MUSA "../ggml-musa/mudnn.cuh")
 
     file(GLOB   GGML_SOURCES_MUSA "../ggml-cuda/*.cu")
+    if (NOT GGML_CUDA_KVARN)
+        list(FILTER GGML_SOURCES_MUSA EXCLUDE REGEX "kvarn(-wht)?[.]cu$")
+    endif()
     file(GLOB   SRCS "../ggml-cuda/template-instances/fattn-tile*.cu")
     list(APPEND GGML_SOURCES_MUSA ${SRCS})
     file(GLOB   SRCS "../ggml-cuda/template-instances/fattn-mma*.cu")
+    ggml_cuda_select_kvarn_fast_decode_sources(SRCS "../ggml-cuda/template-instances" ${SRCS})
     list(APPEND GGML_SOURCES_MUSA ${SRCS})
     file(GLOB   SRCS "../ggml-cuda/template-instances/mmq*.cu")
     list(APPEND GGML_SOURCES_MUSA ${SRCS})
@@ -43,16 +47,28 @@ if (MUSAToolkit_FOUND)
         add_compile_definitions(GGML_MUSA_MUDNN_COPY)
     endif()
 
+    macro(ggml_add_fattn_vec_pair_musa OUT_VAR PREFIX K_TYPE V_TYPE)
+        set(_FILE "${PREFIX}/fattn-vec-instance-${K_TYPE}-${V_TYPE}.cu")
+        if (NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_FILE}")
+            message(FATAL_ERROR "Missing FA vec template instance: ${_FILE}")
+        endif()
+        list(APPEND ${OUT_VAR} "${_FILE}")
+    endmacro()
+
+    set(FA_VEC_PREFIX "../ggml-cuda/template-instances")
+
     if (GGML_CUDA_FA_ALL_QUANTS)
-        file(GLOB   SRCS "../ggml-cuda/template-instances/fattn-vec*.cu")
+        file(GLOB   SRCS "${FA_VEC_PREFIX}/fattn-vec-instance-*.cu")
         list(APPEND GGML_SOURCES_MUSA ${SRCS})
         add_compile_definitions(GGML_CUDA_FA_ALL_QUANTS)
     else()
-        list(APPEND GGML_SOURCES_MUSA
-            ../ggml-cuda/template-instances/fattn-vec-instance-f16-f16.cu
-            ../ggml-cuda/template-instances/fattn-vec-instance-q4_0-q4_0.cu
-            ../ggml-cuda/template-instances/fattn-vec-instance-q8_0-q8_0.cu
-            ../ggml-cuda/template-instances/fattn-vec-instance-bf16-bf16.cu)
+        ggml_cuda_get_fattn_vec_default_pairs(GGML_CUDA_FA_DEFAULT_KV_PAIRS)
+        foreach(PAIR ${GGML_CUDA_FA_DEFAULT_KV_PAIRS})
+            string(REPLACE ":" ";" PARTS "${PAIR}")
+            list(GET PARTS 0 K_TYPE)
+            list(GET PARTS 1 V_TYPE)
+            ggml_add_fattn_vec_pair_musa(GGML_SOURCES_MUSA "${FA_VEC_PREFIX}" "${K_TYPE}" "${V_TYPE}")
+        endforeach()
     endif()
 
     set_source_files_properties(${GGML_SOURCES_MUSA} PROPERTIES LANGUAGE CXX)

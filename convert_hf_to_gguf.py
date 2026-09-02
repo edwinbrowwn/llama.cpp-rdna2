@@ -22,6 +22,7 @@ from conversion import (
     get_model_class,
     logger,
     print_registered_models,
+    supports_mmproj_model,
     _mistral_common_installed,
     _mistral_import_error_msg,
 )
@@ -43,6 +44,17 @@ def split_str_to_n_bytes(split_str: str) -> int:
         raise ValueError(f"Invalid split size: {split_str}, must be positive")
 
     return n
+
+
+def has_multimodal_config(hparams: dict) -> bool:
+    if any(hparams.get(key) for key in ("vision_config", "vision_encoder", "audio_config", "whisper_config")):
+        return True
+
+    thinker_config = hparams.get("thinker_config")
+    if isinstance(thinker_config, dict):
+        return any(thinker_config.get(key) for key in ("vision_config", "audio_config"))
+
+    return False
 
 
 def parse_args() -> argparse.Namespace:
@@ -242,6 +254,15 @@ def main() -> None:
         if not is_mistral_format:
             model_architecture = get_model_architecture(hparams, model_type)
             logger.info(f"Model architecture: {model_architecture}")
+            source_architectures = hparams.get("architectures") or []
+            has_mmproj_companion = supports_mmproj_model(model_architecture) or any(
+                supports_mmproj_model(arch) for arch in source_architectures
+            )
+            if model_type == ModelType.TEXT and has_multimodal_config(hparams) and has_mmproj_companion:
+                logger.warning(
+                    "Model config includes a multimodal encoder, but this run will convert only the text model. "
+                    "Use --mmproj to export the multimodal projector."
+                )
             try:
                 model_class = get_model_class(model_architecture, mmproj=(model_type == ModelType.MMPROJ))
             except NotImplementedError:

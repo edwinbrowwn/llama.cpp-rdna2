@@ -89,7 +89,7 @@ struct ggml_backend_meta_device_context {
     }
 };
 
-static bool ggml_backend_dev_is_meta(ggml_backend_dev_t dev);
+
 
 static const char * ggml_backend_meta_device_get_name(ggml_backend_dev_t dev) {
     GGML_ASSERT(ggml_backend_dev_is_meta(dev));
@@ -202,7 +202,7 @@ static const ggml_backend_device_i ggml_backend_meta_device_iface = {
     /* .event_synchronize    = */ nullptr,
 };
 
-static bool ggml_backend_dev_is_meta(ggml_backend_dev_t dev) {
+bool ggml_backend_dev_is_meta(ggml_backend_dev_t dev) {
     return dev != nullptr && dev->iface.get_name == ggml_backend_meta_device_iface.get_name;
 }
 

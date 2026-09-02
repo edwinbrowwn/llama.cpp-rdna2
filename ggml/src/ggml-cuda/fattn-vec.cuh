@@ -27,6 +27,7 @@ static __global__ void flash_attn_ext_vec(
         const int  * KV_max_ptr,
         float      * dst_ptr,
         float2     * dst_meta_ptr,
+        float2     * dst_final_meta_ptr,
         const float scale,
         const float max_bias,
         const float m0,
@@ -50,10 +51,11 @@ static __global__ void flash_attn_ext_vec(
     const int  * GGML_CUDA_RESTRICT KV_max   = KV_max_ptr;
     float      * GGML_CUDA_RESTRICT dst      = dst_ptr;
     float2     * GGML_CUDA_RESTRICT dst_meta = dst_meta_ptr;
+    float2     * GGML_CUDA_RESTRICT dst_final_meta = dst_final_meta_ptr;
 
     // Skip unused kernel variants for faster compilation:
-    if (use_logit_softcap && !(D == 128 || D == 256)) {
-        GGML_UNUSED_VARS(Q, K, V, mask, sinks, KV_max, dst, dst_meta, scale,
+    if (use_logit_softcap && !(D == 128 || D == 256 || D == 512)) {
+        GGML_UNUSED_VARS(Q, K, V, mask, sinks, KV_max, dst, dst_meta, dst_final_meta, scale,
             max_bias, m0, m1, n_head_log2, logit_softcap,
             ne00, ne01, ne02, ne03,
                   nb01, nb02, nb03,
@@ -510,11 +512,12 @@ static __global__ void flash_attn_ext_vec(
 
     }
 
-    if (gridDim.y != 1 && tid < ncols && (ncols == 1 || ic0 + tid < int(ne01.z))) {
-        dst_meta[((sequence*int(ne01.z) + ic0 + tid)*ne02 + head)*gridDim.y + blockIdx.y] = make_float2(KQ_max[tid], KQ_sum[tid]);
+    float2 * const meta_out = gridDim.y == 1 ? dst_final_meta : dst_meta;
+    if (meta_out != nullptr && tid < ncols && (ncols == 1 || ic0 + tid < int(ne01.z))) {
+        meta_out[((sequence*int(ne01.z) + ic0 + tid)*ne02 + head)*gridDim.y + blockIdx.y] = make_float2(KQ_max[tid], KQ_sum[tid]);
     }
 #else
-    GGML_UNUSED_VARS(Q_ptr, K_ptr, V_ptr, mask_ptr, sinks_ptr, KV_max_ptr, dst_ptr, dst_meta_ptr, scale,
+    GGML_UNUSED_VARS(Q_ptr, K_ptr, V_ptr, mask_ptr, sinks_ptr, KV_max_ptr, dst_ptr, dst_meta_ptr, dst_final_meta_ptr, scale,
         max_bias, m0, m1, n_head_log2, logit_softcap,
         ne00, ne01, ne02, ne03,
               nb01, nb02, nb03,
@@ -583,6 +586,12 @@ void ggml_cuda_flash_attn_ext_vec_case(ggml_backend_cuda_context & ctx, ggml_ten
     extern DECL_FATTN_VEC_CASE(D, type_K, GGML_TYPE_Q4_1); \
     extern DECL_FATTN_VEC_CASE(D, type_K, GGML_TYPE_Q5_0); \
     extern DECL_FATTN_VEC_CASE(D, type_K, GGML_TYPE_Q5_1); \
+    extern DECL_FATTN_VEC_CASE(D, type_K, GGML_TYPE_Q6_0); \
+    extern DECL_FATTN_VEC_CASE(D, type_K, GGML_TYPE_Q6_1); \
+    extern DECL_FATTN_VEC_CASE(D, type_K, GGML_TYPE_Q3_0); \
+    extern DECL_FATTN_VEC_CASE(D, type_K, GGML_TYPE_Q3_1); \
+    extern DECL_FATTN_VEC_CASE(D, type_K, GGML_TYPE_Q2_0S); \
+    extern DECL_FATTN_VEC_CASE(D, type_K, GGML_TYPE_Q2_1); \
     extern DECL_FATTN_VEC_CASE(D, type_K, GGML_TYPE_Q8_0); \
     extern DECL_FATTN_VEC_CASE(D, type_K, GGML_TYPE_BF16); \
 
@@ -591,6 +600,12 @@ EXTERN_DECL_FATTN_VEC_CASES( 64, GGML_TYPE_Q4_0)
 EXTERN_DECL_FATTN_VEC_CASES( 64, GGML_TYPE_Q4_1)
 EXTERN_DECL_FATTN_VEC_CASES( 64, GGML_TYPE_Q5_0)
 EXTERN_DECL_FATTN_VEC_CASES( 64, GGML_TYPE_Q5_1)
+EXTERN_DECL_FATTN_VEC_CASES( 64, GGML_TYPE_Q6_0)
+EXTERN_DECL_FATTN_VEC_CASES( 64, GGML_TYPE_Q6_1)
+EXTERN_DECL_FATTN_VEC_CASES( 64, GGML_TYPE_Q3_0)
+EXTERN_DECL_FATTN_VEC_CASES( 64, GGML_TYPE_Q3_1)
+EXTERN_DECL_FATTN_VEC_CASES( 64, GGML_TYPE_Q2_0S)
+EXTERN_DECL_FATTN_VEC_CASES( 64, GGML_TYPE_Q2_1)
 EXTERN_DECL_FATTN_VEC_CASES( 64, GGML_TYPE_Q8_0)
 EXTERN_DECL_FATTN_VEC_CASES( 64, GGML_TYPE_BF16)
 
@@ -599,6 +614,12 @@ EXTERN_DECL_FATTN_VEC_CASES(128, GGML_TYPE_Q4_0)
 EXTERN_DECL_FATTN_VEC_CASES(128, GGML_TYPE_Q4_1)
 EXTERN_DECL_FATTN_VEC_CASES(128, GGML_TYPE_Q5_0)
 EXTERN_DECL_FATTN_VEC_CASES(128, GGML_TYPE_Q5_1)
+EXTERN_DECL_FATTN_VEC_CASES(128, GGML_TYPE_Q6_0)
+EXTERN_DECL_FATTN_VEC_CASES(128, GGML_TYPE_Q6_1)
+EXTERN_DECL_FATTN_VEC_CASES(128, GGML_TYPE_Q3_0)
+EXTERN_DECL_FATTN_VEC_CASES(128, GGML_TYPE_Q3_1)
+EXTERN_DECL_FATTN_VEC_CASES(128, GGML_TYPE_Q2_0S)
+EXTERN_DECL_FATTN_VEC_CASES(128, GGML_TYPE_Q2_1)
 EXTERN_DECL_FATTN_VEC_CASES(128, GGML_TYPE_Q8_0)
 EXTERN_DECL_FATTN_VEC_CASES(128, GGML_TYPE_BF16)
 
@@ -607,5 +628,25 @@ EXTERN_DECL_FATTN_VEC_CASES(256, GGML_TYPE_Q4_0)
 EXTERN_DECL_FATTN_VEC_CASES(256, GGML_TYPE_Q4_1)
 EXTERN_DECL_FATTN_VEC_CASES(256, GGML_TYPE_Q5_0)
 EXTERN_DECL_FATTN_VEC_CASES(256, GGML_TYPE_Q5_1)
+EXTERN_DECL_FATTN_VEC_CASES(256, GGML_TYPE_Q6_0)
+EXTERN_DECL_FATTN_VEC_CASES(256, GGML_TYPE_Q6_1)
+EXTERN_DECL_FATTN_VEC_CASES(256, GGML_TYPE_Q3_0)
+EXTERN_DECL_FATTN_VEC_CASES(256, GGML_TYPE_Q3_1)
+EXTERN_DECL_FATTN_VEC_CASES(256, GGML_TYPE_Q2_0S)
+EXTERN_DECL_FATTN_VEC_CASES(256, GGML_TYPE_Q2_1)
 EXTERN_DECL_FATTN_VEC_CASES(256, GGML_TYPE_Q8_0)
 EXTERN_DECL_FATTN_VEC_CASES(256, GGML_TYPE_BF16)
+
+EXTERN_DECL_FATTN_VEC_CASES(512, GGML_TYPE_F16)
+EXTERN_DECL_FATTN_VEC_CASES(512, GGML_TYPE_Q4_0)
+EXTERN_DECL_FATTN_VEC_CASES(512, GGML_TYPE_Q4_1)
+EXTERN_DECL_FATTN_VEC_CASES(512, GGML_TYPE_Q5_0)
+EXTERN_DECL_FATTN_VEC_CASES(512, GGML_TYPE_Q5_1)
+EXTERN_DECL_FATTN_VEC_CASES(512, GGML_TYPE_Q6_0)
+EXTERN_DECL_FATTN_VEC_CASES(512, GGML_TYPE_Q6_1)
+EXTERN_DECL_FATTN_VEC_CASES(512, GGML_TYPE_Q3_0)
+EXTERN_DECL_FATTN_VEC_CASES(512, GGML_TYPE_Q3_1)
+EXTERN_DECL_FATTN_VEC_CASES(512, GGML_TYPE_Q2_0S)
+EXTERN_DECL_FATTN_VEC_CASES(512, GGML_TYPE_Q2_1)
+EXTERN_DECL_FATTN_VEC_CASES(512, GGML_TYPE_Q8_0)
+EXTERN_DECL_FATTN_VEC_CASES(512, GGML_TYPE_BF16)

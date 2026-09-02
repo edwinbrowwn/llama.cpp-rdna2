@@ -460,6 +460,246 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
     }
 }
 
+template <ggml_type type, int J, bool fallback> static __device__ __forceinline__ void ggml_cuda_mmq_load_tiles_q6_0(
+        const char * __restrict__ x, int * __restrict__ x_tile, const int kbx0, const int i_max, const int stride) {
+    constexpr int warp_size   = ggml_cuda_get_physical_warp_size();
+    constexpr int nwarps      = ggml_cuda_mmq_get_nthreads(type, J, fallback) / warp_size;
+    constexpr int I           = ggml_cuda_mmq_get_I(type, J, fallback);
+    constexpr int sram_stride = ggml_cuda_mmq_get_sram_stride(type, J, fallback);
+
+#if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+    int   * x_qs = (int   *)  x_tile;
+    float * x_df = (float *) (x_qs + 2*MMQ_TILE_NE_K);
+#else
+    constexpr tile_x_sizes txs = mmq_get_dp4a_tile_x_sizes(GGML_TYPE_Q6_0, I);
+    int   * x_qs = (int   *)  x_tile;
+    float * x_df = (float *) (x_qs + txs.qs);
+#endif
+
+    constexpr int threads_per_row = MMQ_ITER_K / (4 * QR6_0);
+    constexpr int nrows = warp_size / threads_per_row;
+    const int txi = warp_size > threads_per_row ? threadIdx.x % threads_per_row : threadIdx.x;
+    const int kbx  = txi / QI6_0;
+    const int kqsx = txi % QI6_0;
+
+#pragma unroll
+    for (int i0 = 0; i0 < I; i0 += nrows*nwarps) {
+        int i = i0 + (nrows == 1 ? threadIdx.y : threadIdx.y*nrows + threadIdx.x/threads_per_row);
+        if (fallback) {
+            i = min(i, i_max);
+        }
+
+        const block_q6_0 * bxi = (const block_q6_0 *) x + kbx0 + i*stride + kbx;
+        const int ql = get_int_b2(bxi->qs, kqsx);
+        const int qh = get_int_b2(bxi->qh, kqsx % 2) >> (4 * (kqsx / 2));
+
+        int qs0 = ((ql >> 0) & 0x0F0F0F0F) | ((qh << 4) & 0x30303030);
+        int qs1 = ((ql >> 4) & 0x0F0F0F0F) | ((qh << 2) & 0x30303030);
+        qs0 = __vsubss4(qs0, 0x20202020);
+        qs1 = __vsubss4(qs1, 0x20202020);
+
+#if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+        x_qs[i*sram_stride + kbx*(2*QI6_0) + kqsx + 0]     = qs0;
+        x_qs[i*sram_stride + kbx*(2*QI6_0) + kqsx + QI6_0] = qs1;
+#else
+        x_qs[i*(2*MMQ_TILE_NE_K + 1) + kbx*(2*QI6_0) + kqsx + 0]     = qs0;
+        x_qs[i*(2*MMQ_TILE_NE_K + 1) + kbx*(2*QI6_0) + kqsx + QI6_0] = qs1;
+#endif
+    }
+
+    constexpr int blocks_per_tile_x_row = MMQ_TILE_NE_K / QI6_0;
+    constexpr int rows_per_warp = warp_size / blocks_per_tile_x_row;
+    const int kbxd = threadIdx.x % blocks_per_tile_x_row;
+
+#pragma unroll
+    for (int i0 = 0; i0 < I; i0 += nwarps * rows_per_warp) {
+        int i = i0 + threadIdx.y * rows_per_warp + threadIdx.x / blocks_per_tile_x_row;
+        if (fallback) {
+            i = min(i, i_max);
+        }
+
+        const block_q6_0 * bxi = (const block_q6_0 *) x + kbx0 + i*stride + kbxd;
+#if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+        x_df[i*sram_stride                     + kbxd] = bxi->d;
+#else
+        x_df[i*(MMQ_TILE_NE_K/QI6_0) + i/QI6_0 + kbxd] = bxi->d;
+#endif
+    }
+}
+
+template <ggml_type type, int J, bool fallback> static __device__ __forceinline__ void ggml_cuda_mmq_load_tiles_q6_1(
+        const char * __restrict__ x, int * __restrict__ x_tile, const int kbx0, const int i_max, const int stride) {
+    constexpr int warp_size   = ggml_cuda_get_physical_warp_size();
+    constexpr int nwarps      = ggml_cuda_mmq_get_nthreads(type, J, fallback) / warp_size;
+    constexpr int I           = ggml_cuda_mmq_get_I(type, J, fallback);
+    constexpr int sram_stride = ggml_cuda_mmq_get_sram_stride(type, J, fallback);
+
+#if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+    int   * x_qs = (int   *)  x_tile;
+    half2 * x_dm = (half2 *) (x_qs + 2*MMQ_TILE_NE_K);
+#else
+    constexpr tile_x_sizes txs = mmq_get_dp4a_tile_x_sizes(GGML_TYPE_Q6_1, I);
+    int   * x_qs = (int   *)  x_tile;
+    half2 * x_dm = (half2 *) (x_qs + txs.qs);
+#endif
+
+    constexpr int threads_per_row = MMQ_ITER_K / (4 * QR6_1);
+    constexpr int nrows = warp_size / threads_per_row;
+    const int txi = warp_size > threads_per_row ? threadIdx.x % threads_per_row : threadIdx.x;
+    const int kbx  = txi / QI6_1;
+    const int kqsx = txi % QI6_1;
+
+#pragma unroll
+    for (int i0 = 0; i0 < I; i0 += nrows*nwarps) {
+        int i = i0 + (nrows == 1 ? threadIdx.y : threadIdx.y*nrows + threadIdx.x/threads_per_row);
+        if (fallback) {
+            i = min(i, i_max);
+        }
+
+        const block_q6_1 * bxi = (const block_q6_1 *) x + kbx0 + i*stride + kbx;
+        const int ql = get_int_b4(bxi->qs, kqsx);
+        const int qh = get_int_b4(bxi->qh, kqsx % 2) >> (4 * (kqsx / 2));
+        const int qs0 = ((ql >> 0) & 0x0F0F0F0F) | ((qh << 4) & 0x30303030);
+        const int qs1 = ((ql >> 4) & 0x0F0F0F0F) | ((qh << 2) & 0x30303030);
+
+#if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+        x_qs[i*sram_stride + kbx*(2*QI6_1) + kqsx + 0]     = qs0;
+        x_qs[i*sram_stride + kbx*(2*QI6_1) + kqsx + QI6_1] = qs1;
+#else
+        x_qs[i*(2*MMQ_TILE_NE_K + 1) + kbx*(2*QI6_1) + kqsx + 0]     = qs0;
+        x_qs[i*(2*MMQ_TILE_NE_K + 1) + kbx*(2*QI6_1) + kqsx + QI6_1] = qs1;
+#endif
+    }
+
+    constexpr int blocks_per_tile_x_row = MMQ_TILE_NE_K / QI6_1;
+    constexpr int rows_per_warp = warp_size / blocks_per_tile_x_row;
+    const int kbxd = threadIdx.x % blocks_per_tile_x_row;
+
+#pragma unroll
+    for (int i0 = 0; i0 < I; i0 += nwarps * rows_per_warp) {
+        int i = i0 + threadIdx.y * rows_per_warp + threadIdx.x / blocks_per_tile_x_row;
+        if (fallback) {
+            i = min(i, i_max);
+        }
+
+        const block_q6_1 * bxi = (const block_q6_1 *) x + kbx0 + i*stride + kbxd;
+#if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+        x_dm[i*sram_stride                     + kbxd] = bxi->dm;
+#else
+        x_dm[i*(MMQ_TILE_NE_K/QI6_1) + i/QI6_1 + kbxd] = bxi->dm;
+#endif
+    }
+}
+
+// The q2/q3 cache formats unpack to the same q8 MMQ tiles as upstream's
+// symmetric/asymmetric integer formats. Each packed int contributes four
+// two-bit planes; q3 adds the high bit before applying its zero point.
+template <ggml_type type, int J, bool fallback, int offset>
+static __device__ __forceinline__ void ggml_cuda_mmq_load_tiles_q2plane(
+        const char * __restrict__ x, int * __restrict__ x_tile, const int kbx0, const int i_max, const int stride) {
+    constexpr bool has_qh = type == GGML_TYPE_Q3_0 || type == GGML_TYPE_Q3_1;
+    constexpr bool has_dm = type == GGML_TYPE_Q3_1 || type == GGML_TYPE_Q2_1;
+    constexpr int qi = 2;
+    constexpr int warp_size   = ggml_cuda_get_physical_warp_size();
+    constexpr int nwarps      = ggml_cuda_mmq_get_nthreads(type, J, fallback) / warp_size;
+    constexpr int I           = ggml_cuda_mmq_get_I(type, J, fallback);
+    constexpr int sram_stride = ggml_cuda_mmq_get_sram_stride(type, J, fallback);
+
+#if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+    constexpr int tile_stride = sram_stride;
+    int   * x_qs = (int   *)  x_tile;
+    float * x_df = (float *) (x_qs + 2*MMQ_TILE_NE_K);
+    half2 * x_dm = (half2 *) (x_qs + 2*MMQ_TILE_NE_K);
+#else
+    constexpr int tile_stride = 2*MMQ_TILE_NE_K + 1;
+    constexpr tile_x_sizes txs = mmq_get_dp4a_tile_x_sizes(type, I);
+    int   * x_qs = (int   *)  x_tile;
+    float * x_df = (float *) (x_qs + txs.qs);
+    half2 * x_dm = (half2 *) (x_qs + txs.qs);
+#endif
+
+    constexpr int threads_per_row = MMQ_ITER_K / (4 * 4);
+    constexpr int nrows = warp_size / threads_per_row;
+    const int txi = warp_size > threads_per_row ? threadIdx.x % threads_per_row : threadIdx.x;
+    const int kbx  = txi / qi;
+    const int kqsx = txi % qi;
+
+#pragma unroll
+    for (int i0 = 0; i0 < I; i0 += nrows*nwarps) {
+        int i = i0 + (nrows == 1 ? threadIdx.y : threadIdx.y*nrows + threadIdx.x/threads_per_row);
+        if (fallback) {
+            i = min(i, i_max);
+        }
+
+        const int ibx = kbx0 + i*stride + kbx;
+        int v;
+        int h = 0;
+        if constexpr (type == GGML_TYPE_Q3_0) {
+            const block_q3_0 * b = (const block_q3_0 *) x + ibx;
+            v = get_int_b2(b->qs, kqsx);
+            h = get_int_b2(b->qh, 0) >> (4*kqsx);
+        } else if constexpr (type == GGML_TYPE_Q3_1) {
+            const block_q3_1 * b = (const block_q3_1 *) x + ibx;
+            v = get_int_b4(b->qs, kqsx);
+            h = get_int_b4(b->qh, 0) >> (4*kqsx);
+        } else if constexpr (type == GGML_TYPE_Q2_0S) {
+            const block_q2_0s * b = (const block_q2_0s *) x + ibx;
+            v = get_int_b2(b->qs, kqsx);
+        } else {
+            const block_q2_1 * b = (const block_q2_1 *) x + ibx;
+            v = get_int_b4(b->qs, kqsx);
+        }
+
+#pragma unroll
+        for (int p = 0; p < 4; ++p) {
+            int vi = (v >> (2*p)) & 0x03030303;
+            if constexpr (has_qh) {
+                const int hb = h >> (8*p);
+                vi |= (hb <<  2) & 0x00000004;
+                vi |= (hb <<  9) & 0x00000400;
+                vi |= (hb << 16) & 0x00040000;
+                vi |= (hb << 23) & 0x04000000;
+            }
+            if constexpr (offset != 0) {
+                vi = __vsubss4(vi, 0x01010101*offset);
+            }
+            x_qs[i*tile_stride + kbx*(4*qi) + 2*p + kqsx] = vi;
+        }
+    }
+
+    constexpr int blocks_per_tile_x_row = MMQ_TILE_NE_K / 4;
+    constexpr int rows_per_warp = warp_size / blocks_per_tile_x_row;
+    const int kbxd = threadIdx.x % blocks_per_tile_x_row;
+
+#pragma unroll
+    for (int i0 = 0; i0 < I; i0 += nwarps * rows_per_warp) {
+        int i = i0 + threadIdx.y * rows_per_warp + threadIdx.x / blocks_per_tile_x_row;
+        if (fallback) {
+            i = min(i, i_max);
+        }
+
+        const int ibxd = kbx0 + i*stride + kbxd;
+        if constexpr (has_dm) {
+            const half2 dm = type == GGML_TYPE_Q3_1 ?
+                ((const block_q3_1 *) x + ibxd)->dm : ((const block_q2_1 *) x + ibxd)->dm;
+#if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+            x_dm[i*sram_stride                 + kbxd] = dm;
+#else
+            x_dm[i*(MMQ_TILE_NE_K/4) + i/4 + kbxd] = dm;
+#endif
+        } else {
+            const float d = type == GGML_TYPE_Q3_0 ?
+                __half2float(((const block_q3_0 *) x + ibxd)->d) :
+                __half2float(((const block_q2_0s *) x + ibxd)->d);
+#if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+            x_df[i*sram_stride                 + kbxd] = d;
+#else
+            x_df[i*(MMQ_TILE_NE_K/4) + i/4 + kbxd] = d;
+#endif
+        }
+    }
+}
+
 template <ggml_type type, int J, bool fallback> static __device__ __forceinline__ void ggml_cuda_mmq_load_tiles_q8_0(
         const char * __restrict__ x, int * __restrict__ x_tile, const int kbx0, const int i_max, const int stride) {
     constexpr int warp_size   = ggml_cuda_get_physical_warp_size();

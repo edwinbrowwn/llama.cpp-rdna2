@@ -59,6 +59,19 @@ struct llama_cparams {
     enum llama_context_type ctx_type;
     enum llama_pooling_type pooling_type;
 
+    // Structured KVarN cache settings.  Kept in the internal context params so
+    // memory creation does not need to depend on the public params object.
+    llama_kvarn_params kvarn;
+
+    uint32_t  kv_tail_tokens = 0;
+    uint32_t  kv_tail_tokens_swa = 0;
+    uint32_t  kv_tail_tokens_requested = 0;
+    uint32_t  kv_tail_tokens_swa_requested = 0;
+    bool      kv_tail_native_exact = false;
+    bool      kv_tail_native_exact_swa = false;
+    uint32_t  kv_tail_rollback_tokens = 0;
+    ggml_type kv_tail_type   = GGML_TYPE_COUNT;
+
     ggml_backend_sched_eval_callback cb_eval;
     void * cb_eval_user_data;
 

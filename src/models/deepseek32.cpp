@@ -46,7 +46,6 @@ void llama_model_deepseek32::load_arch_hparams(llama_model_loader & ml) {
         default: type = LLM_TYPE_UNKNOWN;
     }
 }
-
 void llama_model_deepseek32::load_arch_tensors(llama_model_loader & ml) {
     LLAMA_LOAD_LOCALS;
 
@@ -727,4 +726,3 @@ llama_model_deepseek32::graph_mtp::graph_mtp(const llama_model & model, const ll
     res->t_logits = cur;
     ggml_build_forward_expand(gf, cur);
 }
-

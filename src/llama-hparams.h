@@ -438,6 +438,10 @@ struct llama_hparams {
     // number of effective layers (excludes nextn layers)
     uint32_t n_layer() const;
 
+    // Number of layers that allocate attention KV storage.  KVarN uses this
+    // for exact context sizing on models with a reduced KV layer range.
+    uint32_t n_layer_kv() const;
+
     // note that this function uses different SWA parameters from those in the hparams
     // note: inlined on purpose for performance reasons
     // TODO: think of a better place for this function

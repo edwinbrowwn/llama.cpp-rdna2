@@ -3,13 +3,12 @@
 void llama_model_dream::load_arch_hparams(llama_model_loader & ml) {
     ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, hparams.f_norm_rms_eps);
 
-    // Dream models are primarily 7B with 28 layers
     switch (hparams.n_layer()) {
-        case 28:
-            type = LLM_TYPE_7B;
-            break;
-        default:
-            type = LLM_TYPE_UNKNOWN;
+        case 26: type = LLM_TYPE_3B;  break;
+        case 28: type = LLM_TYPE_7B;  break;
+        case 34: type = LLM_TYPE_8B;  break;
+        case 40: type = LLM_TYPE_14B; break;
+        default: type = LLM_TYPE_UNKNOWN;
     }
     // Set non-causal attention for diffusion models
     hparams.causal_attn = false;
