@@ -167,6 +167,53 @@ inline server_spec_target_backend_profile server_spec_target_backend_profile_sel
     return {};
 }
 
+// HIP graph capture/instantiate costs are large on the exact gfx1030 TP4 MTP
+// verification path and recur as the attention graph changes with context.
+// Keep this structural selector independent of device/output/sidecar checks;
+// the server adds those runtime gates before changing graph policy.
+inline bool server_spec_gfx1030_mtp_smooth_graph_profile(
+        const common_params_speculative & params) {
+    int n_mtp = 0;
+    int n_k4v = 0;
+    for (common_speculative_type type : params.types) {
+        switch (type) {
+            case COMMON_SPECULATIVE_TYPE_NONE:
+                break;
+            case COMMON_SPECULATIVE_TYPE_DRAFT_MTP:
+                ++n_mtp;
+                break;
+            case COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V:
+                ++n_k4v;
+                break;
+            default:
+                return false;
+        }
+    }
+    return n_mtp == 1 && n_k4v <= 1 && params.draft.n_max == 4;
+}
+
+inline bool server_spec_gfx1030_mtp_k4v_width5_profile(
+        const common_params_speculative & params) {
+    int n_mtp = 0;
+    int n_k4v = 0;
+    for (common_speculative_type type : params.types) {
+        switch (type) {
+            case COMMON_SPECULATIVE_TYPE_NONE:
+                break;
+            case COMMON_SPECULATIVE_TYPE_DRAFT_MTP:
+                ++n_mtp;
+                break;
+            case COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V:
+                ++n_k4v;
+                break;
+            default:
+                return false;
+        }
+    }
+    return n_mtp == 1 && n_k4v == 1 && params.draft.n_max == 5 &&
+            params.ngram_map_k4v.size_m > 5;
+}
+
 // A stacked n-gram map has its own value width and can otherwise override the
 // neural drafter's much smaller cycle. On the certified gfx1030 profiles, K4V
 // m=48 can turn a new hit into a 49-row target pass and make the 248K-vocabulary
@@ -206,7 +253,7 @@ inline int32_t server_spec_gfx1030_neural_k4v_cycle_cap(
     if (n_dflash == 1 && params.draft.n_max == 5) {
         return 5;
     }
-    if (n_mtp == 1 && params.draft.n_max >= 2 && params.draft.n_max <= 4) {
+    if (n_mtp == 1 && params.draft.n_max >= 2 && params.draft.n_max <= 5) {
         return params.draft.n_max;
     }
     return -1;

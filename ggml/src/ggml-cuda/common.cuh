@@ -1664,7 +1664,10 @@ struct ggml_cuda_graph {
     }
 
     bool is_enabled() const {
-        static const bool disable_cuda_graphs_due_to_env = (getenv("GGML_CUDA_DISABLE_GRAPHS") != nullptr);
+        // The server can select a smooth speculative profile after backend
+        // devices have been enumerated. Do not latch this environment value on
+        // an earlier graph-policy query during startup.
+        const bool disable_cuda_graphs_due_to_env = getenv("GGML_CUDA_DISABLE_GRAPHS") != nullptr;
         return !(disable_due_to_gpu_arch || disable_cuda_graphs_due_to_env);
     }
 #endif

@@ -62,6 +62,11 @@ static bool server_env_enabled(const char * name) {
     return std::getenv(name) != nullptr && !server_env_disabled(name);
 }
 
+static bool server_spec_cycle_trace_enabled() {
+    static const bool enabled = server_env_enabled("LLAMA_SPEC_CYCLE_TRACE");
+    return enabled;
+}
+
 static bool server_vocab_sharded_output_enabled() {
     const char * value = std::getenv("GGML_TP_SHARDED_OUTPUT");
     return value != nullptr && std::strcmp(value, "1") == 0;
@@ -122,6 +127,45 @@ static int32_t server_gfx1030_neural_k4v_cycle_cap(const common_params & params)
     }
 
     return server_spec_gfx1030_neural_k4v_cycle_cap(params.speculative);
+}
+
+static bool server_gfx1030_mtp_sidecar_runtime_profile(const common_params & params) {
+    if (!server_gfx1030_native_auto_enabled() ||
+            !server_vocab_sharded_output_enabled() ||
+            !server_env_enabled("SPEC_SIDECAR") ||
+            params.split_mode != LLAMA_SPLIT_MODE_TENSOR) {
+        return false;
+    }
+
+    size_t n_rocm_devices = 0;
+    for (ggml_backend_dev_t device : params.devices) {
+        if (device == nullptr) continue;
+        const char * name = ggml_backend_dev_name(device);
+        if (ggml_backend_dev_type(device) != GGML_BACKEND_DEVICE_TYPE_GPU ||
+                name == nullptr || std::strncmp(name, "ROCm", 4) != 0) {
+            return false;
+        }
+        ++n_rocm_devices;
+    }
+    return n_rocm_devices == 4;
+}
+
+static bool server_gfx1030_mtp_sidecar_profile(const common_params & params) {
+    return server_gfx1030_mtp_sidecar_runtime_profile(params) &&
+            server_spec_gfx1030_mtp_smooth_graph_profile(params.speculative);
+}
+
+static bool server_gfx1030_mtp_k4v_width5_profile(const common_params & params) {
+    return server_gfx1030_mtp_sidecar_runtime_profile(params) &&
+            params.n_parallel == 1 &&
+            server_spec_gfx1030_mtp_k4v_width5_profile(params.speculative);
+}
+
+static bool server_gfx1030_mtp_dynamic_depth_profile(const common_params & params) {
+    // The schedule is runtime-qualified through four simultaneous slots. A
+    // larger server retains fixed depth unless explicitly opted into `batch`.
+    return server_gfx1030_mtp_sidecar_profile(params) &&
+            params.n_parallel >= 1 && params.n_parallel <= 4;
 }
 
 static bool server_greedy_backend_sampling_eligible(const common_params_sampling & sampling) {
@@ -429,7 +473,15 @@ struct server_slot {
     // target prompt. Host prompt-cache and slot-file restores replace target KV
     // without restoring the sidecar's private device KV.
     bool spec_prompt_state_valid = true;
+    bool spec_n_max_user_override = false;
     std::mt19937 spec_synth_rng;
+    uint64_t spec_cycle_index = 0;
+    int64_t spec_cycle_started_us = 0;
+    int64_t spec_cycle_draft_us = 0;
+    int64_t spec_cycle_verify_started_us = 0;
+    uint64_t spec_cycle_graph_reused_before = 0;
+    llama_pos spec_cycle_pos = -1;
+    common_speculative_type spec_cycle_source = COMMON_SPECULATIVE_TYPE_NONE;
 
     // TODO: move members that belong to the task (such as `generated_text`, `has_new_line`) to task_results_state
     //       see https://github.com/ggml-org/llama.cpp/pull/18283#issuecomment-3710175837
@@ -573,6 +625,14 @@ struct server_slot {
 
         spec_is_replay = false;
         spec_grammar_fallback_logged = false;
+        spec_n_max_user_override = false;
+        spec_cycle_index = 0;
+        spec_cycle_started_us = 0;
+        spec_cycle_draft_us = 0;
+        spec_cycle_verify_started_us = 0;
+        spec_cycle_graph_reused_before = 0;
+        spec_cycle_pos = -1;
+        spec_cycle_source = COMMON_SPECULATIVE_TYPE_NONE;
 
         last_nl_pos    = 0;
         generated_text = "";
@@ -742,6 +802,11 @@ struct server_slot {
             SLT_DBG(*this, "slot decode token, id=%d, n_ctx = %d, n_tokens = %d, truncated = %d\n",
                     sampled, n_ctx, prompt.n_tokens(), truncated);
         } else {
+            if (server_spec_cycle_trace_enabled()) {
+                spec_cycle_verify_started_us = ggml_time_us();
+                spec_cycle_graph_reused_before = (uint64_t) llama_perf_context(ctx_tgt).n_reused;
+                spec_cycle_pos = prompt.tokens.pos_next();
+            }
             SLT_DBG(*this, "generate_draft: id=%d, #tokens=%zu, #draft=%zu, pos_next=%d\n",
                     sampled, prompt.tokens.size(), spec_draft.size(), prompt.tokens.pos_next());
 
@@ -1371,6 +1436,27 @@ private:
         if (prime_auto_backend_sampling) {
             params_base.sampling.backend_sampling = true;
             SRV_INF("%s", "reserving target backend-sampling buffers for gfx1030 speculative auto policy\n");
+        }
+
+        if (server_gfx1030_mtp_k4v_width5_profile(params_base) &&
+                std::getenv("LLAMA_SPEC_MTP_NEURAL_DEPTH") == nullptr) {
+#if defined(_WIN32)
+            _putenv_s("LLAMA_SPEC_MTP_NEURAL_DEPTH", "4");
+#else
+            setenv("LLAMA_SPEC_MTP_NEURAL_DEPTH", "4", 0);
+#endif
+            SRV_INF("%s", "using source-specific p1 widths: neural MTP=4, bounded K4V=5\n");
+        }
+
+        if (server_gfx1030_mtp_dynamic_depth_profile(params_base) &&
+                std::getenv("LLAMA_SPEC_MTP_DYNAMIC_DEPTH") == nullptr) {
+#if defined(_WIN32)
+            _putenv_s("LLAMA_SPEC_MTP_DYNAMIC_DEPTH", "batch");
+#else
+            setenv("LLAMA_SPEC_MTP_DYNAMIC_DEPTH", "batch", 0);
+#endif
+            SRV_INF("%s", "enabling batch-sticky MTP depth schedule for qualified gfx1030 TP4 sidecar; "
+                    "set LLAMA_SPEC_MTP_DYNAMIC_DEPTH=off to disable\n");
         }
 
         llama_init = common_init_from_params(params_base);
@@ -2199,7 +2285,8 @@ private:
 
         // initialize samplers
         if (task.need_sampling()) {
-            if (task.params.speculative_n_max < 0 && gfx1030_neural_k4v_cycle_cap > 0) {
+            slot.spec_n_max_user_override = task.params.speculative_n_max >= 0;
+            if (!slot.spec_n_max_user_override && gfx1030_neural_k4v_cycle_cap > 0) {
                 task.params.speculative_n_max = gfx1030_neural_k4v_cycle_cap;
             }
 
@@ -3508,7 +3595,7 @@ private:
                         common_speculative_get_draft_params(spec.get(), slot.id) = {
                             /* .drafting = */ true,
                             /* .n_max    = */ n_draft_max,
-                            /* .n_max_user_override = */ slot.task->params.speculative_n_max >= 0,
+                            /* .n_max_user_override = */ slot.spec_n_max_user_override,
                             /* .n_past   = */ slot.prompt.n_tokens(),
                             /* .id_last  = */ slot.sampled,
                             /* .prompt   = */ &slot.spec_prompt,
@@ -3526,9 +3613,26 @@ private:
 
         // generate the actual drafts (if any)
         if (!drafting.empty()) {
+            const bool cycle_trace = server_spec_cycle_trace_enabled();
+            const int64_t draft_started_us = cycle_trace ? ggml_time_us() : 0;
+            if (cycle_trace) {
+                iterate(drafting, [&](server_slot & slot) {
+                    slot.spec_cycle_index++;
+                    slot.spec_cycle_started_us = draft_started_us;
+                    slot.spec_cycle_draft_us = 0;
+                    slot.spec_cycle_source = COMMON_SPECULATIVE_TYPE_NONE;
+                });
+            }
             queue_tasks.yield_to_queue([&]() {
                 common_speculative_draft(spec.get());
             });
+            if (cycle_trace) {
+                const int64_t draft_finished_us = ggml_time_us();
+                iterate(drafting, [&](server_slot & slot) {
+                    slot.spec_cycle_draft_us = draft_finished_us - draft_started_us;
+                    slot.spec_cycle_source = common_speculative_last_type(spec.get(), slot.id);
+                });
+            }
         }
 
         // make checkpoints if needed
@@ -4575,6 +4679,25 @@ private:
             }
             for (size_t i = 0; i < n_accepted && i < n_accepted_per_pos.size(); ++i) {
                 n_accepted_per_pos[i]++;
+            }
+
+            if (server_spec_cycle_trace_enabled()) {
+                const int64_t now_us = ggml_time_us();
+                const uint64_t reused_now = (uint64_t) llama_perf_context(slot.ctx_tgt).n_reused;
+                const uint64_t reused_delta = reused_now >= slot.spec_cycle_graph_reused_before
+                        ? reused_now - slot.spec_cycle_graph_reused_before : 0;
+                SLT_INF(slot,
+                        "Q2CYCLE cycle=%" PRIu64 " source=%s proposed=%zu accepted=%zu emitted=%zu "
+                        "first_reject=%d rows=%zu pos=%d draft_us=%" PRId64 " verify_us=%" PRId64
+                        " cycle_us=%" PRId64 " graph_reused_delta=%" PRIu64 "\n",
+                        slot.spec_cycle_index,
+                        common_speculative_type_to_str(slot.spec_cycle_source).c_str(),
+                        n_draft, n_accepted, ids.size(), n_accepted == 0, n_draft + 1,
+                        (int) slot.spec_cycle_pos, slot.spec_cycle_draft_us,
+                        slot.spec_cycle_verify_started_us > 0
+                            ? now_us - slot.spec_cycle_verify_started_us : 0,
+                        slot.spec_cycle_started_us > 0 ? now_us - slot.spec_cycle_started_us : 0,
+                        reused_delta);
             }
 
             // add accepted tokens to the prompt
