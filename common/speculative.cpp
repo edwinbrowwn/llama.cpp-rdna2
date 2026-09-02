@@ -12,6 +12,7 @@
 #include "spec_sidecar.h"
 #include "spec_sidecar_assets.h"
 #include "speculative-sidecar-cap.h"
+#include "speculative-mtp-controller.h"
 #include "../include/spec_sidecar/sidecar_abi.h"
 
 #include "../src/llama-ext.h" // staging API: llama_set_embeddings_nextn / llama_get_embeddings_nextn_ith (used by MTP)
@@ -48,6 +49,24 @@ static bool common_speculative_rdna2_auto_enabled() {
 static bool common_speculative_sidecar_enabled() {
     const char * value = std::getenv("SPEC_SIDECAR");
     return value != nullptr && std::strcmp(value, "1") == 0;
+}
+
+static common_speculative_mtp_controller_config common_speculative_mtp_controller_config_from_env(
+        int32_t max_depth) {
+    common_speculative_mtp_controller_config config;
+    config.max_depth = max_depth;
+    const char * mode = std::getenv("LLAMA_SPEC_MTP_DYNAMIC_DEPTH");
+    if (mode == nullptr || std::strcmp(mode, "0") == 0 || std::strcmp(mode, "off") == 0) {
+        return config;
+    }
+    if (std::strcmp(mode, "batch") == 0 || std::strcmp(mode, "1") == 0 ||
+            std::strcmp(mode, "on") == 0) {
+        config.mode = common_speculative_mtp_controller_mode::BATCH;
+    } else if (std::strcmp(mode, "trace") == 0) {
+        config.mode = common_speculative_mtp_controller_mode::TRACE;
+    }
+    // Unknown values deliberately leave the controller off.
+    return config;
 }
 
 static bool common_spec_sidecar_paths_from_params(
@@ -2044,6 +2063,9 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
     std::vector<const float *> verify_h_device;
     std::vector<size_t> verify_h_device_stride;
 
+    common_speculative_mtp_controller_config controller_config;
+    int32_t neural_depth_limit = 0;
+
     llama_batch batch = {};
 
     std::vector<common_sampler_ptr> smpls;
@@ -2190,8 +2212,24 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             }
         }
         this->n_max = this->params.n_max;
+        neural_depth_limit = this->params.n_max;
+        if (const char * value = std::getenv("LLAMA_SPEC_MTP_NEURAL_DEPTH")) {
+            char * end = nullptr;
+            const long parsed = std::strtol(value, &end, 10);
+            if (end != value && *end == '\0' && parsed >= 1 && parsed <= this->params.n_max) {
+                neural_depth_limit = (int32_t) parsed;
+                SPC_INF("MTP neural depth capped at %d (configured capacity %d)\n",
+                        neural_depth_limit, this->params.n_max);
+            }
+        }
 
         pending_h.assign(n_seq, std::vector<float>(n_embd, 0.0f));
+        controller_config = common_speculative_mtp_controller_config_from_env(this->params.n_max);
+        if (controller_config.mode != common_speculative_mtp_controller_mode::OFF) {
+            SPC_INF("MTP batch-sticky depth %s: max=%d schedule=1:4,2-3:3,4:2,other:fixed\n",
+                    controller_config.mode == common_speculative_mtp_controller_mode::TRACE ? "trace" : "active",
+                    controller_config.max_depth);
+        }
 
         if (sidecar_only && n_mtp_layers == 1 && !chain_heads && !is_mem_shared &&
                 sidecar_profile != nullptr && sidecar_profile->kind == COMMON_SPEC_SIDECAR_KIND_MTP) {
@@ -2506,10 +2544,12 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         for (int32_t k = 0; sidecar_all_logits && k < n_tokens; ++k) {
             sidecar_all_logits = batch_in.logits[k] != 0;
         }
+        const bool sidecar_defer_width =
+                (this->params.n_max == 4 && n_tokens == 5) ||
+                (this->params.n_max == 5 && (n_tokens == 5 || n_tokens == 6));
         const bool sidecar_defer_catchup = (sidecar.active() || sidecar_load_pending) &&
                 sidecar_defer_requested && n_seq == 1 && n_mtp_layers == 1 &&
-                !chain_heads && !is_mem_shared && this->params.n_max == 4 &&
-                n_tokens == 5 && sidecar_all_logits;
+                !chain_heads && !is_mem_shared && sidecar_defer_width && sidecar_all_logits;
 
         if (sidecar.active() || sidecar_load_pending) {
             if (batch_in.pos == nullptr) {
@@ -2650,6 +2690,11 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             return;
         }
 
+        int32_t controller_active_batch = 0;
+        for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
+            controller_active_batch += dparams[seq_id].drafting && !mtp_sidecar_stale[seq_id];
+        }
+
         if (sidecar.active()) {
             for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
                 auto & dp = dparams[seq_id];
@@ -2669,7 +2714,12 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                     return;
                 }
 
-                const int limit = std::min(params.n_max, dp.n_max > 0 ? dp.n_max : params.n_max);
+                const int full_limit = std::min(neural_depth_limit,
+                        std::min(params.n_max, dp.n_max > 0 ? dp.n_max : params.n_max));
+                const int limit = stochastic
+                        ? common_speculative_mtp_controller_pre_draft_cap(
+                                controller_config, controller_active_batch, full_limit)
+                        : full_limit;
                 if (limit < 1) {
                     return;
                 }
@@ -2739,6 +2789,21 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                 if (result.size() < (size_t) params.n_min) {
                     result.clear();
                     if (dp.dists != nullptr) dp.dists->clear();
+                }
+
+                if (stochastic && !result.empty() &&
+                        controller_config.mode != common_speculative_mtp_controller_mode::OFF) {
+                    const auto decision = common_speculative_mtp_controller_select(
+                            controller_config, controller_active_batch, full_limit);
+                    if (controller_config.mode == common_speculative_mtp_controller_mode::TRACE) {
+                        SPC_INF("MTPCTRL seq=%d active=%d mode=trace full=%d selected=%zu limited=%d\n",
+                                (int) seq_id, controller_active_batch,
+                                full_limit, result.size(), (int) decision.limited_by_batch);
+                    } else {
+                        SPC_DBG("MTPCTRL seq=%d active=%d mode=batch full=%d selected=%zu limited=%d\n",
+                                (int) seq_id, controller_active_batch,
+                                full_limit, result.size(), (int) decision.limited_by_batch);
+                    }
                 }
             }
             return;
@@ -4520,6 +4585,15 @@ void common_speculative_draft(common_speculative * spec) {
             dp.drafting = false;
         }
     }
+}
+
+common_speculative_type common_speculative_last_type(
+        const common_speculative * spec, llama_seq_id seq_id) {
+    if (spec == nullptr || seq_id < 0 || seq_id >= (llama_seq_id) spec->impl_last.size()) {
+        return COMMON_SPECULATIVE_TYPE_NONE;
+    }
+    const common_speculative_impl * impl = spec->impl_last[seq_id];
+    return impl != nullptr ? impl->type : COMMON_SPECULATIVE_TYPE_NONE;
 }
 
 void common_speculative_accept(common_speculative * spec, llama_seq_id seq_id, uint16_t n_accepted) {
