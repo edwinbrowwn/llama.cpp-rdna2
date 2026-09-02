@@ -12,6 +12,7 @@
 #include <cctype>
 #include <climits>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <random>
 #include <unordered_map>
@@ -719,6 +720,15 @@ std::vector<llama_token> common_sampler_sample_and_accept_n(struct common_sample
     return result;
 }
 
+static bool common_sampler_proposal_trace_enabled() {
+    static const bool enabled = [] {
+        const char * value = std::getenv("LLAMA_SPEC_PROPOSAL_TRACE");
+        return value != nullptr && std::strcmp(value, "0") != 0 &&
+                std::strcmp(value, "off") != 0 && std::strcmp(value, "false") != 0;
+    }();
+    return enabled;
+}
+
 std::vector<llama_token> common_sampler_sample_and_accept_n(
         struct common_sampler * gsmpl,
         struct llama_context * ctx,
@@ -732,6 +742,7 @@ std::vector<llama_token> common_sampler_sample_and_accept_n(
     std::vector<llama_token> result;
     result.reserve(idxs.size());
 
+    const bool proposal_trace = common_sampler_proposal_trace_enabled();
     std::uniform_real_distribution<float> uniform(0.0f, 1.0f);
     size_t i = 0;
     for (; i < draft.size(); ++i) {
@@ -760,7 +771,57 @@ std::vector<llama_token> common_sampler_sample_and_accept_n(
             }
         }
 
-        if (q_draft > 0.0f && uniform(gsmpl->speculative_rng) * q_draft <= p_draft) {
+        float accept_draw = -1.0f;
+        bool accepted = false;
+        if (q_draft > 0.0f) {
+            accept_draw = uniform(gsmpl->speculative_rng);
+            accepted = accept_draw * q_draft <= p_draft;
+        }
+
+        if (proposal_trace) {
+            float overlap = 0.0f;
+            float p_on_q_support = 0.0f;
+            float q_on_p_support = 0.0f;
+            float q_max = 0.0f;
+            float q_entropy = 0.0f;
+            float p_max = -1.0f;
+            llama_token p_argmax = LLAMA_TOKEN_NULL;
+            for (size_t j = 0; j < p->size; ++j) {
+                const float pj = p->data[j].p;
+                if (!(pj > 0.0f) || !std::isfinite(pj)) {
+                    continue;
+                }
+                const float qj = q_prob(p->data[j].id);
+                overlap += std::min(pj, qj);
+                if (qj > 0.0f) {
+                    p_on_q_support += pj;
+                    q_on_p_support += qj;
+                }
+                if (pj > p_max) {
+                    p_max = pj;
+                    p_argmax = p->data[j].id;
+                }
+            }
+            for (const auto & entry : q_probs) {
+                const float qj = entry.second;
+                q_max = std::max(q_max, qj);
+                if (qj > 0.0f) {
+                    q_entropy -= qj * std::log(qj);
+                }
+            }
+            const float accept_probability = q_draft > 0.0f
+                    ? std::min(1.0f, p_draft / q_draft) : 0.0f;
+            LOG_INF("SPECQ depth=%zu draft=%d accepted=%d p_draft=%.8g q_draft=%.8g "
+                    "accept_prob=%.8g overlap=%.8g p_on_q=%.8g q_on_p=%.8g "
+                    "q_max=%.8g q_entropy=%.8g p_argmax=%d p_argmax_in_q=%d "
+                    "fallback=%d draw=%.8g p_size=%zu q_size=%zu\n",
+                    i + 1, (int) draft[i], (int) accepted, p_draft, q_draft,
+                    accept_probability, overlap, p_on_q_support, q_on_p_support,
+                    q_max, q_entropy, (int) p_argmax, (int) (q_prob(p_argmax) > 0.0f),
+                    (int) fallback, accept_draw, p->size, q.ids.size());
+        }
+
+        if (accepted) {
             common_sampler_accept(gsmpl, draft[i], true);
             result.push_back(draft[i]);
             continue;
