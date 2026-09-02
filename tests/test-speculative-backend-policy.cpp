@@ -159,9 +159,20 @@ int main() {
             "already narrow DFlash+K4V stack is unchanged");
 
     dflash_k4v.ngram_map_k4v.size_m = 48;
+    dflash_k4v.draft.n_max = 4;
+    require(server_spec_gfx1030_neural_k4v_cycle_cap(dflash_k4v) == 4,
+            "DFlash width four prevents unbounded 49-row K4V verification");
+    dflash_k4v.ngram_map_k4v.size_m = 4;
+    require(server_spec_gfx1030_neural_k4v_cycle_cap(dflash_k4v) == -1,
+            "already width-four DFlash+K4V stack is unchanged");
+
+    dflash_k4v.ngram_map_k4v.size_m = 48;
+    dflash_k4v.draft.n_max = 3;
+    require(server_spec_gfx1030_neural_k4v_cycle_cap(dflash_k4v) == -1,
+            "unqualified narrow DFlash cycle width is unchanged");
     dflash_k4v.draft.n_max = 7;
     require(server_spec_gfx1030_neural_k4v_cycle_cap(dflash_k4v) == -1,
-            "unqualified DFlash cycle width is unchanged");
+            "unqualified wide DFlash cycle width is unchanged");
 
     auto dflash_only = make_spec({COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH}, 5);
     dflash_only.ngram_map_k4v.size_m = 48;

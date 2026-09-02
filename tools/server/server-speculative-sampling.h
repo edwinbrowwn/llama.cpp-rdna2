@@ -271,8 +271,9 @@ inline int32_t server_spec_gfx1030_neural_k4v_cycle_cap(
             params.ngram_map_k4v.size_m <= params.draft.n_max) {
         return -1;
     }
-    if (n_dflash == 1 && params.draft.n_max == 5) {
-        return 5;
+    if (n_dflash == 1 &&
+            (params.draft.n_max == 4 || params.draft.n_max == 5)) {
+        return params.draft.n_max;
     }
     if (n_mtp == 1 && params.draft.n_max >= 2 && params.draft.n_max <= 5) {
         return params.draft.n_max;

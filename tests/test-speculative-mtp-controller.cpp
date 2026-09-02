@@ -1,6 +1,10 @@
 #include "speculative-dflash-controller.h"
 #include "speculative-mtp-controller.h"
 
+// Keep the controller assertions active in Release test builds.
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
 #include <cassert>
 
 int main() {
