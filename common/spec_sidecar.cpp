@@ -1,4 +1,5 @@
 #include "spec_sidecar.h"
+#include "ggml.h"
 #include "gguf.h"
 #include "llama.h"
 #include "../src/spec_sidecar/artifact_manifest.h"
@@ -563,7 +564,20 @@ static bool validate_profile_artifacts_impl(const common_spec_sidecar_profile & 
         return false;
     }
     const char * head_name = paths.dflash_full_head ? "target_head.bin" : "target_head_sliced.bin";
-    if (!require_file(join_path(paths.artifact_dir, head_name), "DFlash target head", error)) {
+    const std::string head_path = join_path(paths.artifact_dir, head_name);
+    if (!require_file(head_path, "DFlash target head", error)) {
+        return false;
+    }
+    uint64_t head_size = 0;
+    const int64_t head_rows = paths.dflash_full_head ? profile.target_n_vocab : profile.dflash_head_rows;
+    const size_t row_size = ggml_row_size(GGML_TYPE_Q6_K, profile.target_n_embd);
+    const uint64_t expected_head_size = head_rows > 0 && row_size > 0
+            ? static_cast<uint64_t>(head_rows) * row_size : 0;
+    if (!get_file_size(head_path, head_size, error) ||
+            expected_head_size == 0 || head_size != expected_head_size) {
+        if (error.empty()) {
+            error = "DFlash target head has an unexpected size: " + head_path;
+        }
         return false;
     }
     if (!paths.dflash_full_head && !validate_id_table(
