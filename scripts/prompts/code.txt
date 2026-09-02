@@ -1,0 +1,1 @@
+Write a complete production-quality Rust implementation of a concurrent bounded LRU cache with generics, tests, detailed error handling, and explanatory comments. Output only Rust code and continue adding useful tests until interrupted.

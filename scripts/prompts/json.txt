@@ -1,0 +1,1 @@
+Generate an endless JSON Lines dataset for testing a code search engine. Each line must be valid compact JSON with fields id, language, repository, path, symbols, dependencies, complexity, and code. Use realistic diverse source-code snippets and continue until interrupted.
