@@ -12,6 +12,7 @@
 #include "spec_sidecar.h"
 #include "spec_sidecar_assets.h"
 #include "speculative-sidecar-cap.h"
+#include "speculative-dflash-controller.h"
 #include "speculative-mtp-controller.h"
 #include "../include/spec_sidecar/sidecar_abi.h"
 
@@ -66,6 +67,23 @@ static common_speculative_mtp_controller_config common_speculative_mtp_controlle
         config.mode = common_speculative_mtp_controller_mode::TRACE;
     }
     // Unknown values deliberately leave the controller off.
+    return config;
+}
+
+static common_speculative_dflash_controller_config common_speculative_dflash_controller_config_from_env(
+        int32_t max_depth) {
+    common_speculative_dflash_controller_config config;
+    config.max_depth = max_depth;
+    const char * mode = std::getenv("LLAMA_SPEC_DFLASH_DYNAMIC_DEPTH");
+    if (mode == nullptr || std::strcmp(mode, "0") == 0 || std::strcmp(mode, "off") == 0) {
+        return config;
+    }
+    if (std::strcmp(mode, "batch") == 0 || std::strcmp(mode, "1") == 0 ||
+            std::strcmp(mode, "on") == 0) {
+        config.mode = common_speculative_dflash_controller_mode::BATCH;
+    } else if (std::strcmp(mode, "trace") == 0) {
+        config.mode = common_speculative_dflash_controller_mode::TRACE;
+    }
     return config;
 }
 
@@ -1100,6 +1118,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
 
     common_spec_sidecar_dflash sidecar;
     bool sidecar_target_only = false; // runtime failure or unsupported sampling mode
+    common_speculative_dflash_controller_config controller_config;
 
     common_speculative_impl_draft_dflash(const common_params_speculative & params, uint32_t n_seq,
             common_speculative_type type = COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH)
@@ -1191,6 +1210,12 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
             this->params.n_min = std::min(this->params.n_min, n_draft_max);
         }
         this->n_max = this->params.n_max;
+        controller_config = common_speculative_dflash_controller_config_from_env(this->params.n_max);
+        if (controller_config.mode != common_speculative_dflash_controller_mode::OFF) {
+            SPC_INF("DFlash batch-sticky depth %s: max=%d schedule=1:4,2:2,3:4,4:3,other:fixed\n",
+                    controller_config.mode == common_speculative_dflash_controller_mode::TRACE ? "trace" : "active",
+                    controller_config.max_depth);
+        }
 
         // speculative sidecar's DFlash DLL is selected only after the preflight probe.
         // A sidecar-only construction has no native draft context to fall back
@@ -1682,6 +1707,11 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
             return;
         }
 
+        int32_t controller_active_batch = 0;
+        for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
+            controller_active_batch += dparams[seq_id].drafting && !sidecar_stale[seq_id];
+        }
+
         if (sidecar.active()) {
             for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
                 auto & dp = dparams[seq_id];
@@ -1701,7 +1731,12 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                     return;
                 }
 
-                const int limit = std::min(params.n_max, dp.n_max > 0 ? dp.n_max : params.n_max);
+                const int full_limit = std::min(params.n_max, dp.n_max > 0 ? dp.n_max : params.n_max);
+                const int limit = stochastic
+                        ? common_speculative_dflash_controller_pre_draft_cap(
+                                controller_config, controller_active_batch, full_limit,
+                                dp.n_max_user_override)
+                        : full_limit;
                 if (limit < 1) {
                     return;
                 }
@@ -1768,6 +1803,23 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                 if (result.size() < (size_t) params.n_min) {
                     result.clear();
                     if (dp.dists != nullptr) dp.dists->clear();
+                }
+
+                if (stochastic && !result.empty() &&
+                        controller_config.mode != common_speculative_dflash_controller_mode::OFF) {
+                    const auto decision = common_speculative_dflash_controller_select(
+                            controller_config, controller_active_batch, full_limit);
+                    const bool limited = controller_config.mode == common_speculative_dflash_controller_mode::BATCH &&
+                            !dp.n_max_user_override && decision.limited_by_batch;
+                    if (controller_config.mode == common_speculative_dflash_controller_mode::TRACE) {
+                        SPC_INF("DFLASHCTRL seq=%d active=%d mode=trace full=%d selected=%zu limited=%d override=%d\n",
+                                (int) seq_id, controller_active_batch, full_limit, result.size(),
+                                (int) limited, (int) dp.n_max_user_override);
+                    } else {
+                        SPC_DBG("DFLASHCTRL seq=%d active=%d mode=batch full=%d selected=%zu limited=%d override=%d\n",
+                                (int) seq_id, controller_active_batch, full_limit, result.size(),
+                                (int) limited, (int) dp.n_max_user_override);
+                    }
                 }
             }
             return;

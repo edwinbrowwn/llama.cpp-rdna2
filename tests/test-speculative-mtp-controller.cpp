@@ -1,3 +1,4 @@
+#include "speculative-dflash-controller.h"
 #include "speculative-mtp-controller.h"
 
 #include <cassert>
@@ -38,6 +39,33 @@ int main() {
     assert(common_speculative_mtp_controller_pre_draft_cap(cfg, 4, 4) == 2);
     assert(common_speculative_mtp_controller_pre_draft_cap(cfg, 8, 4) == 3);
     assert(common_speculative_mtp_controller_pre_draft_cap(cfg, 2, 0) == 0);
+
+    common_speculative_dflash_controller_config dflash_cfg;
+    dflash_cfg.mode = common_speculative_dflash_controller_mode::BATCH;
+
+    const auto df1 = common_speculative_dflash_controller_select(dflash_cfg, 1, 4);
+    const auto df2 = common_speculative_dflash_controller_select(dflash_cfg, 2, 4);
+    const auto df3 = common_speculative_dflash_controller_select(dflash_cfg, 3, 4);
+    const auto df4 = common_speculative_dflash_controller_select(dflash_cfg, 4, 4);
+    const auto df8 = common_speculative_dflash_controller_select(dflash_cfg, 8, 4);
+    assert(df1.depth == 4 && !df1.limited_by_batch);
+    assert(df2.depth == 2 && df2.limited_by_batch);
+    assert(df3.depth == 4 && !df3.limited_by_batch);
+    assert(df4.depth == 3 && df4.limited_by_batch);
+    assert(df8.depth == 4 && !df8.limited_by_batch);
+
+    assert(common_speculative_dflash_controller_pre_draft_cap(dflash_cfg, 1, 4, false) == 4);
+    assert(common_speculative_dflash_controller_pre_draft_cap(dflash_cfg, 2, 4, false) == 2);
+    assert(common_speculative_dflash_controller_pre_draft_cap(dflash_cfg, 3, 4, false) == 4);
+    assert(common_speculative_dflash_controller_pre_draft_cap(dflash_cfg, 4, 4, false) == 3);
+    assert(common_speculative_dflash_controller_pre_draft_cap(dflash_cfg, 2, 4, true) == 4);
+    assert(common_speculative_dflash_controller_pre_draft_cap(dflash_cfg, 2, 1, false) == 1);
+    assert(common_speculative_dflash_controller_pre_draft_cap(dflash_cfg, 8, 4, false) == 4);
+
+    dflash_cfg.mode = common_speculative_dflash_controller_mode::TRACE;
+    assert(common_speculative_dflash_controller_pre_draft_cap(dflash_cfg, 2, 4, false) == 4);
+    dflash_cfg.mode = common_speculative_dflash_controller_mode::OFF;
+    assert(common_speculative_dflash_controller_pre_draft_cap(dflash_cfg, 2, 4, false) == 4);
 
     return 0;
 }

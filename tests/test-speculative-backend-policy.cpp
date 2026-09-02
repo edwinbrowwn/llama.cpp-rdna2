@@ -132,6 +132,20 @@ int main() {
     expect_profile(make_spec({COMMON_SPECULATIVE_TYPE_NONE}, 4),
             server_spec_target_backend_profile_kind::NONE, false);
 
+    require(server_spec_gfx1030_dflash_dynamic_depth_profile(
+                make_spec({COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH}, 4)),
+            "DFlash width four selects dynamic depth profile");
+    require(server_spec_gfx1030_dflash_dynamic_depth_profile(
+                make_spec({COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH,
+                           COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V}, 4)),
+            "DFlash width four plus K4V selects dynamic depth profile");
+    require(!server_spec_gfx1030_dflash_dynamic_depth_profile(
+                make_spec({COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH}, 3)),
+            "other DFlash widths retain fixed depth");
+    require(!server_spec_gfx1030_dflash_dynamic_depth_profile(
+                make_spec({COMMON_SPECULATIVE_TYPE_DRAFT_MTP}, 4)),
+            "MTP does not select DFlash depth schedule");
+
     auto dflash_k4v = make_spec({
         COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH,
         COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V,

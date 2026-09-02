@@ -214,6 +214,27 @@ inline bool server_spec_gfx1030_mtp_k4v_width5_profile(
             params.ngram_map_k4v.size_m > 5;
 }
 
+inline bool server_spec_gfx1030_dflash_dynamic_depth_profile(
+        const common_params_speculative & params) {
+    int n_dflash = 0;
+    int n_k4v = 0;
+    for (common_speculative_type type : params.types) {
+        switch (type) {
+            case COMMON_SPECULATIVE_TYPE_NONE:
+                break;
+            case COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH:
+                ++n_dflash;
+                break;
+            case COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V:
+                ++n_k4v;
+                break;
+            default:
+                return false;
+        }
+    }
+    return n_dflash == 1 && n_k4v <= 1 && params.draft.n_max == 4;
+}
+
 // A stacked n-gram map has its own value width and can otherwise override the
 // neural drafter's much smaller cycle. On the certified gfx1030 profiles, K4V
 // m=48 can turn a new hit into a 49-row target pass and make the 248K-vocabulary

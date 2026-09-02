@@ -168,6 +168,12 @@ static bool server_gfx1030_mtp_dynamic_depth_profile(const common_params & param
             params.n_parallel >= 1 && params.n_parallel <= 4;
 }
 
+static bool server_gfx1030_dflash_dynamic_depth_profile(const common_params & params) {
+    return server_gfx1030_mtp_sidecar_runtime_profile(params) &&
+            server_spec_gfx1030_dflash_dynamic_depth_profile(params.speculative) &&
+            params.n_parallel >= 1 && params.n_parallel <= 4;
+}
+
 static bool server_greedy_backend_sampling_eligible(const common_params_sampling & sampling) {
     if (sampling.samplers.empty() || sampling.samplers.back() != COMMON_SAMPLER_TYPE_TEMPERATURE) {
         return false;
@@ -1457,6 +1463,17 @@ private:
 #endif
             SRV_INF("%s", "enabling batch-sticky MTP depth schedule for qualified gfx1030 TP4 sidecar; "
                     "set LLAMA_SPEC_MTP_DYNAMIC_DEPTH=off to disable\n");
+        }
+
+        if (server_gfx1030_dflash_dynamic_depth_profile(params_base) &&
+                std::getenv("LLAMA_SPEC_DFLASH_DYNAMIC_DEPTH") == nullptr) {
+#if defined(_WIN32)
+            _putenv_s("LLAMA_SPEC_DFLASH_DYNAMIC_DEPTH", "batch");
+#else
+            setenv("LLAMA_SPEC_DFLASH_DYNAMIC_DEPTH", "batch", 0);
+#endif
+            SRV_INF("%s", "enabling batch-sticky DFlash depth schedule for qualified gfx1030 TP4 sidecar; "
+                    "set LLAMA_SPEC_DFLASH_DYNAMIC_DEPTH=off to disable\n");
         }
 
         llama_init = common_init_from_params(params_base);
