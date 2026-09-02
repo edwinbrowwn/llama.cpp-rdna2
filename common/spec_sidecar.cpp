@@ -850,7 +850,7 @@ bool common_spec_sidecar_dflash_probe(const std::string & library_path,
         resolve_symbol(handle, "spec_dflash_check", check, error) &&
         resolve_symbol(handle, "spec_dflash_stochastic_top_k", top_k, error) &&
         resolve_symbol(handle, "spec_dflash_draft_stochastic", stochastic, error);
-    const bool compatible = symbols && release() == 5 &&
+    const bool compatible = symbols && release() == 6 &&
             check(encoded_width, block_size, n_seq) == 0 &&
             top_k() == SPEC_SIDECAR_DFLASH_DRAFT_TOP_K;
     if (!compatible && error.empty()) {
@@ -1166,8 +1166,8 @@ bool common_spec_sidecar_dflash::load(const std::string & library_path,
         close_library(handle);
         return false;
     }
-    if (release_abi() != 5) {
-        error = "DFlash sidecar ABI version mismatch (expected 5)";
+    if (release_abi() != 6) {
+        error = "DFlash sidecar ABI version mismatch (expected 6)";
         close_library(handle);
         return false;
     }

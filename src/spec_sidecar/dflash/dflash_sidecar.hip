@@ -162,6 +162,7 @@ struct DState {
     bool q8_native_q4_only = false;
     bool bounded_stochastic_graph = false;
     int q8_layers = 5;
+    int32_t top20_min_past = INT32_MAX;
     float * q8_probe = nullptr;
     int q8_probe_slots = 0;
     int *pos_d[8] = {}, *tok_d[8] = {}, *tk_pidx = nullptr, *tk_ids = nullptr;
@@ -249,7 +250,7 @@ __global__ void shift_kv_rows(__half * kv, int src_min, int src_max, int delta, 
 #define DF_API extern "C"
 #endif
 
-static constexpr int32_t DF_RELEASE_ABI = 5;
+static constexpr int32_t DF_RELEASE_ABI = 6;
 
 static_assert(DF_TOPK == SPEC_SIDECAR_DFLASH_DRAFT_TOP_K,
               "DFlash stochastic top-k ABI mismatch");
@@ -646,6 +647,26 @@ DF_API int spec_dflash_init(const char * dir, int32_t n_seq) {
         S.bounded_stochastic_graph = strcmp(bounded, "0") != 0 &&
                 strcmp(bounded, "off") != 0 && strcmp(bounded, "false") != 0;
     }
+#if defined(SPEC_SIDECAR_GFX1030)
+    S.top20_min_past = 4096;
+#else
+    S.top20_min_past = INT32_MAX;
+#endif
+    if (const char * value = getenv("LLAMA_SPEC_HIP_DFLASH_TOP20_MIN_PAST")) {
+        if (strcmp(value, "off") == 0 || strcmp(value, "false") == 0) {
+            S.top20_min_past = INT32_MAX;
+        } else {
+            char * end = nullptr;
+            const long parsed = strtol(value, &end, 10);
+            if (end != value && end != nullptr && *end == '\0' &&
+                    parsed >= 0 && parsed <= INT32_MAX) {
+                S.top20_min_past = (int32_t) parsed;
+            } else {
+                fprintf(stderr, "[dflash-sidecar] invalid top-20 context threshold '%s'; using %d\n",
+                        value, S.top20_min_past);
+            }
+        }
+    }
     S.q8_layers = 5;
     if (const char * layers = getenv("LLAMA_SPEC_HIP_DFLASH_Q8_LAYERS")) {
         S.q8_layers = std::max(0, std::min(DF_LAYERS, std::atoi(layers)));
@@ -879,9 +900,10 @@ DF_API int spec_dflash_init(const char * dir, int32_t n_seq) {
     DFC(hipMalloc(&S.tk_ids,  8 * DF_TOPK * 4));
     DFC(hipMalloc(&S.tk_vals, 8 * DF_TOPK * 4));
     S.ok = true;
-    fprintf(stderr, "[dflash-sidecar] initialized (max_pos=%d, device=%d, q8_head=%d, q8_all=%d, q8_process=%d, q8_layers=%d, q8_native_mmvq=%d, q8_native_q4_only=%d, bounded_graph=%d)\n",
+    fprintf(stderr, "[dflash-sidecar] initialized (max_pos=%d, device=%d, q8_head=%d, q8_all=%d, q8_process=%d, q8_layers=%d, q8_native_mmvq=%d, q8_native_q4_only=%d, bounded_graph=%d, top20_min_past=%d)\n",
             S.max_pos, S.device, S.q8_head ? 1 : 0, S.q8_all ? 1 : 0, S.q8_process ? 1 : 0, S.q8_layers,
-            S.q8_native_mmvq ? 1 : 0, S.q8_native_q4_only ? 1 : 0, S.bounded_stochastic_graph ? 1 : 0);
+            S.q8_native_mmvq ? 1 : 0, S.q8_native_q4_only ? 1 : 0, S.bounded_stochastic_graph ? 1 : 0,
+            S.top20_min_past);
     return 0;
 }
 
@@ -1199,7 +1221,7 @@ readback:
         if (pred_id < 0 || pred_id >= DF_VOCAB) break;
         const float * pv = S.sel_prev.data() + (size_t) pred_id * DF_RANK;
         float best = -1e30f; int besti = -1;
-        for (int kx = 0; kx < DF_TOPK; ++kx) {
+        for (int kx = 0; kx < DF_BASE_TOPK; ++kx) {
             const int cs = h_ids[t * DF_TOPK + kx];
             if (cs < 0 || cs >= S.n_head) continue;
             const int cid = S.remap[cs];
@@ -1234,7 +1256,7 @@ DF_API int spec_dflash_draft(int32_t seq_id, int32_t id_last, int32_t n_past, in
 
 // Stochastic DFlash reuses the compact top-k path. A bounded graph can
 // execute only the anchor plus requested proposal rows. Selector scores are
-// reconstructed for the sampled predecessor on the host (7 * 16 * 256
+// reconstructed for the sampled predecessor on the host (up to 7 * 20 * 256
 // multiply-adds), avoiding both a full
 // vocabulary transfer and a second decoder execution.
 DF_API int spec_dflash_stochastic_top_k() {
@@ -1262,6 +1284,11 @@ DF_API int spec_dflash_draft_stochastic(int32_t seq_id, int32_t id_last, int32_t
         return 0;
     }
 
+    // The wider candidate set is qualified only for a full width-five neural
+    // cycle at long context. Short prompts and dynamically shortened cycles
+    // retain the trained top-16 proposal distribution exactly.
+    const int active_top_k = max_draft == 5 && n_past >= S.top20_min_past
+            ? DF_TOPK : DF_BASE_TOPK;
     int pred_idx = 0;
     int n_out = 0;
     for (int t = 1; t < 8 && n_out < max_draft; ++t) {
@@ -1275,6 +1302,7 @@ DF_API int spec_dflash_draft_stochastic(int32_t seq_id, int32_t id_last, int32_t
         const float * pv = S.sel_prev.data() + (size_t) pred_id * DF_RANK;
         float scores[DF_TOPK] = {};
         float probs[DF_TOPK] = {};
+        bool valid_scores[DF_TOPK] = {};
         float max_score = -1e30f;
         int valid = 0;
         for (int kx = 0; kx < DF_TOPK; ++kx) {
@@ -1295,17 +1323,18 @@ DF_API int spec_dflash_draft_stochastic(int32_t seq_id, int32_t id_last, int32_t
                 continue;
             }
             scores[kx] = score;
-            max_score = std::max(max_score, score);
-            ++valid;
+            valid_scores[kx] = true;
+            if (kx < active_top_k) {
+                max_score = std::max(max_score, score);
+                ++valid;
+            }
         }
         if (valid == 0) {
             break;
         }
         float sum = 0.0f;
         for (int kx = 0; kx < DF_TOPK; ++kx) {
-            const int cs = S.last_tk_ids[t * DF_TOPK + kx];
-            const int cid = cs >= 0 && cs < S.n_head ? S.remap[cs] : -1;
-            if (cid < 0 || cid >= DF_VOCAB || !std::isfinite(scores[kx])) {
+            if (kx >= active_top_k || !valid_scores[kx]) {
                 probs[kx] = 0.0f;
                 continue;
             }
@@ -1315,10 +1344,10 @@ DF_API int spec_dflash_draft_stochastic(int32_t seq_id, int32_t id_last, int32_t
         if (!(sum > 0.0f) || !std::isfinite(sum)) {
             break;
         }
-        int selected = DF_TOPK - 1;
+        int selected = active_top_k - 1;
         double cumulative = 0.0;
         const double u = spec_sidecar_stochastic_uniform(rng_key, (uint32_t) n_out);
-        for (int kx = 0; kx < DF_TOPK; ++kx) {
+        for (int kx = 0; kx < active_top_k; ++kx) {
             probs[kx] /= sum;
             cumulative += probs[kx];
             if (u < cumulative) {

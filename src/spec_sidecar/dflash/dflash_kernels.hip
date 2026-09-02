@@ -27,7 +27,8 @@
 #define DF_WINDOW  2048
 #define DF_VOCAB   248320
 #define DF_RANK    256
-#define DF_TOPK    16
+#define DF_TOPK      20
+#define DF_BASE_TOPK 16
 #define DF_EPS     1e-6f
 #define DF_FBASE   10000000.0f
 

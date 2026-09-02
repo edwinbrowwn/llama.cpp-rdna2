@@ -196,8 +196,8 @@ int main(int argc, char ** argv) {
     }
 
     failures += require(SPEC_SIDECAR_MTP_DRAFT_TOP_K == 32 &&
-                        SPEC_SIDECAR_DFLASH_DRAFT_TOP_K == 16,
-                        "sidecar stochastic top-k constants are stable");
+                        SPEC_SIDECAR_DFLASH_DRAFT_TOP_K == 20,
+                        "sidecar stochastic top-k ABI constants match the release");
     const double u0 = spec_sidecar_stochastic_uniform(UINT64_C(1234), 0);
     failures += require(u0 >= 0.0 && u0 < 1.0 &&
                         u0 == spec_sidecar_stochastic_uniform(UINT64_C(1234), 0) &&

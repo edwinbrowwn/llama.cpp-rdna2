@@ -178,6 +178,13 @@ export SPEC_SIDECAR=1
   top-k when its headers are available and otherwise retains the portable
   two-stage device reduction. These provider-local optimizations are
   independent of the Qwen4Exp sidecar.
+- On the qualified gfx1030 provider, a stochastic width-five DFlash cycle uses
+  a top-20 q distribution after 4096 target tokens. Shorter contexts,
+  dynamically shortened cycles, and greedy drafting retain the trained top-16
+  distribution. Every active q is returned to the full-target residual
+  verifier. Set `LLAMA_SPEC_HIP_DFLASH_TOP20_MIN_PAST=off` to retain top-16 at
+  every context, or set it to a nonnegative token threshold for an explicit
+  crossover. Other architectures default to top-16 unless explicitly enabled.
 - Text-only, contiguous positions are the supported sidecar input. Vision
   batches, unsupported interleaving, and migration disable the sidecar safely.
   With a single HIP target ubatch on the matching device, the host passes
