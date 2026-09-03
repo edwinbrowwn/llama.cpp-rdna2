@@ -4,6 +4,8 @@
 #include "common.h"
 
 struct common_speculative;
+struct common_speculative_content;
+struct common_speculative_content_state;
 
 struct common_speculative_token_dist {
     llama_tokens ids;
@@ -97,6 +99,16 @@ struct common_speculative_draft_params {
 
     float temperature = 0.0f;
     uint32_t seed = LLAMA_DEFAULT_SEED;
+
+    // Internal sidecar-only content-aware nmax controls.  n_max remains the
+    // context/request limit; these fields never alter target verification.
+    int32_t n_max_content = -1;
+    int32_t n_max_content_hard = -1;
+    uint8_t content_level_before = 0;
+    uint8_t content_level_final = 0;
+    common_speculative_content * content_controller = nullptr;
+    common_speculative_content_state * content_state = nullptr;
+
 };
 
 common_speculative_draft_params & common_speculative_get_draft_params(common_speculative * spec, llama_seq_id seq_id);

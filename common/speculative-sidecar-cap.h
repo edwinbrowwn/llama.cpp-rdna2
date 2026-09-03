@@ -25,6 +25,9 @@ inline int common_speculative_sidecar_cap_limit(
     if (dp.n_max > 0) {
         limit = std::min(limit, dp.n_max);
     }
+    if (dp.n_max_content > 0) {
+        limit = std::min(limit, dp.n_max_content);
+    }
     return std::max(0, limit);
 }
 

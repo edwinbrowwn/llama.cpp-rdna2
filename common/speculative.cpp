@@ -12,6 +12,7 @@
 #include "spec_sidecar.h"
 #include "spec_sidecar_assets.h"
 #include "speculative-sidecar-cap.h"
+#include "speculative-content.h"
 #include "speculative-dflash-controller.h"
 #include "../include/spec_sidecar/sidecar_abi.h"
 
@@ -197,7 +198,11 @@ static common_speculative_sidecar_cap_config common_speculative_sidecar_cap_conf
         return {};
     }
 
-    return { std::max(1, params.draft.n_max) };
+    int32_t width = std::max(1, params.draft.n_max);
+    if (!params.has_synth() && common_speculative_content_env_enabled()) {
+        width += common_speculative_content_env_max_boost();
+    }
+    return { width };
 }
 
 static bool common_speculative_are_compatible(
@@ -1725,7 +1730,9 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                     return;
                 }
 
-                const int full_limit = std::min(params.n_max, dp.n_max > 0 ? dp.n_max : params.n_max);
+                const int context_limit = dp.n_max > 0 ? dp.n_max : params.n_max;
+                const int requested_limit = dp.n_max_content > 0 ? dp.n_max_content : params.n_max;
+                const int full_limit = std::min(7, std::min(requested_limit, context_limit));
                 const int limit = stochastic
                         ? common_speculative_dflash_controller_pre_draft_cap(
                                 controller_config, controller_active_batch, full_limit,
@@ -2738,8 +2745,10 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                     return;
                 }
 
+                const int context_limit = dp.n_max > 0 ? dp.n_max : params.n_max;
                 const int limit = std::min(
-                        params.n_max, dp.n_max > 0 ? dp.n_max : params.n_max);
+                        dp.n_max_content > 0 ? dp.n_max_content : params.n_max,
+                        context_limit);
                 if (limit < 1) {
                     return;
                 }
@@ -3643,6 +3652,10 @@ struct common_speculative {
     std::vector<common_speculative_impl *> impl_last;
 
     std::vector<double> synth_probs;
+
+    // Content-aware nmax is intentionally owned by the common speculative
+    // object but enabled only when preflight selected a sidecar.
+    common_speculative_content content;
 };
 
 static common_ngram_map get_common_ngram_map(
@@ -3979,6 +3992,14 @@ int32_t common_speculative_n_max(const common_params_speculative * spec) {
         }
     }
 
+    const bool has_sidecar_draft = spec->draft.sidecar_candidate_ready &&
+            (std::find(spec->types.begin(), spec->types.end(), COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != spec->types.end() ||
+             std::find(spec->types.begin(), spec->types.end(), COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH) != spec->types.end());
+    if (has_sidecar_draft && !spec->has_synth() &&
+            common_speculative_content_env_enabled() && spec->draft.n_max > 0) {
+        n_max = std::max(n_max, spec->draft.n_max + common_speculative_content_env_max_boost());
+    }
+
     return n_max;
 }
 
@@ -3991,6 +4012,10 @@ int32_t common_speculative_n_max(const common_speculative * spec) {
 
     for (const auto & impl : spec->impls) {
         n_max = std::max(n_max, std::max(0, impl->n_max));
+    }
+
+    if (spec->content.enabled()) {
+        n_max = std::max(n_max, spec->content.base_nmax() + spec->content.max_boost());
     }
 
     return n_max;
@@ -4291,6 +4316,12 @@ common_speculative_output_limits common_speculative_get_output_limits(
 //
 common_speculative * common_speculative_init(common_params_speculative & params, uint32_t n_seq) {
     // Compute the implementations to use based on the config and their order of preference
+    common_speculative_content content;
+    const llama_vocab * content_vocab = params.draft.ctx_tgt != nullptr
+            ? llama_model_get_vocab(llama_get_model(params.draft.ctx_tgt)) : nullptr;
+    content.init(content_vocab, n_seq,
+            params.draft.sidecar_only && !params.has_synth(), params.draft.n_max);
+
     std::vector<common_speculative_config> configs = {}; // list of speculative configs to try
     {
         uint32_t enabled_configs = common_get_enabled_speculative_configs(params.types);
@@ -4433,6 +4464,7 @@ common_speculative * common_speculative_init(common_params_speculative & params,
         /* .impls       = */ std::move(impls),
         /* .impl_last   = */ std::vector<common_speculative_impl *>(n_seq, nullptr),
         /* .synth_probs = */ {},
+        /* .content    = */ std::move(content),
     });
 
     const int32_t n_max_configured = common_speculative_n_max(&params);
@@ -4485,6 +4517,11 @@ void common_speculative_begin(common_speculative * spec, llama_seq_id seq_id, co
         return;
     }
 
+    if (spec->content.enabled() && seq_id >= 0) {
+        spec->content.begin((uint32_t) seq_id,
+                prompt.empty() ? nullptr : prompt.data(), prompt.size());
+    }
+
     for (auto & impl : spec->impls) {
         common_time_meas tm(impl->t_begin_us, !impl->gen_perf);
         impl->begin(seq_id, prompt);
@@ -4530,6 +4567,34 @@ void common_speculative_draft(common_speculative * spec) {
         }
     }
 
+    if (spec->content.enabled()) {
+        for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) dparams.size(); ++seq_id) {
+            auto & dp = dparams[seq_id];
+            dp.content_controller = &spec->content;
+            dp.content_state = spec->content.state((uint32_t) seq_id);
+            dp.n_max_content = -1;
+            dp.n_max_content_hard = -1;
+            dp.content_level_before = SPEC_BOOST_0;
+            dp.content_level_final = SPEC_BOOST_0;
+            if (!dp.drafting || dp.content_state == nullptr) {
+                continue;
+            }
+
+            dp.content_level_before = spec->content.prepare(
+                    (uint32_t) seq_id,
+                    dp.prompt != nullptr && !dp.prompt->empty() ? dp.prompt->data() : nullptr,
+                    dp.prompt != nullptr ? dp.prompt->size() : 0,
+                    dp.id_last);
+            const int context_limit = dp.n_max > 0 ? dp.n_max : spec->content.base_nmax();
+            dp.n_max_content = spec->content.selected_limit(
+                    spec->content.base_nmax(), context_limit,
+                    dp.n_max_user_override, dp.content_level_before);
+            dp.n_max_content_hard = spec->content.max_limit(
+                    spec->content.base_nmax(), context_limit,
+                    dp.n_max_user_override);
+        }
+    }
+
     for (auto & impl : spec->impls) {
         {
             common_time_meas tm(impl->t_draft_us, !impl->gen_perf);
@@ -4552,14 +4617,21 @@ void common_speculative_draft(common_speculative * spec) {
             if (dp.drafting && !result.empty()) {
                 dp.drafting = false;
 
-                if (dp.n_max > 0) {
-                    if (!result.empty() && (int) result.size() > dp.n_max) {
-                        SPC_DBG("truncating draft to %d tokens\n", dp.n_max);
-                        result.resize(dp.n_max);
-                    }
+                const int content_limit = dp.n_max_content > 0 ? dp.n_max_content : dp.n_max;
+                if (content_limit > 0 && (int) result.size() > content_limit) {
+                    SPC_DBG("truncating draft to %d tokens\n", content_limit);
+                    result.resize((size_t) content_limit);
                 }
 
                 if (!result.empty()) {
+                    if (dp.content_controller != nullptr && dp.content_state != nullptr) {
+                        dp.content_controller->observe_draft(
+                                (uint32_t) seq_id, result.data(), result.size(),
+                                dp.content_controller->base_nmax(),
+                                dp.n_max_content > 0 ? dp.n_max_content : dp.n_max,
+                                dp.n_max_content_hard > 0 ? dp.n_max_content_hard : dp.n_max);
+                        dp.content_level_final = dp.content_state->level_final;
+                    }
                     SPC_DBG("called impl %s, hist size = %zu, call_count = %zu, gen = %zu\n",
                             common_speculative_type_to_str(impl.get()->type).c_str(), dp.prompt->size(),
                             impl.get()->n_call_draft, result.size());
@@ -4598,6 +4670,16 @@ void common_speculative_accept(common_speculative * spec, llama_seq_id seq_id, u
     if (impl == nullptr) {
         GGML_ASSERT(n_accepted == 0);
         return;
+    }
+
+    if (spec->content.enabled() && seq_id >= 0 &&
+            seq_id < (llama_seq_id) spec->dparams.size()) {
+        const auto & dp = spec->dparams[seq_id];
+        if (dp.content_controller != nullptr && dp.content_state != nullptr &&
+                dp.result != nullptr) {
+            dp.content_controller->accept(
+                    (uint32_t) seq_id, dp.result->data(), dp.result->size(), n_accepted);
+        }
     }
 
     {
@@ -4796,6 +4878,9 @@ void common_speculative_reset_state(common_speculative * spec, llama_seq_id seq_
     for (auto & impl : spec->impls) {
         impl->reset_state(seq_id);
     }
+    if (seq_id >= 0) {
+        spec->content.reset((uint32_t) seq_id);
+    }
 }
 
 void common_speculative_release_state(common_speculative * spec, llama_seq_id seq_id) {
@@ -4804,6 +4889,9 @@ void common_speculative_release_state(common_speculative * spec, llama_seq_id se
     }
     for (auto & impl : spec->impls) {
         impl->release_state(seq_id);
+    }
+    if (seq_id >= 0) {
+        spec->content.reset((uint32_t) seq_id);
     }
 }
 
@@ -4897,4 +4985,6 @@ void common_speculative_print_stats(const common_speculative * spec) {
                 str_stats.c_str(),
                 str_perf.c_str());
     }
+
+    spec->content.print_stats();
 }

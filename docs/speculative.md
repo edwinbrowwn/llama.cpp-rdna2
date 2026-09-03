@@ -175,6 +175,28 @@ The number of accepted tokens is stored for each used n-gram.
 llama-server [...] --spec-type ngram-map-k4v --spec-ngram-map-k4v-size-n 8 --spec-ngram-map-k4v-size-m 8 --spec-ngram-map-k4v-min-hits 2 --spec-draft-n-max 64
 ```
 
+#### Sidecar content-aware nmax POC
+
+When an external sidecar is active, the opt-in content controller can grant a
+small relative nmax boost without changing the user's baseline:
+
+```bash
+SPEC_SIDECAR=1 SPEC_CONTENT_BOOST=1 \
+  ./llama-server [...] --spec-draft-n-max 6
+```
+
+The controller uses one scalar structural-confidence level and permits only
+`base+0` through `base+3`. It is sidecar-only in this POC; host/native draft
+models are unchanged. The default configuration is a 12-token window, +3
+maximum boost, and two-update upward hysteresis. Optional switches are
+`SPEC_CONTENT_MAX_BOOST`, `SPEC_CONTENT_WINDOW`, `SPEC_CONTENT_HYST`,
+`SPEC_CONTENT_TRACE`, `SPEC_CONTENT_PROVISIONAL`, and `SPEC_CONTENT_ADAPT`.
+
+Sidecar providers draft a block in one call, so BEFORE-context selection is the
+wall-clock path: `SPEC_CONTENT_PROVISIONAL=1` records the provisional score but
+does not relaunch a provider or risk leaving extra uncommitted sidecar KV.
+Adaptive weighting is parsed for future work but remains disabled.
+
 ### n-gram Mod (`ngram-mod`)
 
 Add basic ngram hasher for speculative decoding:
