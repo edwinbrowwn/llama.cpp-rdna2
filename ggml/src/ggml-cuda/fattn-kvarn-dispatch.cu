@@ -55,9 +55,19 @@ ggml_cuda_fattn_kvarn_capabilities ggml_cuda_fattn_kvarn_device_capabilities(int
 #if defined(GGML_USE_MUSA)
     constexpr ggml_cuda_fattn_kvarn_backend backend = GGML_CUDA_FATTN_KVARN_BACKEND_MUSA;
     const bool matrix_mma = false;
+    const bool rdna2_vector_decode = false;
 #elif defined(GGML_USE_HIP)
     constexpr ggml_cuda_fattn_kvarn_backend backend = GGML_CUDA_FATTN_KVARN_BACKEND_HIP;
     const bool matrix_mma = amd_wmma_available(device_info.cc) || amd_mfma_available(device_info.cc);
+    // RDNA2 (gfx10xx) has no matrix cores (wmma/mfma are RDNA3+/CDNA), so the
+    // generic/split MMA routes are dead there. The vectorized decode kernel is the
+    // only specialized KVarN decode path on RDNA2. Key this off the runtime device
+    // arch: the __gfx10xx__ macros from vendors/hip.h are defined in device code only,
+    // never in host translation units like this one, so a preprocessor check here
+    // is always false and silently kept every decode on the portable-native path.
+    const bool rdna2_vector_decode =
+        GGML_CUDA_CC_IS_RDNA2(device_info.cc) &&
+        getenv("GGML_KVARN_FORCE_PORTABLE") == nullptr;
 #else
     constexpr ggml_cuda_fattn_kvarn_backend backend = GGML_CUDA_FATTN_KVARN_BACKEND_CUDA;
     const char * force_portable_capability =
@@ -73,7 +83,7 @@ ggml_cuda_fattn_kvarn_capabilities ggml_cuda_fattn_kvarn_device_capabilities(int
     constexpr bool kvarn_instances = false;
     constexpr uint64_t minimum_dynamic_shared_bytes = 0;
 #endif
-    return ggml_cuda_fattn_kvarn_select_capabilities({
+    auto caps = ggml_cuda_fattn_kvarn_select_capabilities({
         backend,
         device_info.warp_size,
         matrix_mma,
@@ -82,6 +92,17 @@ ggml_cuda_fattn_kvarn_capabilities ggml_cuda_fattn_kvarn_device_capabilities(int
         device_info.smpbo,
         minimum_dynamic_shared_bytes,
     });
+    if (rdna2_vector_decode) {
+        caps.decode_vector = true;
+        caps.route_families |= GGML_CUDA_FATTN_KVARN_FAMILY_DECODE_VECTOR;
+        caps.specialized_routes = caps.specialized_routes || caps.decode_vector;
+        caps.rotated_query_max_specialized = caps.specialized_routes ?
+            GGML_CUDA_FATTN_KVARN_SPECIALIZED_DECODE_MAX_Q : 0u;
+        caps.supported_head_dims = GGML_CUDA_FATTN_KVARN_HEAD_DIM_128 |
+                                   GGML_CUDA_FATTN_KVARN_HEAD_DIM_256 |
+                                   GGML_CUDA_FATTN_KVARN_HEAD_DIM_512;
+    }
+    return caps;
 }
 
 uint32_t ggml_cuda_fattn_kvarn_decode_max_q() {
@@ -568,10 +589,22 @@ static bool ggml_cuda_flash_attn_ext_kvarn_vec_supported(
         return false;
     }
     const int gqa_ratio = (int) (Q->ne[2] / plan.n_kv_heads);
-    // D256 SWA/GQA2 is the proven vec geometry (benchmarked at k4v4); every KVarN bit pair
-    // is wired through it. D512 vec regressed deep-context global layers and stays excluded.
-    return plan.k.swa && plan.v.swa && gqa_ratio == 2 &&
-        ggml_cuda_fattn_kvarn_fast_decode_pair_enabled(plan.k.bits, plan.v.bits);
+    // The vec kernel is general over gqa_ratio: it partitions each KV head's query heads into
+    // n_gqa_blocks = ceil(ratio / MAX_GQA) blocks of MAX_GQA(=2) and dequantizes K/V once per
+    // block (see fattn-kvarn-vec.cuh q_head0/gqa_head_count). It was first benchmarked at
+    // GQA2/k4v4; larger ratios (e.g. Qwen35-27B full-attention GQA = 24/4 = 6) route through the
+    // same block partitioning and are enabled here so gfx1030 — where split-decode is
+    // fail-closed — has a specialized decode path instead of falling to generic_mma.
+    // It is equally general over SWA: the resolver (ggml_cuda_fattn_kvarn_vec_resolve) takes the
+    // indirect-index path when desc.swa and the direct token->(group,pos) path otherwise, and the
+    // non-swa stage/record geometry uses the same stream-linear group offsets the host desc already
+    // encodes. Do NOT gate on plan.*.swa here — Qwen35 27B/4B are full-attention hybrids with no
+    // sliding window (VIEW_SWA == 0), and requiring swa silently pushed every one of them to
+    // generic_mma. D512 vec regressed deep-context global layers and stays excluded (D above).
+    {
+        const bool pair_ok = ggml_cuda_fattn_kvarn_fast_decode_pair_enabled(plan.k.bits, plan.v.bits);
+        return gqa_ratio >= 2 && pair_ok;
+    }
 }
 
 template<int D>

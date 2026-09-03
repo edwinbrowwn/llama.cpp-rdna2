@@ -1959,29 +1959,6 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         return sidecar.active();
     }
 
-    bool get_state(llama_seq_id seq_id, std::vector<uint8_t> & data) override {
-        if (!sidecar.active()) return false;
-        if (seq_id >= 0 && seq_id < (llama_seq_id) n_seq && sidecar_stale[seq_id]) return false;
-        if (!sidecar.get_state(seq_id, data)) {
-            sidecar.disable();
-            sidecar_target_only = true;
-            SPC_ERR("%s", "DFlash sidecar state snapshot failed; entering target-only mode\n");
-            return false;
-        }
-        return true;
-    }
-
-    bool set_state(llama_seq_id seq_id, const std::vector<uint8_t> & data) override {
-        if (!sidecar.active()) return true;
-        if (!sidecar.set_state(seq_id, data)) {
-            sidecar.disable();
-            sidecar_target_only = true;
-            SPC_ERR("%s", "DFlash sidecar state restore failed; entering target-only mode\n");
-            return false;
-        }
-        return true;
-    }
-
     bool reset_state(llama_seq_id seq_id) override {
         if (!sidecar.active()) return true;
         if (seq_id >= 0 && seq_id < (llama_seq_id) n_seq && sidecar_stale[seq_id]) {
@@ -2919,29 +2896,6 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         return sidecar.active();
     }
 
-    bool get_state(llama_seq_id seq_id, std::vector<uint8_t> & data) override {
-        if (!sidecar.active()) return false;
-        if (seq_id >= 0 && seq_id < (llama_seq_id) n_seq && mtp_sidecar_stale[seq_id]) return false;
-        if (!sidecar.get_state(seq_id, data)) {
-            sidecar.disable();
-            sidecar_target_only = true;
-            SPC_ERR("%s", "MTP sidecar state snapshot failed; entering target-only mode\n");
-            return false;
-        }
-        return true;
-    }
-
-    bool set_state(llama_seq_id seq_id, const std::vector<uint8_t> & data) override {
-        if (!sidecar.active()) return true;
-        if (!sidecar.set_state(seq_id, data)) {
-            sidecar.disable();
-            sidecar_target_only = true;
-            SPC_ERR("%s", "MTP sidecar state restore failed; entering target-only mode\n");
-            return false;
-        }
-        return true;
-    }
-
     bool reset_state(llama_seq_id seq_id) override {
         if (!sidecar.active()) return true;
         if (seq_id >= 0 && seq_id < (llama_seq_id) n_seq && mtp_sidecar_stale[seq_id]) {
@@ -3139,7 +3093,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             std::memcpy(pending_h[seq_id].data(), verify_h[seq_id].data() + (size_t) i_h * n_embd, row_bytes);
         }
     }
-    bool get_state(llama_seq_id seq_id, std::vector<uint8_t> & data) const override {
+    bool get_state(llama_seq_id seq_id, std::vector<uint8_t> & data) override {
         if (seq_id < 0 || seq_id >= (llama_seq_id) n_seq ||
                 pending_h[seq_id].size() != (size_t) n_embd) {
             return false;
@@ -4954,17 +4908,6 @@ void common_speculative_state_restore_plan_free(common_speculative_state_restore
     delete plan;
 }
 
-bool common_speculative_set_state(common_speculative * spec, llama_seq_id seq_id, const std::vector<uint8_t> & data) {
-    std::unique_ptr<common_speculative_state_restore_plan,
-            decltype(&common_speculative_state_restore_plan_free)> plan(
-        common_speculative_prepare_state(spec, seq_id, data.data(), data.size()),
-        common_speculative_state_restore_plan_free);
-    if (!plan) {
-        return false;
-    }
-    common_speculative_state_restore_plan_commit(plan.get());
-    return true;
-}
 
 void common_speculative_release_state(common_speculative * spec, llama_seq_id seq_id) {
     if (spec == nullptr) {

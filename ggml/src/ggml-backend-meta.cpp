@@ -251,6 +251,19 @@ ggml_backend_dev_t ggml_backend_meta_device(
     return &result.first->second;
 }
 
+size_t ggml_backend_meta_device_count(ggml_backend_dev_t meta_dev) {
+    GGML_ASSERT(ggml_backend_dev_is_meta(meta_dev));
+    const ggml_backend_meta_device_context * meta_dev_ctx = (const ggml_backend_meta_device_context *) meta_dev->context;
+    return meta_dev_ctx->simple_devs.size();
+}
+
+ggml_backend_dev_t ggml_backend_meta_device_get(ggml_backend_dev_t meta_dev, size_t index) {
+    GGML_ASSERT(ggml_backend_dev_is_meta(meta_dev));
+    const ggml_backend_meta_device_context * meta_dev_ctx = (const ggml_backend_meta_device_context *) meta_dev->context;
+    GGML_ASSERT(index < meta_dev_ctx->simple_devs.size());
+    return meta_dev_ctx->simple_devs[index];
+}
+
 //
 // meta backend buffer type
 //

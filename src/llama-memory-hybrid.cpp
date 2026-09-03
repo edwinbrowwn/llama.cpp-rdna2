@@ -55,12 +55,14 @@ llama_memory_hybrid::llama_memory_hybrid(
             : filter_attn,
         nullptr,
         nullptr,
+        "cache",
         n_ubatch,
         tail_tokens,
         tail_type,
         tail_tokens_requested,
         false,
-        tail_rollback_tokens
+        tail_rollback_tokens,
+        0
     )),
     mem_recr(new llama_memory_recurrent(
         model,

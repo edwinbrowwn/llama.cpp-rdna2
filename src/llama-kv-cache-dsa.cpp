@@ -39,7 +39,7 @@ llama_kv_cache_dsa::llama_kv_cache_dsa(
             model, model.hparams, type_k, type_v,
             v_trans, offload, unified, kv_size, n_seq_max, n_pad,
             n_swa, swa_type, nullptr, filter_mla, reuse, nullptr,
-            n_ubatch, tail_tokens, tail_type, tail_tokens_requested, false, tail_rollback_tokens);
+            "cache", n_ubatch, tail_tokens, tail_type, tail_tokens_requested, false, tail_rollback_tokens);
 
     // we use llama_kv_cache for caching indexer keys
     // by hand-tweaking some hparams we fool it to create

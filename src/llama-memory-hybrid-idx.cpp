@@ -78,7 +78,7 @@ llama_memory_context_ptr llama_memory_hybrid_idx::init_batch(
             if (embd_all) {
                 ubatch = balloc.split_seq(n_ubatch);
             } else {
-                const bool unified = get_mem_attn()->get_n_stream() == 1;
+                const bool unified = get_mem_attn()->get_kv_n_stream() == 1;
                 const uint32_t n_rs_seq = get_mem_recr()->n_rs_seq;
                 ubatch = balloc.split_equal(n_ubatch, !unified, n_rs_seq > 0 ? n_rs_seq + 1 : 0);
             }
@@ -96,7 +96,7 @@ llama_memory_context_ptr llama_memory_hybrid_idx::init_batch(
             return std::make_unique<llama_memory_hybrid_idx_context>(LLAMA_MEMORY_STATUS_FAILED_PREPARE);
         }
 
-        auto heads_attn = get_mem_attn()->prepare(ubatches);
+        auto heads_attn = static_cast<llama_kv_cache*>(get_mem_attn())->prepare(ubatches);
         if (heads_attn.empty()) {
             LLAMA_LOG_ERROR("%s: failed to prepare attention ubatches\n", __func__);
             return std::make_unique<llama_memory_hybrid_idx_context>(LLAMA_MEMORY_STATUS_FAILED_PREPARE);
@@ -124,7 +124,7 @@ llama_memory_context_ptr llama_memory_hybrid_idx::init_update(llama_context * lc
 
 bool llama_memory_hybrid_idx::get_can_shift() const {
     return llama_memory_hybrid::get_can_shift() &&
-           (!mem_idx || (mem_idx->get_can_shift() && mem_idx->get_size() == get_mem_attn()->get_size())) &&
+           (!mem_idx || (mem_idx->get_can_shift() && mem_idx->get_kv_size() == get_mem_attn()->get_kv_size())) &&
            (!mem_ple || mem_ple->get_can_shift());
 }
 
@@ -272,7 +272,7 @@ void llama_memory_hybrid_idx::ple_append(
     history.push_back({pos, token});
 
     const uint64_t max_entries_u64 =
-            (uint64_t) get_mem_attn()->get_size() + hparams.ple_ngram_size + 1;
+            (uint64_t) get_mem_attn()->get_kv_size() + hparams.ple_ngram_size + 1;
     const size_t max_entries = (size_t) std::min<uint64_t>(
             max_entries_u64, std::numeric_limits<size_t>::max());
     if (history.size() > max_entries) {
@@ -388,7 +388,7 @@ void llama_memory_hybrid_idx::ple_seq_cp(
     dst.insert(dst.begin() + std::min(insert_at, dst.size()), copied.begin(), copied.end());
 
     const uint64_t max_entries_u64 =
-            (uint64_t) get_mem_attn()->get_size() + hparams.ple_ngram_size + 1;
+            (uint64_t) get_mem_attn()->get_kv_size() + hparams.ple_ngram_size + 1;
     const size_t max_entries = (size_t) std::min<uint64_t>(
             max_entries_u64, std::numeric_limits<size_t>::max());
     if (dst.size() > max_entries) {
@@ -491,7 +491,7 @@ void llama_memory_hybrid_idx::ple_state_write(
 void llama_memory_hybrid_idx::ple_state_read(
         llama_io_read_i & io, llama_seq_id seq_id) {
     const uint64_t max_entries_u64 =
-            (uint64_t) get_mem_attn()->get_size() + hparams.ple_ngram_size + 1;
+            (uint64_t) get_mem_attn()->get_kv_size() + hparams.ple_ngram_size + 1;
     const uint32_t max_entries = (uint32_t) std::min<uint64_t>(
             max_entries_u64, std::numeric_limits<uint32_t>::max());
     const uint32_t max_sequences = std::max<uint32_t>(n_seq_max, 1);
@@ -594,7 +594,7 @@ llama_memory_hybrid_idx_context::llama_memory_hybrid_idx_context(
                 slot_info_vec_t   sinfos_attn,
                 slot_info_vec_t   sinfos_idx,
       std::vector<llama_ubatch>   ubatches) :
-    llama_memory_hybrid_context(mem, std::move(sinfos_attn), ubatches),
+    llama_memory_hybrid_context(mem, sinfos_attn.empty() ? nullptr : std::make_unique<llama_kv_cache_context>(static_cast<llama_kv_cache*>(mem->get_mem_attn()), std::move(sinfos_attn), ubatches), ubatches),
     mem(mem),
     stream_ids_ubatch(llama_memory_hybrid_idx_stream_ids(sinfos_idx, ubatches.size())),
     ctx_idx(mem->get_mem_idx() == nullptr ? nullptr :

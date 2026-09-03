@@ -851,6 +851,23 @@ std::vector<llama_token> common_sampler_sample_and_accept_n(
     return common_sampler_sample_and_accept_n(gsmpl, ctx, idxs, draft, dists, grammar_first);
 }
 
+// Maximal-coupling verification overload (declared in sampling.h). The dists
+// argument carries one sparse proposal distribution per draft token, used to
+// verify stochastic speculative-decoding acceptance in a coupling-safe way.
+// Not yet implemented in this tree — only reachable from speculative-decoding
+// callers (server / speculative-simple), never from llama-bench. Fail loudly
+// rather than silently mis-sampling if it is ever reached.
+std::vector<llama_token> common_sampler_sample_and_accept_n(
+        struct common_sampler * gsmpl,
+        struct llama_context * ctx,
+        const std::vector<int> & idxs,
+        const llama_tokens & draft,
+        const std::vector<common_speculative_token_dist> & dists,
+        bool grammar_first) {
+    (void) gsmpl; (void) ctx; (void) idxs; (void) draft; (void) dists; (void) grammar_first;
+    GGML_ABORT("common_sampler_sample_and_accept_n (maximal-coupling dists overload) is not implemented in this tree");
+}
+
 uint32_t common_sampler_get_seed(const struct common_sampler * gsmpl) {
     return llama_sampler_get_seed(gsmpl->chain);
 }

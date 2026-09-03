@@ -5606,9 +5606,6 @@ void llama_kv_cache::state_write_body(llama_io_write_i & io, llama_seq_id seq_id
     }
 }
 
-void llama_kv_cache::state_read(llama_io_read_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) {
-    state_read_sinfo(io, seq_id, flags, nullptr, nullptr);
-}
 
 void llama_kv_cache::state_read_sinfo(
         llama_io_read_i & io,
@@ -5639,7 +5636,7 @@ const slot_info_vec_t *   sinfos_in) {
 }
 
 std::vector<std::vector<uint32_t>> llama_kv_cache::state_read_body(
-        llama_io_read_i & io, llama_seq_id seq_id, uint32_t n_stream_cur) {
+        llama_io_read_i & io, llama_seq_id seq_id, uint32_t n_stream_cur, const slot_info_vec_t * sinfos_in) {
     GGML_ASSERT(seq_id == -1 || (seq_id >= 0 && (size_t) seq_id < seq_to_stream.size()));
     if (n_stream_cur != n_stream) {
         throw std::runtime_error("n_stream mismatch");

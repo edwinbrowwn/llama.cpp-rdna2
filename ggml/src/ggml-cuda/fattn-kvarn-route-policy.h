@@ -18,6 +18,7 @@ enum ggml_cuda_fattn_kvarn_head_dim : uint32_t {
 
 enum ggml_cuda_fattn_kvarn_route {
     GGML_CUDA_FATTN_KVARN_ROUTE_DECODE_SPLIT,
+
     GGML_CUDA_FATTN_KVARN_ROUTE_DECODE_VECTOR,
     GGML_CUDA_FATTN_KVARN_ROUTE_GENERIC_MMA,
     GGML_CUDA_FATTN_KVARN_ROUTE_PROMPT_PREFILL,
@@ -151,11 +152,19 @@ inline ggml_cuda_fattn_kvarn_capabilities ggml_cuda_fattn_kvarn_select_capabilit
     } else if (input.backend == GGML_CUDA_FATTN_KVARN_BACKEND_HIP) {
         result.generic_mma =
             input.matrix_mma && result.store_materialize && physical_wave_supported;
-        // Split decode uses NVIDIA ldmatrix plus m16n8 MMA fragments, and the
-        // SWA vector kernel is CUDA-warp tuned. HIP uses shape-gated generic
-        // WMMA/MFMA or portable direct-record attention instead.
+        // RDNA2 (gfx1030) supports vectorized decode via GGML_KVARN_VEC env var,
+        // and split decode via the rotated-domain kernel. These are shape-gated
+        // but functional on gfx1030; enable them so the dispatcher can select
+        // them when kernel eligibility is proven per-shape.
+#if defined(__gfx1030__) || defined(__gfx1031__) || defined(__gfx1032__) || \
+    defined(__gfx1033__) || defined(__gfx1034__) || defined(__gfx1035__) || \
+    defined(__gfx1036__) || defined(__gfx1037__)
+        result.decode_split = true;
+        result.decode_vector = true;
+#else
         result.decode_split = false;
         result.decode_vector = false;
+#endif
     }
     // MUSA intentionally remains portable-native. Its compiler consumes these
     // shared sources, but it does not provide the AMD/NVIDIA MMA contracts used

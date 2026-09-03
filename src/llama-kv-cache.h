@@ -574,7 +574,7 @@ private:
             uint32_t version);
     void materialize_pending_copies();
     std::vector<std::vector<uint32_t>> state_read_body(
-            llama_io_read_i & io, llama_seq_id seq_id, uint32_t n_stream_cur);
+            llama_io_read_i & io, llama_seq_id seq_id, uint32_t n_stream_cur, const slot_info_vec_t * sinfos_in = nullptr);
     void state_read_impl(llama_io_read_i & io, llama_seq_id seq_id, llama_state_seq_flags flags);
     void state_read_tail(
             llama_io_read_i & io,

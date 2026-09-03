@@ -172,7 +172,7 @@ llama_kv_cache_iswa::llama_kv_cache_iswa(
                         model, hparams, standard_type_k, standard_type_v,
                         v_trans, offload, unified, size, n_seq_max, n_pad,
                         n_swa, swa_type, nullptr, layer_filter, reuse, nullptr,
-                        n_ubatch, exact_tokens, tail_type, exact_requested,
+                        "cache", n_ubatch, exact_tokens, tail_type, exact_requested,
                         false, tail_rollback_tokens, exact_tokens);
             }
             // Structured KVarN records do not participate in cross-context
@@ -188,7 +188,7 @@ llama_kv_cache_iswa::llama_kv_cache_iswa(
                 model, hparams, type_k, type_v,
                 v_trans, offload, unified, size, n_seq_max, n_pad,
                 n_swa, swa_type, cache_mem_other, layer_filter, reuse, share,
-                n_ubatch, n_swa > 0 ? tail_tokens_swa : tail_tokens, tail_type,
+                "cache", n_ubatch, n_swa > 0 ? tail_tokens_swa : tail_tokens, tail_type,
                 n_swa > 0 ? tail_tokens_swa_requested : tail_tokens_requested,
                 false, tail_rollback_tokens);
     };

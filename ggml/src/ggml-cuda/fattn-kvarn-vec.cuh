@@ -126,7 +126,7 @@ static __global__ void ggml_cuda_fattn_kvarn_vec_kernel(
     static_assert(TOKENS_PER_SPLIT == 8 || TOKENS_PER_SPLIT == 16 || TOKENS_PER_SPLIT == 32,
         "KVarN vec supports 8-, 16-, or 32-token partitions");
     static_assert(MAX_GQA == 2, "KVarN vec shares one dequantized K/V value across a bounded D256 GQA group");
-    static_assert(WARP_SIZE == 32, "KVarN vec requires CUDA warp size 32");
+    static_assert(WARP_SIZE == 32 || WARP_SIZE == 64, "KVarN vec requires CUDA warp size 32 or 64");
 
     // Match the std fattn-vec block of 128 threads / 4 warps. The decode is latency-bound at ~6%
     // occupancy because each split-block only ran 2 warps (one per 128-wide slice), so the strided

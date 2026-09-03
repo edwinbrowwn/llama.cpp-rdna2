@@ -541,7 +541,6 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
                 return get_tensor_config_impl(GGML_BACKEND_SPLIT_AXIS_0, "ffn_down_shexp.weight");
             }
         }
-        }
 
         // standard attention
         if (std::regex_match(tensor_name, pattern_q_weight) || std::regex_match(tensor_name, pattern_kv_weight)) {
@@ -2878,7 +2877,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                                         !cparams.flash_attn, cparams.offload_kqv, cparams.kv_unified,
                                         cparams.n_ctx_seq, cparams.n_seq_max, 1,
                                         hparams.n_swa, hparams.swa_type, nullptr, filter_attn,
-                                        nullptr, nullptr, cparams.n_ubatch, 0,
+                                        nullptr, nullptr, "cache", cparams.n_ubatch, 0,
                                         kvarn_tail_type, 0, false, params.kv_tail_rollback_tokens,
                                         params.kv_tail_native_exact ? cparams.n_ctx : 0);
                             } else {
@@ -3035,7 +3034,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                                         !cparams.flash_attn, cparams.offload_kqv, cparams.kv_unified,
                                         cparams.n_ctx_seq, cparams.n_seq_max, 1,
                                         hparams.n_swa, hparams.swa_type, nullptr, filter,
-                                        reuse, nullptr, cparams.n_ubatch, 0,
+                                        reuse, nullptr, "cache", cparams.n_ubatch, 0,
                                         kvarn_tail_type, 0, false, params.kv_tail_rollback_tokens,
                                         params.kv_tail_native_exact ? cparams.n_ctx : 0);
                             } else {
@@ -3065,6 +3064,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                                     filter,
                                     nullptr,
                                     nullptr,
+                                    "cache",
                                     cparams.n_ubatch,
                                     params.kv_tail_tokens,
                                     params.kv_tail_type,

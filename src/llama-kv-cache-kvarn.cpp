@@ -1257,12 +1257,13 @@ llama_kv_cache_kvarn::llama_kv_cache_kvarn(
         [](int32_t) { return false; },
         nullptr,
         nullptr,
+        "cache",
         n_ubatch,
         tail_tokens,
         tail_type_requested,
         tail_tokens_requested,
             true,
-        tail_rollback_tokens)) {
+        tail_rollback_tokens, 0)) {
     GGML_ASSERT(n_stream > 0);
     GGML_ASSERT(swa || kv_size % KVAR_N_GROUP == 0);
     GGML_ASSERT(stage_groups >= 2 && "KVarN stage depth must be at least 2");
@@ -1358,11 +1359,14 @@ llama_kv_cache_kvarn::llama_kv_cache_kvarn(
                 il, head_dim_k, head_dim_v));
         }
         const bool explicit_bias = model.self_attention_uses_explicit_bias(il);
-        const bool native_tail = exact_tail_tokens == 0 ||
-            (!explicit_bias && kvarn_backend_supports_native_tail(
-                dev, exact_tail_type, head_dim_k, head_dim_v));
-        const bool native_attention =
-            llama_kvarn_backend_supports_native_ops(dev) && native_tail;
+        const bool exact_tail_zero = exact_tail_tokens == 0;
+        const bool native_tail_capable = kvarn_backend_supports_native_tail(
+                dev, exact_tail_type, head_dim_k, head_dim_v);
+        const bool native_tail = exact_tail_zero ||
+            (!explicit_bias && native_tail_capable);
+        const bool native_ops =
+            llama_kvarn_backend_supports_native_ops(dev);
+        const bool native_attention = native_ops && native_tail;
         const bool mixed_tail_native = native_attention &&
             llama_kvarn_backend_mixed_tail_native_preferred(dev);
         const bool native_original_v = native_attention &&
@@ -1702,12 +1706,13 @@ std::unique_ptr<llama_kv_cache> llama_kv_cache_kvarn::make_metadata_cache() cons
             [](int32_t) { return false; },
             nullptr,
             nullptr,
+        "cache",
             metadata_n_ubatch,
             exact_tail_tokens,
             exact_tail_type_requested,
             exact_tail_tokens_requested,
             true,
-            metadata->get_tail_rollback_tokens());
+            metadata->get_tail_rollback_tokens(), 0);
 
     const auto & routes = metadata->get_tail_layer_routes();
     result->set_tail_routes(std::vector<llama_kv_tail_layer_route>(routes.begin(), routes.end()));
