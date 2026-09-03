@@ -68,7 +68,24 @@ static void test_ngram_map_fixed_width() {
     require(short_draft.size() == 1, "cap preserves available value bound");
 }
 
+static void test_dynamic_mtp_deferred_widths() {
+    require(common_speculative_sidecar_mtp_deferred_width_eligible(4, 0, 5),
+            "fixed width four keeps five-row deferred catch-up");
+    require(!common_speculative_sidecar_mtp_deferred_width_eligible(4, 0, 6),
+            "fixed width four rejects an unreserved sixth row");
+    require(common_speculative_sidecar_mtp_deferred_width_eligible(4, 1, 6),
+            "content +1 keeps six-row deferred catch-up");
+    require(common_speculative_sidecar_mtp_deferred_width_eligible(4, 3, 8),
+            "content +3 keeps the complete eight-row envelope");
+    require(!common_speculative_sidecar_mtp_deferred_width_eligible(4, 3, 9),
+            "deferred catch-up rejects rows beyond the content envelope");
+    require(common_speculative_sidecar_mtp_deferred_width_eligible(5, 0, 5) &&
+            common_speculative_sidecar_mtp_deferred_width_eligible(5, 0, 6),
+            "existing width-five eligibility is preserved");
+}
+
 int main() {
+    test_dynamic_mtp_deferred_widths();
     test_cap_and_explicit_override();
     test_ngram_map_fixed_width();
     std::puts("test-speculative-sidecar-cap: PASS");

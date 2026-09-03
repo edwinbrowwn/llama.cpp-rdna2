@@ -1397,12 +1397,9 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
             const std::vector<int32_t> & i_batch_end) {
         auto * ctx_tgt = this->params.ctx_tgt;
         std::vector<llama_device_view> layers(target_layer_ids_n);
-        bool direct = false;
+        bool direct = true;
         void * stream = nullptr;
         int32_t device = -1;
-#if defined(GGML_USE_HIP)
-        direct = true;
-#endif
         for (uint32_t k = 0; k < target_layer_ids_n; ++k) {
             const bool is_nextn = target_layer_ids[k] == n_layer_tgt;
             const bool has_device_layer = is_nextn
@@ -2131,6 +2128,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
     std::vector<std::vector<int32_t>> sidecar_deferred_pos;
     std::vector<const float *> verify_h_device;
     std::vector<size_t> verify_h_device_stride;
+    int sidecar_input_mode_logged = -1; // 0 = host staging, 1 = direct device handoff
 
     llama_batch batch = {};
 
@@ -2390,15 +2388,9 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             bool defer_catchup) {
         auto * ctx_tgt = this->params.ctx_tgt;
         llama_device_view device_view;
-        bool have_device_view = false;
+        const bool have_device_view = llama_get_embeddings_nextn_device(ctx_tgt, &device_view);
         bool direct = false;
-        int32_t target_device = -1;
-#if defined(GGML_USE_HIP)
-        have_device_view = llama_get_embeddings_nextn_device(ctx_tgt, &device_view);
-        if (have_device_view) {
-            target_device = device_view.device;
-        }
-#endif
+        const int32_t target_device = have_device_view ? device_view.device : -1;
 
         if (sidecar_load_pending) {
             std::string error;
@@ -2415,19 +2407,27 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             }
             sidecar_load_pending = false;
             llama_set_embeddings_nextn_device_preferred(ctx_tgt, true);
-            SPC_INF("MTP sidecar active: %s (bound device=%d)\n",
+            SPC_INF("MTP sidecar active: %s (initial target device=%d; -1 means current-device fallback)\n",
                     sidecar_paths.library.c_str(), target_device);
         }
 
-#if defined(GGML_USE_HIP)
         const bool view_shape_ok = have_device_view &&
                 device_view.row_stride == (size_t) n_embd * sizeof(float) &&
                 device_view.n_rows >= (uint32_t) batch_in.n_tokens;
         direct = view_shape_ok && sidecar.attach_target_stream(device_view.stream, device_view.device);
-#endif
-        if (std::getenv("LLAMA_SPEC_HIP_DEBUG") != nullptr) {
-            SPC_DBG("MTP catch-up input mode: %s (target device=%d)\n",
-                    direct ? "DIRECT D2D" : "HOST FALLBACK", target_device);
+        const int input_mode = direct ? 1 : 0;
+        if (input_mode != sidecar_input_mode_logged) {
+            if (direct) {
+                SPC_INF("MTP sidecar target handoff: direct device rows on device %d\n",
+                        target_device);
+            } else if (common_speculative_content_env_enabled()) {
+                SPC_WRN("MTP sidecar target handoff: host staging (device view=%d, target device=%d); content auto-extension stays at baseline\n",
+                        have_device_view ? 1 : 0, target_device);
+            } else {
+                SPC_INF("MTP sidecar target handoff: host staging (device view=%d, target device=%d)\n",
+                        have_device_view ? 1 : 0, target_device);
+            }
+            sidecar_input_mode_logged = input_mode;
         }
 
         // If any sequence is interleaved, direct rows cannot be represented by
@@ -2595,9 +2595,11 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         for (int32_t k = 0; sidecar_all_logits && k < n_tokens; ++k) {
             sidecar_all_logits = batch_in.logits[k] != 0;
         }
+        const int32_t content_extra = common_speculative_content_env_enabled()
+                ? common_speculative_content_env_max_boost() : 0;
         const bool sidecar_defer_width =
-                (this->params.n_max == 4 && n_tokens == 5) ||
-                (this->params.n_max == 5 && (n_tokens == 5 || n_tokens == 6));
+                common_speculative_sidecar_mtp_deferred_width_eligible(
+                        this->params.n_max, content_extra, n_tokens);
         const bool sidecar_defer_catchup = (sidecar.active() || sidecar_load_pending) &&
                 sidecar_defer_requested && n_seq == 1 && n_mtp_layers == 1 &&
                 !chain_heads && !is_mem_shared && sidecar_defer_width && sidecar_all_logits;
@@ -2739,7 +2741,9 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
     bool content_sidecar_ready(llama_seq_id seq_id) const override {
         return sidecar.active() && seq_id >= 0 &&
                 seq_id < (llama_seq_id) mtp_sidecar_stale.size() &&
-                !mtp_sidecar_stale[(size_t) seq_id];
+                !mtp_sidecar_stale[(size_t) seq_id] &&
+                seq_id < (llama_seq_id) verify_h_device.size() &&
+                verify_h_device[(size_t) seq_id] != nullptr;
     }
 
     void draft(common_speculative_draft_params_vec & dparams) override {
@@ -4389,9 +4393,11 @@ common_speculative * common_speculative_init(common_params_speculative & params,
     });
     if (mtp_sidecar && has_ngram && params.draft.n_max > 0) {
         if (common_speculative_content_env_enabled()) {
-            SPC_INF("sidecar ngram verification base MTP width %d; content-aware sidecar envelope may extend to %d; explicit speculative.n_max remains authoritative\n",
+            SPC_INF("sidecar content widths: drafts=%d..%d, target verification rows=%d..%d; explicit speculative.n_max remains authoritative\n",
                     params.draft.n_max,
-                    params.draft.n_max + common_speculative_content_env_max_boost());
+                    params.draft.n_max + common_speculative_content_env_max_boost(),
+                    params.draft.n_max + 1,
+                    params.draft.n_max + common_speculative_content_env_max_boost() + 1);
         } else {
             SPC_INF("sidecar ngram verification fixed at MTP width %d; explicit speculative.n_max remains authoritative\n",
                     params.draft.n_max);
@@ -4999,7 +5005,7 @@ bool common_speculative_rebase_state(common_speculative * spec, llama_seq_id seq
     return result;
 }
 
-void common_speculative_print_stats(const common_speculative * spec) {
+void common_speculative_print_stats(const common_speculative * spec, llama_seq_id seq_id) {
     if (spec == nullptr) {
         return;
     }
@@ -5044,5 +5050,5 @@ void common_speculative_print_stats(const common_speculative * spec) {
                 str_perf.c_str());
     }
 
-    spec->content.print_stats();
+    spec->content.print_stats(seq_id);
 }

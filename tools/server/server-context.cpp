@@ -963,7 +963,7 @@ struct server_slot {
             SLT_INF(*this, "draft activity = 0 tokens (%d verification steps)\n", n_draft_verif_steps);
         }
 
-        common_speculative_print_stats(spec);
+        common_speculative_print_stats(spec, id);
     }
 
     json to_json(bool only_metrics = false) const {

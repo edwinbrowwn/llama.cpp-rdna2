@@ -86,7 +86,7 @@ Startup prints:
 
 ```
 RDNA2 P2P startup self-test matched installed RCCL for 5120 elements (4 patterns x 16 chains)
-armed RDNA2 P2P MTP-width5-auto-expanded host-snapshot AllReduce after installed-RCCL self-test (n1=1 n5=1 n6=1)
+armed RDNA2 P2P MTP-target-rows5-auto-expanded host-snapshot AllReduce after installed-RCCL self-test (n1=1 n5=1 n6=1)
 ```
 
 That reads as "working". But `p2p_host_calls` is only printed in the

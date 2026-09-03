@@ -149,7 +149,7 @@ bool common_speculative_rebase_state(common_speculative * spec, llama_seq_id seq
         llama_pos pos_min, llama_pos pos_max, llama_pos delta);
 
 // print statistics about the speculative decoding
-void common_speculative_print_stats(const common_speculative * spec);
+void common_speculative_print_stats(const common_speculative * spec, llama_seq_id seq_id = -1);
 
 struct common_speculative_deleter {
     void operator()(common_speculative * s) { common_speculative_free(s); }

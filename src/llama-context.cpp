@@ -15,10 +15,6 @@
 #include "llama-ext.h"
 #include "llama-sampler.h"
 #include "llama.h"
-#if defined(GGML_USE_HIP)
-#include "ggml-cuda.h"
-#endif
-
 #include <cinttypes>
 #include <cmath>
 #include <cstdlib>
@@ -974,11 +970,38 @@ float * llama_context::get_embeddings_nextn() {
     return embd_nextn.data;
 }
 
+static bool llama_backend_get_hip_device_stream(
+        ggml_backend_t backend, int32_t & device, void * & stream) {
+    if (backend == nullptr) {
+        return false;
+    }
+    ggml_backend_dev_t backend_device = ggml_backend_get_device(backend);
+    const char * name = backend_device != nullptr ? ggml_backend_dev_name(backend_device) : nullptr;
+    if (name == nullptr || std::strncmp(name, "ROCm", 4) != 0) {
+        return false;
+    }
+    ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(backend_device);
+    if (reg == nullptr) {
+        return false;
+    }
+    using get_stream_fn = void * (*)(ggml_backend_t);
+    using get_device_fn = int (*)(ggml_backend_t);
+    auto get_stream = reinterpret_cast<get_stream_fn>(
+            ggml_backend_reg_get_proc_address(reg, "ggml_backend_cuda_get_stream"));
+    auto get_device = reinterpret_cast<get_device_fn>(
+            ggml_backend_reg_get_proc_address(reg, "ggml_backend_cuda_get_device"));
+    if (get_stream == nullptr || get_device == nullptr) {
+        return false;
+    }
+    stream = get_stream(backend);
+    device = get_device(backend);
+    return stream != nullptr && device >= 0;
+}
+
 bool llama_context::get_embeddings_nextn_device(llama_device_view & view) const {
     view = {};
-#if defined(GGML_USE_HIP)
     if (!device_views_valid || !embd_nextn_device.valid || embd_nextn_device.tensor == nullptr ||
-            embd_nextn_device.backend == nullptr || !ggml_backend_is_cuda(embd_nextn_device.backend)) {
+            embd_nextn_device.backend == nullptr) {
         return false;
     }
     const auto * tensor = embd_nextn_device.tensor;
@@ -988,13 +1011,13 @@ bool llama_context::get_embeddings_nextn_device(llama_device_view & view) const 
     view.data       = tensor->data;
     view.row_stride = tensor->nb[1];
     view.n_rows     = embd_nextn_device.n_rows;
-    view.device     = ggml_backend_cuda_get_device(embd_nextn_device.backend);
-    view.stream     = ggml_backend_cuda_get_stream(embd_nextn_device.backend);
+    if (!llama_backend_get_hip_device_stream(
+                embd_nextn_device.backend, view.device, view.stream)) {
+        view = {};
+        return false;
+    }
     return view.data != nullptr && view.row_stride >= ggml_row_size(tensor->type, tensor->ne[0]) &&
-           view.n_rows > 0 && view.stream != nullptr && view.device >= 0;
-#else
-    return false;
-#endif
+           view.n_rows > 0;
 }
 
 float * llama_context::get_embeddings_nextn_ith(int32_t i) {
@@ -1039,13 +1062,11 @@ float * llama_context::get_embeddings_layer_inp(uint32_t lid) {
 
 bool llama_context::get_embeddings_layer_inp_device(uint32_t lid, llama_device_view & view) const {
     view = {};
-#if defined(GGML_USE_HIP)
     if (!device_views_valid || lid >= embd_layer_inp_device.size()) {
         return false;
     }
     const auto & candidate = embd_layer_inp_device[lid];
-    if (!candidate.valid || candidate.tensor == nullptr || candidate.backend == nullptr ||
-            !ggml_backend_is_cuda(candidate.backend)) {
+    if (!candidate.valid || candidate.tensor == nullptr || candidate.backend == nullptr) {
         return false;
     }
     const auto * tensor = candidate.tensor;
@@ -1055,14 +1076,13 @@ bool llama_context::get_embeddings_layer_inp_device(uint32_t lid, llama_device_v
     view.data       = tensor->data;
     view.row_stride = tensor->nb[1];
     view.n_rows     = candidate.n_rows;
-    view.device     = ggml_backend_cuda_get_device(candidate.backend);
-    view.stream     = ggml_backend_cuda_get_stream(candidate.backend);
+    if (!llama_backend_get_hip_device_stream(
+                candidate.backend, view.device, view.stream)) {
+        view = {};
+        return false;
+    }
     return view.data != nullptr && view.row_stride >= ggml_row_size(tensor->type, tensor->ne[0]) &&
-           view.n_rows > 0 && view.stream != nullptr && view.device >= 0;
-#else
-    GGML_UNUSED(lid);
-    return false;
-#endif
+           view.n_rows > 0;
 }
 
 llama_token llama_context::get_sampled_token_ith(int32_t idx) {
@@ -2003,12 +2023,10 @@ int llama_context::decode(const llama_batch & batch_inp) {
         }
         if (device_views_valid && one_ubatch && t_h_nextn) {
             ggml_backend_t backend_h = ggml_backend_sched_get_tensor_backend(sched.get(), t_h_nextn);
-            if (backend_h != nullptr) {
-#if defined(GGML_USE_HIP)
-                if (ggml_backend_is_cuda(backend_h)) {
-                    embd_nextn_device = { t_h_nextn, backend_h, ubatch.n_tokens, true };
-                }
-#endif
+            int32_t device = -1;
+            void * stream = nullptr;
+            if (llama_backend_get_hip_device_stream(backend_h, device, stream)) {
+                embd_nextn_device = { t_h_nextn, backend_h, ubatch.n_tokens, true };
             }
         }
 
@@ -2108,19 +2126,19 @@ int llama_context::decode(const llama_batch & batch_inp) {
                 float * embd_nextn_out = embd_nextn.data + offset*n_embd;
 
                 GGML_ASSERT((offset + n_rows)*n_embd <= (int64_t) embd_nextn.size);
-#if defined(GGML_USE_HIP)
                 // Borrowed device tensors survive only a single-ubatch decode.
                 // A later ubatch reuses the graph storage, so deferring that
                 // copy would retain a stale pointer (and possibly the previous
                 // ubatch's larger byte count). Materialize multi-ubatch rows in
                 // stream order instead.
-                if (device_views_valid && embd_nextn_device_preferred && ggml_backend_is_cuda(backend_h)) {
+                int32_t device = -1;
+                void * stream = nullptr;
+                if (device_views_valid && embd_nextn_device_preferred &&
+                        llama_backend_get_hip_device_stream(backend_h, device, stream)) {
                     pending_embd_nextn_copies.push_back({
                         t_h_nextn, backend_h, embd_nextn_out,
                         (size_t) n_rows * n_embd * sizeof(float) });
-                } else
-#endif
-                {
+                } else {
                     ggml_backend_tensor_get_async(backend_h, t_h_nextn, embd_nextn_out,
                             0, (size_t) n_rows * n_embd * sizeof(float));
                 }
@@ -2392,14 +2410,14 @@ void llama_context::extract_layer_inputs(const llm_graph_result * res, size_t to
         } else {
             embd_layer_inp_device[il] = {};
         }
-#if defined(GGML_USE_HIP)
+        int32_t device = -1;
+        void * stream = nullptr;
         if (device_views_valid && il < embd_layer_inp_device_preferred.size() &&
-                embd_layer_inp_device_preferred[il] && ggml_backend_is_cuda(backend)) {
+                embd_layer_inp_device_preferred[il] &&
+                llama_backend_get_hip_device_stream(backend, device, stream)) {
             pending_embd_layer_inp_copies[il].push_back({
                 t, backend, embd_layer_inp[il].data + dst_offset, nbytes });
-        } else
-#endif
-        {
+        } else {
             ggml_backend_tensor_get_async(backend, t, embd_layer_inp[il].data + dst_offset, 0, nbytes);
         }
     }

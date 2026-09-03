@@ -2,6 +2,7 @@
 
 #include "llama.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -136,7 +137,7 @@ public:
                 uint16_t n_committed, uint16_t n_accepted_draft);
     void reset(uint32_t seq_id);
 
-    void print_stats() const;
+    void print_stats(int32_t seq_id = -1) const;
 
 private:
     friend struct common_speculative_content_test_access;
@@ -153,4 +154,5 @@ private:
     std::vector<uint16_t> token_flags_;
     std::vector<common_speculative_content_state> states_;
     common_speculative_content_stats stats_[4] = {};
+    std::vector<std::array<common_speculative_content_stats, 4>> request_stats_;
 };

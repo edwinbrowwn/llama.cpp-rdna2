@@ -35,11 +35,17 @@ struct common_speculative_content_test_access {
         content.token_flags_.assign(32, STF_ALPHA);
         content.token_flags_[5] = STF_BRACE | STF_STRONG_ANCHOR;
         content.states_.assign(1, {});
+        content.request_stats_.assign(1, {});
     }
 
     static const common_speculative_content_stats & stats(
             const common_speculative_content & content, int bucket) {
         return content.stats_[bucket];
+    }
+
+    static const common_speculative_content_stats & request_stats(
+            const common_speculative_content & content, int bucket) {
+        return content.request_stats_[0][bucket];
     }
 };
 
@@ -167,6 +173,29 @@ static void test_provisional_is_separate() {
     }
 }
 
+static void test_request_stats_reset_at_begin() {
+    common_speculative_content content;
+    common_speculative_content_test_access::configure(content, 4, 1, 4);
+
+    const llama_token prompt[] = { 0, 1, 2 };
+    content.begin(0, prompt, 3);
+    content.prepare(0, prompt, 3, 3);
+    const llama_token draft[] = { 4, 5, 6, 7, 8 };
+    content.observe_draft(0, draft, 5, 4, 5, 5);
+    content.accept(0, draft, 5, 3, 3);
+
+    const auto & request = common_speculative_content_test_access::request_stats(content, 1);
+    require(request.cycles == 1 && request.drafted == 5 && request.accepted == 3,
+            "request stats identify selected width and accepted draft count");
+
+    content.begin(0, prompt, 3);
+    const auto & reset = common_speculative_content_test_access::request_stats(content, 1);
+    require(reset.cycles == 0 && reset.drafted == 0 && reset.accepted == 0,
+            "request stats reset independently at generation begin");
+    require(common_speculative_content_test_access::stats(content, 1).cycles == 1,
+            "lifetime stats survive request reset");
+}
+
 static void test_replay_commit_and_draft_accounting_are_separate() {
     common_speculative_content content;
     common_speculative_content_test_access::configure(content, 4, 3, 4);
@@ -193,6 +222,7 @@ int main() {
     test_exact_window_and_accepted_commit();
     test_maximum_32_token_window();
     test_provisional_is_separate();
+    test_request_stats_reset_at_begin();
     test_replay_commit_and_draft_accounting_are_separate();
     std::puts("test-speculative-content: PASS");
     return 0;

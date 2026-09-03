@@ -196,8 +196,13 @@ disables the controller entirely.
 
 An explicit request-level `speculative.n_max` bypasses content selection and
 remains the authoritative cap. Runtime sidecar failure or a stale sidecar
-sequence also falls back to the fixed configured baseline. Target verification
-and proposal distributions are unchanged.
+sequence also falls back to the fixed configured baseline. Dense MTP also
+retains the baseline when direct device-row handoff is unavailable, avoiding a
+costly host-staged automatic extension. A draft width of `N` produces `N + 1`
+target-verification rows because the sampled target token
+is verified with the draft. End-of-request summaries report cycles, drafted and
+accepted tokens separately for each selected width. Target verification and
+proposal distributions are unchanged.
 
 Sidecar providers draft a block in one call, so BEFORE-context selection is the
 wall-clock path: `SPEC_CONTENT_PROVISIONAL=1` records the provisional score but

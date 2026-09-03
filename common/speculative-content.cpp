@@ -218,6 +218,7 @@ void common_speculative_content::init(
     }
 
     states_.clear();
+    request_stats_.clear();
     token_flags_.clear();
     if (!config_.enabled || vocab == nullptr || base_nmax_ <= 0) {
         config_.enabled = false;
@@ -235,6 +236,7 @@ void common_speculative_content::init(
         token_flags_[(size_t) token] = classify_piece(llama_vocab_get_text(vocab, token));
     }
     states_.resize(n_seq);
+    request_stats_.resize(n_seq);
 
     LOG_INF("spec content boost POC enabled for sidecar: max=+%d window=%d hysteresis=%d provisional=%d adaptive=%d\n",
             config_.max_boost, config_.window, config_.hysteresis,
@@ -265,6 +267,9 @@ void common_speculative_content::begin(
         return;
     }
     *current = {};
+    if (seq_id < request_stats_.size()) {
+        request_stats_[seq_id] = {};
+    }
     if (tokens == nullptr) {
         return;
     }
@@ -583,6 +588,12 @@ void common_speculative_content::accept(
     ++stats_[bucket].cycles;
     stats_[bucket].drafted += cycle.drafted;
     stats_[bucket].accepted += accepted_draft;
+    if (seq_id < request_stats_.size()) {
+        auto & request = request_stats_[seq_id][bucket];
+        ++request.cycles;
+        request.drafted += cycle.drafted;
+        request.accepted += accepted_draft;
+    }
 
     if (config_.trace) {
         LOG_INF("spec content cycle seq=%u level_before=%u level_provisional=%u level_after=%u base_nmax=%d selected_nmax=%d boost=%u drafted=%u accepted_draft=%zu committed=%zu\n",
@@ -606,18 +617,24 @@ void common_speculative_content::reset(uint32_t seq_id) {
     }
 }
 
-void common_speculative_content::print_stats() const {
+void common_speculative_content::print_stats(int32_t seq_id) const {
     if (!config_.enabled) {
         return;
     }
+    const bool request_scope = seq_id >= 0 && (size_t) seq_id < request_stats_.size();
     for (int i = 0; i < 4; ++i) {
-        const auto & stats = stats_[i];
+        const auto & stats = request_scope ? request_stats_[(size_t) seq_id][i] : stats_[i];
         if (stats.cycles == 0) {
             continue;
         }
-        LOG_INF("spec content +%d: cycles=%llu drafted=%llu accepted=%llu\n",
-                i, (unsigned long long) stats.cycles,
+        const double acceptance = stats.drafted > 0
+                ? (double) stats.accepted / (double) stats.drafted : 0.0;
+        const double mean_span = 1.0 + (double) stats.accepted / (double) stats.cycles;
+        LOG_INF("spec content %swidth=%d (+%d): cycles=%llu drafted=%llu accepted=%llu acceptance=%.5f mean_span=%.2f\n",
+                request_scope ? "request " : "lifetime ", base_nmax_ + i, i,
+                (unsigned long long) stats.cycles,
                 (unsigned long long) stats.drafted,
-                (unsigned long long) stats.accepted);
+                (unsigned long long) stats.accepted,
+                acceptance, mean_span);
     }
 }

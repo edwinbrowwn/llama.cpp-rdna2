@@ -12,6 +12,19 @@ struct common_speculative_sidecar_cap_config {
     int width = 0;
 };
 
+// Dense-MTP deferred catch-up was qualified for five-row target verification
+// at base width four. Content boosting extends the same exact scheduling path
+// through the reserved envelope; it must not silently fall back merely because
+// N draft tokens produce N+1 verification rows.
+inline bool common_speculative_sidecar_mtp_deferred_width_eligible(
+        int base_nmax, int content_extra, int verification_rows) {
+    if (base_nmax == 4) {
+        return verification_rows >= 5 &&
+                verification_rows <= base_nmax + std::max(0, content_extra) + 1;
+    }
+    return base_nmax == 5 && (verification_rows == 5 || verification_rows == 6);
+}
+
 inline bool common_speculative_sidecar_cap_request_enabled(
         const common_speculative_sidecar_cap_config & config,
         const common_speculative_draft_params & dp) {
