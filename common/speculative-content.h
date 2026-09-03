@@ -40,6 +40,9 @@ enum spec_token_flag : uint16_t {
 };
 
 static constexpr uint8_t SPEC_CONTENT_WINDOW_MAX = 32;
+static constexpr int16_t SPEC_CONTENT_SCORE_LEVEL_1 = 4;
+static constexpr int16_t SPEC_CONTENT_SCORE_LEVEL_2 = 10;
+static constexpr int16_t SPEC_CONTENT_SCORE_LEVEL_3 = 18;
 
 struct spec_content_roll_entry {
     llama_token token = -1;
@@ -62,6 +65,8 @@ struct common_speculative_content_state {
     uint8_t newline_recent = 0;
     uint8_t operator_recent = 0;
     uint8_t repetition_score = 0;
+    uint8_t inline_code_open = 0;
+    uint8_t fence_open = 0;
 
     spec_content_boost_level current_level = SPEC_BOOST_0;
     spec_content_boost_level candidate_level = SPEC_BOOST_0;
@@ -92,8 +97,8 @@ struct common_speculative_content_config {
     bool provisional = false;
     bool trace = false;
     bool adaptive = false;
-    int max_boost = 3;
-    int window = 12;
+    int max_boost = 1;
+    int window = 8;
     int hysteresis = 2;
 };
 
@@ -101,6 +106,7 @@ struct common_speculative_content_stats {
     uint64_t cycles = 0;
     uint64_t drafted = 0;
     uint64_t accepted = 0;
+    std::array<uint64_t, 8> accepted_per_pos = {};
 };
 
 class common_speculative_content {
@@ -143,6 +149,7 @@ private:
     friend struct common_speculative_content_test_access;
 
     uint16_t token_flags(llama_token token) const;
+    bool token_inline_backtick(llama_token token) const;
     uint8_t score_level(int score) const;
     void extend_window(common_speculative_content_state & state,
                        const llama_token * tokens, size_t n_tokens) const;
@@ -152,7 +159,12 @@ private:
     common_speculative_content_config config_;
     int base_nmax_ = 0;
     std::vector<uint16_t> token_flags_;
+    std::vector<uint8_t> token_inline_backtick_;
     std::vector<common_speculative_content_state> states_;
+    std::vector<size_t> fence_prompt_size_;
+    std::vector<llama_token> fence_prompt_last_;
+    std::vector<uint8_t> fence_prompt_open_;
+    std::vector<uint8_t> inline_prompt_open_;
     common_speculative_content_stats stats_[4] = {};
     std::vector<std::array<common_speculative_content_stats, 4>> request_stats_;
 };

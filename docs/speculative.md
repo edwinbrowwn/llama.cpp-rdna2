@@ -187,12 +187,20 @@ SPEC_SIDECAR=1 SPEC_CONTENT_BOOST=1 \
 
 The controller uses one scalar structural-confidence level and permits only
 `base+0` through `base+3`. It is sidecar-only in this POC; host/native draft
-models are unchanged. The default configuration is a 12-token window, +3
+models are unchanged. The candidate configuration uses an 8-token window, +1
 maximum boost, and two-update upward hysteresis. The window accepts 4 through
 32 tokens and includes the current target-sampled token. Optional switches are
 `SPEC_CONTENT_MAX_BOOST`, `SPEC_CONTENT_WINDOW`, `SPEC_CONTENT_HYST`, `SPEC_CONTENT_TRACE`,
 `SPEC_CONTENT_PROVISIONAL`, and `SPEC_CONTENT_ADAPT`. A maximum boost of zero
-disables the controller entirely.
+disables the controller entirely. Values +2 and +3 remain available for
+explicit experiments, but are not defaults until wider drafts prove profitable.
+
+The fixed classifier treats fenced blocks as a committed mode and inline
+backticks as a local mode. Fence state is synchronized only from committed
+prompt tokens plus the current target token; rejected draft tokens cannot
+change it. Braces and brackets contribute local evidence but are not immediate
+anchors, and URL/path pieces are not treated as comments or operators. Score
+levels begin at 4, 10, and 18 so a small inline data fragment cannot reach +3.
 
 An explicit request-level `speculative.n_max` bypasses content selection and
 remains the authoritative cap. Runtime sidecar failure or a stale sidecar
@@ -201,8 +209,9 @@ retains the baseline when direct device-row handoff is unavailable, avoiding a
 costly host-staged automatic extension. A draft width of `N` produces `N + 1`
 target-verification rows because the sampled target token
 is verified with the draft. End-of-request summaries report cycles, drafted and
-accepted tokens separately for each selected width. Target verification and
-proposal distributions are unchanged.
+accepted tokens, mean committed span, and last-position acceptance separately
+for each selected width. Target verification and proposal distributions are
+unchanged.
 
 Sidecar providers draft a block in one call, so BEFORE-context selection is the
 wall-clock path: `SPEC_CONTENT_PROVISIONAL=1` records the provisional score but
@@ -210,6 +219,21 @@ does not relaunch a provider or risk leaving extra uncommitted sidecar KV.
 Only the target-accepted prefix is committed to content state. Adaptive
 weighting is parsed for future work but remains disabled. `SPEC_CONTENT_TRACE=1`
 emits one log line per cycle and is diagnostic only; disable it for timing.
+
+The vocabulary-only visual probe runs the exact classifier without loading
+model weights or launching inference:
+
+```sh
+cmake --build build --target llama-content-classify
+./build/bin/llama-content-classify -m /models/target.gguf
+./build/bin/llama-content-classify -m /models/target.gguf \
+  --windows 8 --detail-window 8 --file /tmp/mixed-sample.txt
+```
+
+It prints each real tokenizer piece, structural flags, score, raw/selected
+level, fenced/inline mode, draft width, and target-verification row count.
+Built-in samples compare prose, small embedded data, fenced and unfenced code,
+tables, URLs, paths, and inline code.
 
 ### n-gram Mod (`ngram-mod`)
 
