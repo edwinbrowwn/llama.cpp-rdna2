@@ -2266,10 +2266,17 @@ private:
                         : gfx1030_neural_k4v_cycle_cap;
             }
 
+            // The automatic gfx1030 K4V envelope is not a user override.
+            // Content boosting must not accidentally disable the existing
+            // target backend-sampling profile merely because its internal cap
+            // is base+boost rather than the base width.
             const auto auto_backend_sampling_mode = !task.params.backend_sampling_set &&
                 !task.params.sampling.backend_sampling &&
-                (task.params.speculative_n_max < 0 ||
-                    task.params.speculative_n_max == params_base.speculative.draft.n_max)
+                server_spec_auto_backend_width_eligible(
+                    task.params.speculative_n_max,
+                    slot.spec_n_max_user_override,
+                    gfx1030_neural_k4v_cycle_cap,
+                    params_base.speculative.draft.n_max)
                 ? server_auto_spec_target_backend_sampling(params_base, task.params.sampling, vocab)
                 : server_auto_spec_target_backend_sampling_mode::NONE;
             const bool auto_backend_sampling =
@@ -4612,7 +4619,11 @@ private:
                     SLT_INF(slot, "accepted %2zu/%2zu draft tokens\n", accepted.size() - 1, n_draft);
                 }
 
-                common_speculative_accept(spec.get(), slot.id, accepted.size() - 1);
+                const uint16_t n_committed = (uint16_t) (accepted.size() - 1);
+                const uint16_t n_accepted_draft = n_committed -
+                        (slot.spec_is_replay && n_committed > 0 ? 1 : 0);
+                common_speculative_accept(
+                        spec.get(), slot.id, n_committed, n_accepted_draft);
 
                 slot.spec_draft = std::move(accepted);
                 slot.spec_dists.clear();

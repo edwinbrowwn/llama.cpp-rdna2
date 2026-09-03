@@ -8,6 +8,7 @@
 #include "llama.h"
 #include "sampling.h"
 #include "speculative.h"
+#include "speculative-content.h"
 #include "unicode.h"
 
 #include <algorithm>
@@ -1766,6 +1767,15 @@ struct llama_context_params common_context_params_to_llama(const common_params &
     cparams.n_ctx             = params.n_ctx;
     cparams.n_seq_max         = params.n_parallel;
     cparams.n_rs_seq          = params.speculative.need_n_rs_seq();
+    if (params.speculative.draft.sidecar_candidate_ready &&
+            !params.speculative.has_synth() &&
+            common_speculative_content_env_enabled()) {
+        const uint32_t content_n_max = (uint32_t) std::min<int64_t>(
+                UINT32_MAX,
+                (int64_t) std::max(0, params.speculative.draft.n_max) +
+                    common_speculative_content_env_max_boost());
+        cparams.n_rs_seq = std::max(cparams.n_rs_seq, content_n_max);
+    }
     cparams.n_outputs_max     = std::max(params.n_outputs_max, 0);
     cparams.n_outputs_max_per_seq = std::max(params.n_outputs_max_per_seq, 0);
     cparams.n_batch           = params.n_batch;

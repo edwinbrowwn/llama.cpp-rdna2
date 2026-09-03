@@ -188,14 +188,23 @@ SPEC_SIDECAR=1 SPEC_CONTENT_BOOST=1 \
 The controller uses one scalar structural-confidence level and permits only
 `base+0` through `base+3`. It is sidecar-only in this POC; host/native draft
 models are unchanged. The default configuration is a 12-token window, +3
-maximum boost, and two-update upward hysteresis. Optional switches are
-`SPEC_CONTENT_MAX_BOOST`, `SPEC_CONTENT_WINDOW`, `SPEC_CONTENT_HYST`,
-`SPEC_CONTENT_TRACE`, `SPEC_CONTENT_PROVISIONAL`, and `SPEC_CONTENT_ADAPT`.
+maximum boost, and two-update upward hysteresis. The window includes the
+current target-sampled token. Optional switches are `SPEC_CONTENT_MAX_BOOST`,
+`SPEC_CONTENT_WINDOW`, `SPEC_CONTENT_HYST`, `SPEC_CONTENT_TRACE`,
+`SPEC_CONTENT_PROVISIONAL`, and `SPEC_CONTENT_ADAPT`. A maximum boost of zero
+disables the controller entirely.
+
+An explicit request-level `speculative.n_max` bypasses content selection and
+remains the authoritative cap. Runtime sidecar failure or a stale sidecar
+sequence also falls back to the fixed configured baseline. Target verification
+and proposal distributions are unchanged.
 
 Sidecar providers draft a block in one call, so BEFORE-context selection is the
 wall-clock path: `SPEC_CONTENT_PROVISIONAL=1` records the provisional score but
 does not relaunch a provider or risk leaving extra uncommitted sidecar KV.
-Adaptive weighting is parsed for future work but remains disabled.
+Only the target-accepted prefix is committed to content state. Adaptive
+weighting is parsed for future work but remains disabled. `SPEC_CONTENT_TRACE=1`
+emits one log line per cycle and is diagnostic only; disable it for timing.
 
 ### n-gram Mod (`ngram-mod`)
 

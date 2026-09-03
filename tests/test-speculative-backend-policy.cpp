@@ -146,6 +146,15 @@ int main() {
                 make_spec({COMMON_SPECULATIVE_TYPE_DRAFT_MTP}, 4)),
             "MTP does not select DFlash depth schedule");
 
+    require(server_spec_auto_backend_width_eligible(-1, false, -1, 4),
+            "omitted request width preserves automatic backend sampling");
+    require(server_spec_auto_backend_width_eligible(7, false, 4, 4),
+            "internal base-plus-boost cap preserves automatic backend sampling");
+    require(server_spec_auto_backend_width_eligible(4, true, 4, 4),
+            "explicit baseline width remains eligible");
+    require(!server_spec_auto_backend_width_eligible(7, true, 4, 4),
+            "explicit non-baseline width remains ineligible");
+
     auto dflash_k4v = make_spec({
         COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH,
         COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V,

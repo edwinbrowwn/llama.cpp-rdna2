@@ -131,14 +131,20 @@ public:
     void observe_draft(uint32_t seq_id, const llama_token * tokens, size_t n_tokens,
                        int base_nmax, int selected_nmax, int hard_nmax);
     void accept(uint32_t seq_id, const llama_token * tokens, size_t n_tokens,
-                uint16_t n_accepted);
+                uint16_t n_committed);
+    void accept(uint32_t seq_id, const llama_token * tokens, size_t n_tokens,
+                uint16_t n_committed, uint16_t n_accepted_draft);
     void reset(uint32_t seq_id);
 
     void print_stats() const;
 
 private:
+    friend struct common_speculative_content_test_access;
+
     uint16_t token_flags(llama_token token) const;
     uint8_t score_level(int score) const;
+    void extend_window(common_speculative_content_state & state,
+                       const llama_token * tokens, size_t n_tokens) const;
     void update_level(common_speculative_content_state & state,
                       uint8_t desired, bool strong_anchor, bool repeated) const;
 

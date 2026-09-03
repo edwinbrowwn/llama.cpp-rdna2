@@ -313,6 +313,11 @@ struct common_speculative_impl {
     // Existing implementations do not need this hook.
     virtual void prepare_process(const common_speculative_draft_params_vec & /*dparams*/) {}
 
+    // Content-aware width changes are valid only while a probed sidecar is
+    // actually active for this sequence. Runtime fallback/stale paths retain
+    // the established fixed neural/K4V baseline.
+    virtual bool content_sidecar_ready(llama_seq_id /*seq_id*/) const { return false; }
+
     virtual void draft(common_speculative_draft_params_vec & dparams) = 0;
 
     virtual void accept(llama_seq_id seq_id, uint16_t n_accepted, bool is_other) = 0;
@@ -1701,6 +1706,12 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         return true;
     }
 
+    bool content_sidecar_ready(llama_seq_id seq_id) const override {
+        return sidecar.active() && seq_id >= 0 &&
+                seq_id < (llama_seq_id) sidecar_stale.size() &&
+                !sidecar_stale[(size_t) seq_id];
+    }
+
     void draft(common_speculative_draft_params_vec & dparams) override {
         if (sidecar_target_only) {
             return;
@@ -1740,6 +1751,10 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                         : full_limit;
                 if (limit < 1) {
                     return;
+                }
+                dp.n_max_content = limit;
+                if (dp.n_max_content_hard > 0) {
+                    dp.n_max_content_hard = std::min(dp.n_max_content_hard, 7);
                 }
                 int32_t ids[7] = {};
                 std::vector<int32_t> dist_ids;
@@ -2719,6 +2734,12 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         }
 
         return true;
+    }
+
+    bool content_sidecar_ready(llama_seq_id seq_id) const override {
+        return sidecar.active() && seq_id >= 0 &&
+                seq_id < (llama_seq_id) mtp_sidecar_stale.size() &&
+                !mtp_sidecar_stale[(size_t) seq_id];
     }
 
     void draft(common_speculative_draft_params_vec & dparams) override {
@@ -4576,13 +4597,38 @@ void common_speculative_draft(common_speculative * spec) {
     if (spec->content.enabled()) {
         for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) dparams.size(); ++seq_id) {
             auto & dp = dparams[seq_id];
-            dp.content_controller = &spec->content;
-            dp.content_state = spec->content.state((uint32_t) seq_id);
+            dp.content_controller = nullptr;
+            dp.content_state = nullptr;
             dp.n_max_content = -1;
             dp.n_max_content_hard = -1;
             dp.content_level_before = SPEC_BOOST_0;
             dp.content_level_final = SPEC_BOOST_0;
-            if (!dp.drafting || dp.content_state == nullptr) {
+
+            // An explicit request cap is exact and bypasses every automatic
+            // content decision, just like the existing sidecar/K4V cap.
+            if (!dp.drafting || dp.n_max_user_override) {
+                continue;
+            }
+
+            const bool sidecar_ready = std::any_of(
+                    spec->impls.begin(), spec->impls.end(),
+                    [seq_id](const auto & impl) {
+                        return impl->content_sidecar_ready(seq_id);
+                    });
+            if (!sidecar_ready) {
+                // A static K4V cap may have reserved base+boost capacity at
+                // initialization. Narrow it back to the fixed baseline when
+                // the runtime sidecar is unavailable for this sequence.
+                const int context_limit = dp.n_max > 0
+                        ? dp.n_max : spec->content.base_nmax();
+                dp.n_max_content = std::min(
+                        spec->content.base_nmax(), context_limit);
+                dp.n_max_content_hard = dp.n_max_content;
+                continue;
+            }
+            dp.content_controller = &spec->content;
+            dp.content_state = spec->content.state((uint32_t) seq_id);
+            if (dp.content_state == nullptr) {
                 continue;
             }
 
@@ -4671,6 +4717,11 @@ void common_speculative_draft(common_speculative * spec) {
 }
 
 void common_speculative_accept(common_speculative * spec, llama_seq_id seq_id, uint16_t n_accepted) {
+    common_speculative_accept(spec, seq_id, n_accepted, n_accepted);
+}
+
+void common_speculative_accept(common_speculative * spec, llama_seq_id seq_id,
+        uint16_t n_accepted, uint16_t n_accepted_draft) {
     common_speculative_impl * impl = spec->impl_last[seq_id];
 
     if (impl == nullptr) {
@@ -4684,7 +4735,8 @@ void common_speculative_accept(common_speculative * spec, llama_seq_id seq_id, u
         if (dp.content_controller != nullptr && dp.content_state != nullptr &&
                 dp.result != nullptr) {
             dp.content_controller->accept(
-                    (uint32_t) seq_id, dp.result->data(), dp.result->size(), n_accepted);
+                    (uint32_t) seq_id, dp.result->data(), dp.result->size(),
+                    n_accepted, n_accepted_draft);
         }
     }
 

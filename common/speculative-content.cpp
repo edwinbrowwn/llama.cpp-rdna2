@@ -147,18 +147,20 @@ static uint16_t classify_piece(const char * text) {
 }
 
 static const spec_content_roll_entry * history_back(
-        const common_speculative_content_state & state, size_t back) {
-    if (back >= state.history_size) {
+        const common_speculative_content_state & state, size_t back,
+        uint8_t capacity) {
+    if (capacity == 0 || capacity > SPEC_CONTENT_WINDOW_MAX ||
+            back >= state.history_size) {
         return nullptr;
     }
 
     int newest;
-    if (state.history_size < SPEC_CONTENT_WINDOW_MAX) {
+    if (state.history_size < capacity) {
         newest = (int) state.history_size - 1;
     } else {
-        newest = ((int) state.history_pos + SPEC_CONTENT_WINDOW_MAX - 1) % SPEC_CONTENT_WINDOW_MAX;
+        newest = ((int) state.history_pos + capacity - 1) % capacity;
     }
-    const int index = (newest - (int) back + SPEC_CONTENT_WINDOW_MAX) % SPEC_CONTENT_WINDOW_MAX;
+    const int index = (newest - (int) back + capacity) % capacity;
     return &state.history[index];
 }
 
@@ -169,7 +171,8 @@ static int clamp_score(int score) {
 } // namespace
 
 bool common_speculative_content_env_enabled() {
-    return env_switch_enabled("SPEC_CONTENT_BOOST");
+    return env_switch_enabled("SPEC_CONTENT_BOOST") &&
+            common_speculative_content_env_max_boost() > 0;
 }
 
 int common_speculative_content_env_max_boost() {
@@ -212,6 +215,9 @@ void common_speculative_content::init(
             config_.provisional ? 1 : 0, config_.adaptive ? 1 : 0);
     if (config_.provisional) {
         LOG_WRN("spec content provisional scoring is telemetry-only for batched sidecar providers\n");
+    }
+    if (config_.trace) {
+        LOG_WRN("spec content per-cycle trace is diagnostic and must be disabled for performance measurements\n");
     }
     if (config_.adaptive) {
         LOG_WRN("spec content adaptive weighting is reserved; fixed weights remain active\n");
@@ -258,9 +264,14 @@ uint8_t common_speculative_content::prepare(
             std::min(previous_level, (uint8_t) config_.max_boost);
     current->candidate_level = current->current_level;
 
-    if (tokens != nullptr) {
-        const size_t first = n_tokens > (size_t) config_.window
-                ? n_tokens - (size_t) config_.window : 0;
+    // dp.prompt excludes id_last. Reserve one position for it so the
+    // effective evidence window is exactly SPEC_CONTENT_WINDOW, not window+1.
+    const size_t n_tail = id_last >= 0 ? 1 : 0;
+    const size_t prompt_keep = (size_t) config_.window > n_tail
+            ? (size_t) config_.window - n_tail : 0;
+    if (tokens != nullptr && prompt_keep > 0) {
+        const size_t first = n_tokens > prompt_keep
+                ? n_tokens - prompt_keep : 0;
         for (size_t i = first; i < n_tokens; ++i) {
             push(*current, tokens[i]);
         }
@@ -287,11 +298,11 @@ uint16_t common_speculative_content::token_flags(llama_token token) const {
 void common_speculative_content::push(
         common_speculative_content_state & current, llama_token token) const {
     const uint16_t flags = token_flags(token);
-    const spec_content_roll_entry * prev0 = history_back(current, 0);
-    const spec_content_roll_entry * prev1 = history_back(current, 1);
-    const spec_content_roll_entry * prev2 = history_back(current, 2);
-    const spec_content_roll_entry * prev3 = history_back(current, 3);
-    const spec_content_roll_entry * prev4 = history_back(current, 4);
+    const spec_content_roll_entry * prev0 = history_back(current, 0, (uint8_t) config_.window);
+    const spec_content_roll_entry * prev1 = history_back(current, 1, (uint8_t) config_.window);
+    const spec_content_roll_entry * prev2 = history_back(current, 2, (uint8_t) config_.window);
+    const spec_content_roll_entry * prev3 = history_back(current, 3, (uint8_t) config_.window);
+    const spec_content_roll_entry * prev4 = history_back(current, 4, (uint8_t) config_.window);
 
     const bool quote_colon =
             ((flags & STF_COLON) != 0 && current.quote_recent != 0) ||
@@ -362,15 +373,52 @@ void common_speculative_content::push(
             repeat2 || repeat3);
 
     const spec_content_roll_entry entry = { token, flags };
-    if (current.history_size < SPEC_CONTENT_WINDOW_MAX) {
+    const uint8_t capacity = (uint8_t) config_.window;
+    if (current.history_size < capacity) {
         current.history[current.history_size++] = entry;
-        current.history_pos = current.history_size % SPEC_CONTENT_WINDOW_MAX;
+        current.history_pos = current.history_size % capacity;
     } else {
         current.history[current.history_pos] = entry;
-        current.history_pos = (current.history_pos + 1) % SPEC_CONTENT_WINDOW_MAX;
+        current.history_pos = (current.history_pos + 1) % capacity;
     }
     current.token_count = current.token_count == UINT32_MAX
             ? UINT32_MAX : current.token_count + 1;
+}
+
+void common_speculative_content::extend_window(
+        common_speculative_content_state & current,
+        const llama_token * tokens, size_t n_tokens) const {
+    if (tokens == nullptr || n_tokens == 0) {
+        return;
+    }
+
+    llama_token merged[SPEC_CONTENT_WINDOW_MAX] = {};
+    const size_t capacity = (size_t) config_.window;
+    const size_t n_append = std::min(n_tokens, capacity);
+    const size_t n_keep = std::min<size_t>(
+            current.history_size, capacity - n_append);
+
+    // Copy the retained committed suffix oldest-to-newest, then the newest
+    // extension suffix. Rebuilding keeps nonlinear pair/repetition evidence
+    // exact when the fixed-size rolling window evicts old tokens.
+    for (size_t i = 0; i < n_keep; ++i) {
+        const auto * entry = history_back(
+                current, n_keep - i - 1, (uint8_t) capacity);
+        merged[i] = entry != nullptr ? entry->token : LLAMA_TOKEN_NULL;
+    }
+    const size_t first_append = n_tokens - n_append;
+    for (size_t i = 0; i < n_append; ++i) {
+        merged[n_keep + i] = tokens[first_append + i];
+    }
+
+    const uint8_t previous_level = current.current_level;
+    current = {};
+    current.current_level = (spec_content_boost_level)
+            std::min(previous_level, (uint8_t) config_.max_boost);
+    current.candidate_level = current.current_level;
+    for (size_t i = 0; i < n_keep + n_append; ++i) {
+        push(current, merged[i]);
+    }
 }
 
 uint8_t common_speculative_content::score_level(int score) const {
@@ -430,7 +478,10 @@ int common_speculative_content::max_limit(
         return 0;
     }
     const int context = context_limit > 0 ? context_limit : base_nmax;
-    if (user_override || !config_.enabled) {
+    if (user_override) {
+        return std::max(0, context_limit);
+    }
+    if (!config_.enabled) {
         return std::min(base_nmax, context);
     }
     return std::min(base_nmax + config_.max_boost, context);
@@ -443,7 +494,10 @@ int common_speculative_content::selected_limit(
         return 0;
     }
     const int context = context_limit > 0 ? context_limit : base_nmax;
-    if (user_override || !config_.enabled) {
+    if (user_override) {
+        return std::max(0, context_limit);
+    }
+    if (!config_.enabled) {
         return std::min(base_nmax, context);
     }
     return std::min(base_nmax + std::min<int>(level_before, config_.max_boost), context);
@@ -457,18 +511,19 @@ void common_speculative_content::observe_draft(
         return;
     }
 
-    common_speculative_content_state provisional = *current;
-    const size_t limit = std::min<size_t>(n_tokens, SPEC_CONTENT_WINDOW_MAX + 3);
-    const size_t base_count = std::min<size_t>(limit, std::max(0, base_nmax));
-    for (size_t i = 0; tokens != nullptr && i < base_count; ++i) {
-        push(provisional, tokens[i]);
+    current->level_at_base = current->level_before;
+    current->level_final = current->level_before;
+    if (config_.provisional || config_.trace) {
+        common_speculative_content_state provisional = *current;
+        const size_t limit = std::min<size_t>(n_tokens, SPEC_CONTENT_WINDOW_MAX + 3);
+        const size_t base_count = std::min<size_t>(limit, std::max(0, base_nmax));
+        extend_window(provisional, tokens, base_count);
+        current->level_at_base = level(provisional);
+        extend_window(provisional,
+                tokens != nullptr ? tokens + base_count : nullptr,
+                limit - base_count);
+        current->level_final = level(provisional);
     }
-    current->level_at_base = level(provisional);
-    for (size_t i = base_count; tokens != nullptr && i < limit; ++i) {
-        push(provisional, tokens[i]);
-    }
-
-    current->level_final = level(provisional);
     current->base_nmax = base_nmax;
     current->final_nmax = std::min(selected_nmax, hard_nmax);
     current->boost_used = (uint8_t) std::clamp(current->final_nmax - base_nmax, 0, 3);
@@ -478,31 +533,44 @@ void common_speculative_content::observe_draft(
 
 void common_speculative_content::accept(
         uint32_t seq_id, const llama_token * tokens, size_t n_tokens,
-        uint16_t n_accepted) {
+        uint16_t n_committed) {
+    accept(seq_id, tokens, n_tokens, n_committed, n_committed);
+}
+
+void common_speculative_content::accept(
+        uint32_t seq_id, const llama_token * tokens, size_t n_tokens,
+        uint16_t n_committed, uint16_t n_accepted_draft) {
     auto * current = state(seq_id);
     if (current == nullptr || !current->cycle_valid) {
         return;
     }
 
+    const common_speculative_content_state cycle = *current;
     common_speculative_content_state after = *current;
-    const size_t accepted = std::min<size_t>(n_accepted, n_tokens);
-    for (size_t i = 0; tokens != nullptr && i < accepted; ++i) {
-        push(after, tokens[i]);
-    }
-    current->level_after = level(after);
-    current->accepted = (uint32_t) accepted;
+    const size_t committed = std::min<size_t>(n_committed, n_tokens);
+    const size_t accepted_draft = std::min<size_t>(
+            n_accepted_draft, std::min<size_t>(committed, cycle.drafted));
+    extend_window(after, tokens, committed);
+    const uint8_t level_after = level(after);
 
-    const uint8_t bucket = std::min<uint8_t>(current->boost_used, 3);
+    const uint8_t bucket = std::min<uint8_t>(cycle.boost_used, 3);
     ++stats_[bucket].cycles;
-    stats_[bucket].drafted += current->drafted;
-    stats_[bucket].accepted += accepted;
+    stats_[bucket].drafted += cycle.drafted;
+    stats_[bucket].accepted += accepted_draft;
 
     if (config_.trace) {
-        LOG_INF("spec content cycle seq=%u before=%u final=%u after=%u base=%d final=%d boost=%u drafted=%u accepted=%u\n",
-                seq_id, current->level_before, current->level_final,
-                current->level_after, current->base_nmax, current->final_nmax,
-                current->boost_used, current->drafted, current->accepted);
+        LOG_INF("spec content cycle seq=%u level_before=%u level_provisional=%u level_after=%u base_nmax=%d selected_nmax=%d boost=%u drafted=%u accepted_draft=%zu committed=%zu\n",
+                seq_id, cycle.level_before, cycle.level_final,
+                level_after, cycle.base_nmax, cycle.final_nmax,
+                cycle.boost_used, cycle.drafted, accepted_draft, committed);
     }
+
+    // Commit every verified context token (including a replayed target
+    // replacement), but count only actual accepted draft tokens in telemetry.
+    // Rejected/provisional tokens existed only in the local copy above.
+    *current = after;
+    current->level_after = level_after;
+    current->accepted = (uint32_t) accepted_draft;
     current->cycle_valid = false;
 }
 

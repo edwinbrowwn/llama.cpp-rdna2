@@ -18,6 +18,11 @@ static void test_cap_and_explicit_override() {
     require(common_speculative_sidecar_cap_request_enabled(cap, dp), "default request uses cap");
     require(common_speculative_sidecar_cap_limit(cap, dp) == 3, "cap follows configured MTP width");
 
+    common_speculative_sidecar_cap_config content_cap { 7 };
+    dp.n_max_content = 5;
+    require(common_speculative_sidecar_cap_limit(content_cap, dp) == 5,
+            "content-selected width narrows the sidecar envelope");
+
     dp.n_max_user_override = true;
     require(!common_speculative_sidecar_cap_request_enabled(cap, dp), "explicit request bypasses cap");
 }

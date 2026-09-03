@@ -190,6 +190,17 @@ inline bool server_spec_gfx1030_dflash_dynamic_depth_profile(
     return n_dflash == 1 && n_k4v <= 1 && params.draft.n_max == 4;
 }
 
+// An automatic K4V cycle cap is internal policy, not a request override.
+// Keep target backend sampling eligible when content awareness expands that
+// cap from the neural baseline to its base+boost envelope.
+inline bool server_spec_auto_backend_width_eligible(
+        int32_t request_n_max, bool request_override,
+        int32_t automatic_cycle_cap, int32_t neural_n_max) {
+    return request_n_max < 0 ||
+            (!request_override && automatic_cycle_cap > 0) ||
+            request_n_max == neural_n_max;
+}
+
 // A stacked n-gram map has its own value width and can otherwise override the
 // neural drafter's much smaller cycle. On the certified gfx1030 profiles, K4V
 // m=48 can turn a new hit into a 49-row target pass and make the 248K-vocabulary
