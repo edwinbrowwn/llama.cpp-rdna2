@@ -122,6 +122,30 @@ static void test_exact_window_and_accepted_commit() {
             "only target-accepted draft prefix enters committed state");
 }
 
+static void test_maximum_32_token_window() {
+    common_speculative_content content;
+    common_speculative_content_test_access::configure(
+            content, 4, 3, SPEC_CONTENT_WINDOW_MAX);
+
+    std::vector<llama_token> prompt(40);
+    for (size_t i = 0; i < prompt.size(); ++i) {
+        prompt[i] = (llama_token) i;
+    }
+    content.begin(0, prompt.data(), prompt.size());
+
+    auto * state = content.state(0);
+    require(state != nullptr && state->history_size == 32,
+            "maximum content window retains 32 tokens");
+    require(state->history[0].token == 8 && state->history[31].token == 39,
+            "maximum content window retains the newest prompt suffix");
+
+    content.prepare(0, prompt.data(), prompt.size(), 40);
+    state = content.state(0);
+    require(state->history_size == 32 && state->history[0].token == 9 &&
+            state->history[31].token == 40,
+            "32-token prepare window includes id_last without growing to 33");
+}
+
 static void test_provisional_is_separate() {
     common_speculative_content content;
     common_speculative_content_test_access::configure(content, 4, 3, 4, true);
@@ -167,6 +191,7 @@ int main() {
     test_sidecar_capacity_reservations();
     test_relative_limits_and_override();
     test_exact_window_and_accepted_commit();
+    test_maximum_32_token_window();
     test_provisional_is_separate();
     test_replay_commit_and_draft_accounting_are_separate();
     std::puts("test-speculative-content: PASS");

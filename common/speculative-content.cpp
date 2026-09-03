@@ -30,6 +30,26 @@ static int env_int(const char * name, int fallback, int low, int high) {
     return std::clamp((int) parsed, low, high);
 }
 
+static void warn_env_adjustment(const char * name, int effective,
+        int low, int high) {
+    const char * value = std::getenv(name);
+    if (value == nullptr || *value == '\0') {
+        return;
+    }
+
+    char * end = nullptr;
+    const long requested = std::strtol(value, &end, 10);
+    if (end == value || *end != '\0') {
+        LOG_WRN("spec content %s='%s' is invalid; using %d\n",
+                name, value, effective);
+        return;
+    }
+    if (requested < low || requested > high) {
+        LOG_WRN("spec content %s=%ld is outside [%d,%d]; clamped to %d\n",
+                name, requested, low, high, effective);
+    }
+}
+
 static bool is_word_char(unsigned char c) {
     return std::isalnum(c) != 0 || c == '_';
 }
@@ -190,6 +210,12 @@ void common_speculative_content::init(
     config_.window = env_int("SPEC_CONTENT_WINDOW", 12, 4, SPEC_CONTENT_WINDOW_MAX);
     config_.hysteresis = env_int("SPEC_CONTENT_HYST", 2, 1, 4);
     base_nmax_ = std::max(0, base_nmax);
+
+    if (env_switch_enabled("SPEC_CONTENT_BOOST")) {
+        warn_env_adjustment("SPEC_CONTENT_MAX_BOOST", config_.max_boost, 0, 3);
+        warn_env_adjustment("SPEC_CONTENT_WINDOW", config_.window, 4, SPEC_CONTENT_WINDOW_MAX);
+        warn_env_adjustment("SPEC_CONTENT_HYST", config_.hysteresis, 1, 4);
+    }
 
     states_.clear();
     token_flags_.clear();

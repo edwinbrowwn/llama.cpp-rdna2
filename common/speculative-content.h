@@ -38,7 +38,7 @@ enum spec_token_flag : uint16_t {
     STF_STRONG_ANCHOR = 1u << 15,
 };
 
-static constexpr uint8_t SPEC_CONTENT_WINDOW_MAX = 16;
+static constexpr uint8_t SPEC_CONTENT_WINDOW_MAX = 32;
 
 struct spec_content_roll_entry {
     llama_token token = -1;
