@@ -4367,8 +4367,14 @@ common_speculative * common_speculative_init(common_params_speculative & params,
                type == COMMON_SPECULATIVE_TYPE_NGRAM_CACHE;
     });
     if (mtp_sidecar && has_ngram && params.draft.n_max > 0) {
-        SPC_INF("sidecar ngram verification fixed at MTP width %d; explicit speculative.n_max remains authoritative\n",
-                params.draft.n_max);
+        if (common_speculative_content_env_enabled()) {
+            SPC_INF("sidecar ngram verification base MTP width %d; content-aware sidecar envelope may extend to %d; explicit speculative.n_max remains authoritative\n",
+                    params.draft.n_max,
+                    params.draft.n_max + common_speculative_content_env_max_boost());
+        } else {
+            SPC_INF("sidecar ngram verification fixed at MTP width %d; explicit speculative.n_max remains authoritative\n",
+                    params.draft.n_max);
+        }
     }
 
     for (const common_speculative_config & config : configs) {

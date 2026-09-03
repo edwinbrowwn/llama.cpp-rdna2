@@ -14,6 +14,7 @@
 #include "log.h"
 #include "sampling.h"
 #include "speculative.h"
+#include "speculative-content.h"
 #include "server-speculative-sampling.h"
 #include "mtmd.h"
 #include "mtmd-helper.h"
@@ -60,6 +61,15 @@ static bool server_gfx1030_native_auto_enabled() {
 
 static bool server_env_enabled(const char * name) {
     return std::getenv(name) != nullptr && !server_env_disabled(name);
+}
+
+// The gfx1030 stacked K4V cap is a server-level safety envelope.  The
+// sidecar-only content POC may use that envelope as base+boost, while native
+// speculative paths and explicit request overrides retain the old behavior.
+static bool server_sidecar_content_boost_enabled(const common_params & params) {
+    return params.speculative.draft.sidecar_only &&
+            !params.speculative.has_synth() &&
+            common_speculative_content_env_enabled();
 }
 
 static bool server_vocab_sharded_output_enabled() {
@@ -1439,10 +1449,20 @@ private:
             const bool is_mtp = std::find(params_base.speculative.types.begin(),
                                           params_base.speculative.types.end(),
                                           COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params_base.speculative.types.end();
-            SRV_INF("capping automatic gfx1030 %s+K4V cycles at %d draft tokens "
-                    "(configured K4V m=%u); explicit request speculative.n_max overrides\n",
-                    is_mtp ? "MTP" : "DFlash", gfx1030_neural_k4v_cycle_cap,
-                    params_base.speculative.ngram_map_k4v.size_m);
+            if (sidecar_candidate && !params_base.speculative.has_synth() &&
+                    common_speculative_content_env_enabled()) {
+                SRV_INF("capping automatic gfx1030 %s+K4V base cycle at %d draft tokens "
+                        "(configured K4V m=%u); sidecar content boost envelope=%d, "
+                        "explicit request speculative.n_max still overrides\n",
+                        is_mtp ? "MTP" : "DFlash", gfx1030_neural_k4v_cycle_cap,
+                        params_base.speculative.ngram_map_k4v.size_m,
+                        gfx1030_neural_k4v_cycle_cap + common_speculative_content_env_max_boost());
+            } else {
+                SRV_INF("capping automatic gfx1030 %s+K4V cycles at %d draft tokens "
+                        "(configured K4V m=%u); explicit request speculative.n_max overrides\n",
+                        is_mtp ? "MTP" : "DFlash", gfx1030_neural_k4v_cycle_cap,
+                        params_base.speculative.ngram_map_k4v.size_m);
+            }
         }
 
         needs_reeval = llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt);
@@ -2241,7 +2261,9 @@ private:
         if (task.need_sampling()) {
             slot.spec_n_max_user_override = task.params.speculative_n_max >= 0;
             if (!slot.spec_n_max_user_override && gfx1030_neural_k4v_cycle_cap > 0) {
-                task.params.speculative_n_max = gfx1030_neural_k4v_cycle_cap;
+                task.params.speculative_n_max = server_sidecar_content_boost_enabled(params_base)
+                        ? gfx1030_neural_k4v_cycle_cap + common_speculative_content_env_max_boost()
+                        : gfx1030_neural_k4v_cycle_cap;
             }
 
             const auto auto_backend_sampling_mode = !task.params.backend_sampling_set &&
