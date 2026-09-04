@@ -4,7 +4,6 @@
 #include "common.h"
 
 struct common_speculative;
-class common_speculative_content;
 
 struct common_speculative_token_dist {
     llama_tokens ids;
@@ -103,7 +102,6 @@ struct common_speculative_draft_params {
     // n_max remains the request/capacity envelope; n_max_ngram may narrow the
     // K4V proposal within that envelope and never widens neural generation.
     int32_t n_max_ngram = -1;
-    common_speculative_content * content_controller = nullptr;
 
 };
 

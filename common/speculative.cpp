@@ -4617,39 +4617,11 @@ void common_speculative_draft(common_speculative * spec) {
     }
 
     if (spec->content.enabled()) {
-        for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) dparams.size(); ++seq_id) {
-            auto & dp = dparams[seq_id];
-            dp.content_controller = nullptr;
+        // The initialized K4V cap already contains the maximum experimental
+        // envelope. Reset only the post-candidate trim here; do not classify or
+        // inspect sidecar state on cycles where K4V has no longer continuation.
+        for (auto & dp : dparams) {
             dp.n_max_ngram = -1;
-
-            // An explicit request cap is exact and bypasses every automatic
-            // content decision, just like the existing sidecar/K4V cap.
-            if (!dp.drafting || dp.n_max_user_override) {
-                continue;
-            }
-
-            // Fail closed to the configured baseline unless the matching
-            // sidecar is ready. A ready K4V may form a cheap maximum-width
-            // candidate; classification is deferred until that candidate is
-            // actually longer than the neural width.
-            const int context_limit = dp.n_max > 0
-                    ? dp.n_max : spec->content.base_nmax();
-            dp.n_max_ngram = std::min(
-                    spec->content.base_nmax(), context_limit);
-
-            const bool sidecar_ready = std::any_of(
-                    spec->impls.begin(), spec->impls.end(),
-                    [seq_id](const auto & impl) {
-                        return impl->content_sidecar_ready(seq_id);
-                    });
-            if (!sidecar_ready || spec->content.state((uint32_t) seq_id) == nullptr) {
-                continue;
-            }
-
-            dp.n_max_ngram = spec->content.selected_limit(
-                    spec->content.base_nmax(), context_limit, false,
-                    (uint8_t) spec->content.max_boost());
-            dp.content_controller = &spec->content;
         }
     }
 
@@ -4681,22 +4653,32 @@ void common_speculative_draft(common_speculative * spec) {
             if (dp.drafting && !result.empty()) {
                 const bool used_k4v =
                         impl->type == COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V;
-                bool content_prepared = false;
-                if (used_k4v && dp.content_controller != nullptr &&
+                common_speculative_content * content_prepared = nullptr;
+                if (used_k4v && !dp.n_max_user_override && spec->content.enabled() &&
                         common_speculative_k4v_needs_content_selection(
-                            result.size(), dp.content_controller->base_nmax())) {
-                    const uint8_t level_before = dp.content_controller->prepare(
-                            (uint32_t) seq_id,
-                            dp.prompt != nullptr && !dp.prompt->empty()
-                                ? dp.prompt->data() : nullptr,
-                            dp.prompt != nullptr ? dp.prompt->size() : 0,
-                            dp.id_last);
+                            result.size(), spec->content.base_nmax())) {
                     const int context_limit = dp.n_max > 0
-                            ? dp.n_max : dp.content_controller->base_nmax();
-                    dp.n_max_ngram = dp.content_controller->selected_limit(
-                            dp.content_controller->base_nmax(), context_limit,
-                            false, level_before);
-                    content_prepared = true;
+                            ? dp.n_max : spec->content.base_nmax();
+                    dp.n_max_ngram = std::min(
+                            spec->content.base_nmax(), context_limit);
+                    const bool sidecar_ready = std::any_of(
+                            spec->impls.begin(), spec->impls.end(),
+                            [seq_id](const auto & candidate) {
+                                return candidate->content_sidecar_ready(seq_id);
+                            });
+                    if (sidecar_ready &&
+                            spec->content.state((uint32_t) seq_id) != nullptr) {
+                        const uint8_t level_before = spec->content.prepare(
+                                (uint32_t) seq_id,
+                                dp.prompt != nullptr && !dp.prompt->empty()
+                                    ? dp.prompt->data() : nullptr,
+                                dp.prompt != nullptr ? dp.prompt->size() : 0,
+                                dp.id_last);
+                        dp.n_max_ngram = spec->content.selected_limit(
+                                spec->content.base_nmax(), context_limit,
+                                false, level_before);
+                        content_prepared = &spec->content;
+                    }
                 }
                 const int proposal_limit =
                         common_speculative_proposal_limit(dp, used_k4v);
@@ -4718,10 +4700,10 @@ void common_speculative_draft(common_speculative * spec) {
 
                 if (!result.empty()) {
                     dp.drafting = false;
-                    if (content_prepared) {
-                        dp.content_controller->observe_draft(
+                    if (content_prepared != nullptr) {
+                        content_prepared->observe_draft(
                                 (uint32_t) seq_id, result.data(), result.size(),
-                                dp.content_controller->base_nmax(),
+                                content_prepared->base_nmax(),
                                 dp.n_max_ngram > 0 ? dp.n_max_ngram : dp.n_max,
                                 used_k4v);
                     }
@@ -4773,8 +4755,8 @@ void common_speculative_accept(common_speculative * spec, llama_seq_id seq_id,
     if (spec->content.enabled() && seq_id >= 0 &&
             seq_id < (llama_seq_id) spec->dparams.size()) {
         const auto & dp = spec->dparams[seq_id];
-        if (dp.content_controller != nullptr && dp.result != nullptr) {
-            dp.content_controller->accept(
+        if (dp.result != nullptr) {
+            spec->content.accept(
                     (uint32_t) seq_id, dp.result->data(), dp.result->size(),
                     n_accepted, n_accepted_draft);
         }
