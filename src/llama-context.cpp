@@ -2170,8 +2170,10 @@ int llama_context::decode(const llama_batch & batch_inp) {
                 // copy would retain a stale pointer (and possibly the previous
                 // ubatch's larger byte count). Materialize multi-ubatch rows in
                 // stream order instead.
+                int32_t device = -1;
+                void * stream = nullptr;
                 if (device_views_valid && embd_nextn_device_preferred &&
-                        embd_nextn_device.valid) {
+                        llama_backend_get_hip_device_stream(backend_h, device, stream)) {
                     pending_embd_nextn_copies.push_back({
                         t_h_nextn, backend_h, embd_nextn_out,
                         (size_t) n_rows * n_embd * sizeof(float) });

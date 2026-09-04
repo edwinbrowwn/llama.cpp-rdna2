@@ -245,7 +245,7 @@ void common_ngram_map_draft(common_ngram_map & map,
         // without starting a new request. Reconcile the map here rather than
         // aborting; every resulting proposal is still fully target-verified.
         // begin() clears per-call policy, so preserve the already-selected
-        // K4V limit across this internal lifecycle repair.
+        // content/K4V limit across this internal lifecycle repair.
         const uint16_t draft_limit = map.draft_limit;
         common_ngram_map_begin(map, inp);
         map.draft_limit = draft_limit;

@@ -102,6 +102,8 @@ add_library(${TARGET}
     sampling.h
     speculative.cpp
     speculative.h
+    speculative-content.cpp
+    speculative-content.h
     spec_sidecar.cpp
     spec_sidecar.h
     spec_sidecar_assets.cpp

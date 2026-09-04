@@ -244,7 +244,8 @@ never be read by a later draft. Set
   decodes materialize each ubatch in stream order before its graph storage is
   reused. Otherwise the sidecar uses the synchronized host-copy path.
   `LLAMA_SPEC_HIP_DFLASH_DEVICE_INPUT=0` is a diagnostic rollback to force the
-  synchronized DFlash host-input path.
+  synchronized DFlash host-input path; it does not alter DFlash's fixed draft
+  width.
 - The ABI exposes sequence-scoped `state_size`, `get_state`, `set_state`,
   `reset_state`, `truncate_state`, `commit_state`, and `rebase_state` for both
   sidecars. Snapshots contain only a position cursor plus an epoch; the large
@@ -256,12 +257,9 @@ never be read by a later draft. Set
   context; growth recaptures the per-sequence graph once, and
   reset releases grown storage.
 - Qwen3.8-27B sidecar KV capacity follows the effective per-sequence target
-  context and is allocated on demand. Before each dense-MTP draft, capacity is
-  reserved through `n_past + n_draft`, including speculative lookahead across
-  16K/32K geometric allocation boundaries. `LLAMA_SPEC_HIP_MAX_POS=N` may
-  impose a lower position cap to reduce VRAM use; it cannot raise capacity
-  above the target context and does not change the fixed F16 sidecar KV
-  datatype.
+  context and is allocated on demand. `LLAMA_SPEC_HIP_MAX_POS=N` may impose a lower position
+  cap to reduce VRAM use; it cannot raise capacity above the target context and
+  does not change the fixed F16 sidecar KV datatype.
 - Prompt and ordinary target rows are implicitly committed; target
   verification stages rows and acceptance commits only the accepted prefix.
   Checkpoint rollback discards pending rows and restores the cursor, slot reset
@@ -270,13 +268,19 @@ never be read by a later draft. Set
   state.
 - N-gram and other speculative implementations may remain stacked with MTP
   or DFlash. A sidecar stages/commits target rows even when another
-  implementation wins, so it can take over on a later round. Proposal
-  distributions are implementation-owned: deterministic n-gram cycles cannot
-  inherit neural q rows, and a partial distribution discards that proposal
-  instead of silently changing verification semantics. After context shrink,
-  K4V rebuilds its map while preserving the selected per-cycle cap. Checkpoint
-  replay advances model/sidecar state with every committed row but excludes the
-  replayed target replacement from n-gram adaptation and acceptance statistics.
+  implementation wins, so it can take over on a later round. The gfx1030
+  anti-stutter policy normally caps K4V at the configured neural width. Under
+  exact `SPEC_SIDECAR=1`, the qualified dense-MTP+K4V profile automatically
+  enables content-aware stacked verification: only the K4V cap may rise through
+  MTP width plus the selected boost, while MTP generation remains fixed. Set
+  `SPEC_CONTENT_BOOST=0` to retain the prior fixed cap. A
+  K4V miss therefore incurs no classifier pass, wider neural draft, or wider
+  target pass. Only a K4V candidate longer than the MTP baseline invokes the
+  classifier; an emitted longer hit still receives all `N + 1`
+  target-verification rows. DFlash retains the baseline selected by
+  `--spec-draft-n-max` (not a hard-coded width four) because adding a content
+  boost in a matched K4V5 screen was slower even with complete fifth-position
+  acceptance.
 - Prompt-cache and external slot-file restore do not persist the sidecar's
   device KV contents. If a restored target state does not receive a complete
   contiguous sidecar prefill, the sidecar rejects the gap and the host uses
