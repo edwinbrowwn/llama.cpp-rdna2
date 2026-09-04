@@ -9,9 +9,11 @@
 
 struct common_params_speculative;
 
-// Content width is a separately qualified MTP optimization, not a property of
-// every sidecar. Candidate checks are usable before target loading; runtime
-// checks additionally require successful MTP sidecar preflight.
+// Content-aware stacked verification is a separately qualified sidecar
+// optimization. It may raise only a K4V proposal cap above the neural base;
+// MTP/DFlash generation remains fixed. Candidate checks are usable before
+// target loading and runtime checks additionally require a successful sidecar
+// preflight.
 bool common_speculative_content_stack_eligible(
         const common_params_speculative & params);
 bool common_speculative_content_candidate_eligible(
@@ -64,7 +66,8 @@ struct spec_content_roll_entry {
 };
 
 // Fixed-size so a provisional copy is cheap and cannot allocate in the
-// generation hot path.  The state is never used to alter target verification.
+// generation hot path. The state may select a K4V proposal length, but every
+// emitted proposal remains fully target-verified.
 struct common_speculative_content_state {
     int16_t structure_score = 0;
 
@@ -85,8 +88,10 @@ struct common_speculative_content_state {
     uint8_t level_final = 0;
     uint8_t boost_used = 0;
     int32_t base_nmax = 0;
+    int32_t selected_nmax = 0;
     int32_t final_nmax = 0;
     uint32_t drafted = 0;
+    bool used_k4v = false;
     bool cycle_valid = false;
     bool stats_valid = false;
 };
@@ -136,7 +141,7 @@ public:
                        uint8_t level_before) const;
 
     void observe_draft(uint32_t seq_id, const llama_token * tokens, size_t n_tokens,
-                       int base_nmax, int selected_nmax);
+                       int base_nmax, int selected_nmax, bool used_k4v = true);
     void accept(uint32_t seq_id, const llama_token * tokens, size_t n_tokens,
                 uint16_t n_committed);
     void accept(uint32_t seq_id, const llama_token * tokens, size_t n_tokens,

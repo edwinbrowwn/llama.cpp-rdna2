@@ -187,14 +187,16 @@ struct common_speculative_config {
             const common_params_speculative & p = common_params_speculative{}) : type(t), params(p) {}
 };
 
-// Sidecar MTP+n-gram stacks use a fixed n-gram proposal cap.  The cap is
-// derived from the configured MTP width, preserving the anti-stutter policy
-// without acceptance-driven width changes.
+// Sidecar neural+ngram stacks use a fixed n-gram proposal cap by default.
+// Content selection may reserve a wider K4V-only envelope, while the neural
+// provider remains at its configured width.
 static common_speculative_sidecar_cap_config common_speculative_sidecar_cap_config_for(
         const common_params_speculative & params, int ceiling) {
-    if (!params.draft.sidecar_only ||
-            params.draft.sidecar_type != COMMON_SPECULATIVE_TYPE_DRAFT_MTP ||
-            params.draft.n_max <= 0 || ceiling <= params.draft.n_max) {
+    const bool supported_sidecar = params.draft.sidecar_only &&
+            (params.draft.sidecar_type == COMMON_SPECULATIVE_TYPE_DRAFT_MTP ||
+             params.draft.sidecar_type == COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH);
+    if (!supported_sidecar || params.draft.n_max <= 0 ||
+            ceiling <= params.draft.n_max) {
         return {};
     }
 
@@ -314,8 +316,8 @@ struct common_speculative_impl {
     // Existing implementations do not need this hook.
     virtual void prepare_process(const common_speculative_draft_params_vec & /*dparams*/) {}
 
-    // Content-aware width changes are valid only while a probed sidecar is
-    // actually active for this sequence. Runtime fallback/stale paths retain
+    // Content-aware K4V verification changes are valid only while a probed
+    // sidecar is active for this sequence. Runtime fallback/stale paths retain
     // the established fixed neural/K4V baseline.
     virtual bool content_sidecar_ready(llama_seq_id /*seq_id*/) const { return false; }
 
@@ -1722,6 +1724,12 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         return true;
     }
 
+    bool content_sidecar_ready(llama_seq_id seq_id) const override {
+        return n_seq == 1 && sidecar.active() && sidecar_input_mode_logged == 1 &&
+                seq_id >= 0 && seq_id < (llama_seq_id) sidecar_stale.size() &&
+                !sidecar_stale[(size_t) seq_id];
+    }
+
     void draft(common_speculative_draft_params_vec & dparams) override {
         if (sidecar_target_only) {
             return;
@@ -1751,8 +1759,8 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                     return;
                 }
 
-                const int full_limit = std::min(
-                        params.n_max, dp.n_max > 0 ? dp.n_max : params.n_max);
+                const int full_limit = common_speculative_neural_draft_limit(
+                        params.n_max, dp.n_max);
                 const int limit = stochastic
                         ? common_speculative_dflash_controller_pre_draft_cap(
                                 controller_config, controller_active_batch, full_limit,
@@ -2137,7 +2145,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
     std::vector<const float *> verify_h_device;
     std::vector<size_t> verify_h_device_stride;
     int sidecar_input_mode_logged = -1; // 0 = host staging, 1 = direct device handoff
-    int32_t sidecar_content_extra = 0;   // startup-qualified width envelope
+    int32_t sidecar_stacked_extra = 0;   // startup-qualified K4V/target envelope
 
     llama_batch batch = {};
 
@@ -2223,7 +2231,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             llama_get_model(ctx_tgt), "general.architecture", target_arch, sizeof(target_arch));
         deferred_auto_model = common_speculative_rdna2_auto_enabled() &&
                 arch_len >= 0 && std::strcmp(target_arch, "qwen35") == 0 && n_embd == 5120;
-        sidecar_content_extra = common_speculative_content_runtime_eligible(params) &&
+        sidecar_stacked_extra = common_speculative_content_runtime_eligible(params) &&
                 common_speculative_content_env_enabled()
                 ? common_speculative_content_env_max_boost() : 0;
 
@@ -2432,8 +2440,8 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             if (direct) {
                 SPC_INF("MTP sidecar target handoff: direct device rows on device %d\n",
                         target_device);
-            } else if (sidecar_content_extra > 0) {
-                SPC_WRN("MTP sidecar target handoff: host staging (device view=%d, target device=%d); content auto-extension stays at baseline\n",
+            } else if (sidecar_stacked_extra > 0) {
+                SPC_WRN("MTP sidecar target handoff: host staging (device view=%d, target device=%d); content-gated K4V stays at baseline\n",
                         have_device_view ? 1 : 0, target_device);
             } else {
                 SPC_INF("MTP sidecar target handoff: host staging (device view=%d, target device=%d)\n",
@@ -2609,7 +2617,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         }
         const bool sidecar_defer_width =
                 common_speculative_sidecar_mtp_deferred_width_eligible(
-                        this->params.n_max, sidecar_content_extra, n_tokens);
+                        this->params.n_max, sidecar_stacked_extra, n_tokens);
         const bool sidecar_defer_catchup = (sidecar.active() || sidecar_load_pending) &&
                 sidecar_defer_requested && n_seq == 1 && n_mtp_layers == 1 &&
                 !chain_heads && !is_mem_shared && sidecar_defer_width && sidecar_all_logits;
@@ -2749,7 +2757,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
     }
 
     bool content_sidecar_ready(llama_seq_id seq_id) const override {
-        return sidecar_content_extra > 0 && n_seq == 1 &&
+        return sidecar_stacked_extra > 0 && n_seq == 1 &&
                 sidecar.active() && seq_id >= 0 &&
                 seq_id < (llama_seq_id) mtp_sidecar_stale.size() &&
                 !mtp_sidecar_stale[(size_t) seq_id] &&
@@ -2781,10 +2789,8 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                     return;
                 }
 
-                const int context_limit = dp.n_max > 0 ? dp.n_max : params.n_max;
-                const int limit = std::min(
-                        dp.n_max_content > 0 ? dp.n_max_content : params.n_max,
-                        context_limit);
+                const int limit = common_speculative_neural_draft_limit(
+                        params.n_max, dp.n_max);
                 if (limit < 1) {
                     return;
                 }
@@ -4357,15 +4363,9 @@ common_speculative * common_speculative_init(common_params_speculative & params,
     common_speculative_content content;
     const llama_vocab * content_vocab = params.draft.ctx_tgt != nullptr
             ? llama_model_get_vocab(llama_get_model(params.draft.ctx_tgt)) : nullptr;
-    const bool content_mtp_sidecar =
+    const bool content_stacked_sidecar =
             common_speculative_content_runtime_eligible(params) && n_seq == 1;
-    content.init(content_vocab, n_seq, content_mtp_sidecar, params.draft.n_max);
-    if (params.draft.sidecar_only &&
-            params.draft.sidecar_type == COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH &&
-            common_speculative_content_env_enabled()) {
-        SPC_INF("content auto-extension disabled for DFlash sidecar; retaining qualified fixed width %d\n",
-                params.draft.n_max);
-    }
+    content.init(content_vocab, n_seq, content_stacked_sidecar, params.draft.n_max);
 
     std::vector<common_speculative_config> configs = {}; // list of speculative configs to try
     {
@@ -4402,24 +4402,20 @@ common_speculative * common_speculative_init(common_params_speculative & params,
 
     std::vector<std::unique_ptr<common_speculative_impl>> impls = {};
 
-    const bool mtp_sidecar = params.draft.sidecar_only &&
-            params.draft.sidecar_type == COMMON_SPECULATIVE_TYPE_DRAFT_MTP;
-    const bool has_ngram = std::any_of(params.types.begin(), params.types.end(), [](common_speculative_type type) {
-        return type == COMMON_SPECULATIVE_TYPE_NGRAM_SIMPLE ||
-               type == COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K ||
-               type == COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V ||
-               type == COMMON_SPECULATIVE_TYPE_NGRAM_MOD ||
-               type == COMMON_SPECULATIVE_TYPE_NGRAM_CACHE;
-    });
-    if (mtp_sidecar && has_ngram && params.draft.n_max > 0) {
+    const bool stacked_sidecar = params.draft.sidecar_only &&
+            (params.draft.sidecar_type == COMMON_SPECULATIVE_TYPE_DRAFT_MTP ||
+             params.draft.sidecar_type == COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH);
+    const bool has_k4v = std::find(params.types.begin(), params.types.end(),
+            COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V) != params.types.end();
+    if (stacked_sidecar && has_k4v && params.draft.n_max > 0) {
         if (content.enabled()) {
-            SPC_INF("sidecar content widths: drafts=%d..%d, target verification rows=%d..%d; explicit speculative.n_max remains authoritative\n",
-                    params.draft.n_max,
+            SPC_INF("sidecar stacked widths: neural draft fixed at %d, K4V=%d..%d, target verification rows=%d..%d; explicit speculative.n_max remains authoritative\n",
+                    params.draft.n_max, params.draft.n_max,
                     params.draft.n_max + common_speculative_content_env_max_boost(),
                     params.draft.n_max + 1,
                     params.draft.n_max + common_speculative_content_env_max_boost() + 1);
         } else {
-            SPC_INF("sidecar ngram verification fixed at MTP width %d; explicit speculative.n_max remains authoritative\n",
+            SPC_INF("sidecar K4V verification fixed at neural width %d; explicit speculative.n_max remains authoritative\n",
                     params.draft.n_max);
         }
     }
@@ -4624,7 +4620,7 @@ void common_speculative_draft(common_speculative * spec) {
         for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) dparams.size(); ++seq_id) {
             auto & dp = dparams[seq_id];
             dp.content_controller = nullptr;
-            dp.n_max_content = -1;
+            dp.n_max_ngram = -1;
 
             // An explicit request cap is exact and bypasses every automatic
             // content decision, just like the existing sidecar/K4V cap.
@@ -4637,7 +4633,7 @@ void common_speculative_draft(common_speculative * spec) {
             // sidecar or sequence-state check unexpectedly failed.
             const int context_limit = dp.n_max > 0
                     ? dp.n_max : spec->content.base_nmax();
-            dp.n_max_content = std::min(
+            dp.n_max_ngram = std::min(
                     spec->content.base_nmax(), context_limit);
 
             const bool sidecar_ready = std::any_of(
@@ -4654,7 +4650,7 @@ void common_speculative_draft(common_speculative * spec) {
                     dp.prompt != nullptr && !dp.prompt->empty() ? dp.prompt->data() : nullptr,
                     dp.prompt != nullptr ? dp.prompt->size() : 0,
                     dp.id_last);
-            dp.n_max_content = spec->content.selected_limit(
+            dp.n_max_ngram = spec->content.selected_limit(
                     spec->content.base_nmax(), context_limit,
                     false, level_before);
             dp.content_controller = &spec->content;
@@ -4687,12 +4683,14 @@ void common_speculative_draft(common_speculative * spec) {
 
             // a new draft has been sampled
             if (dp.drafting && !result.empty()) {
-                dp.drafting = false;
-
-                const int content_limit = dp.n_max_content > 0 ? dp.n_max_content : dp.n_max;
-                if (content_limit > 0 && (int) result.size() > content_limit) {
-                    SPC_DBG("truncating draft to %d tokens\n", content_limit);
-                    result.resize((size_t) content_limit);
+                const bool used_k4v =
+                        impl->type == COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V;
+                const int proposal_limit =
+                        common_speculative_proposal_limit(dp, used_k4v);
+                if (proposal_limit > 0 && (int) result.size() > proposal_limit) {
+                    SPC_DBG("truncating %s draft to %d tokens\n",
+                            used_k4v ? "K4V" : "neural", proposal_limit);
+                    result.resize((size_t) proposal_limit);
                 }
                 if (dp.dists != nullptr && !dp.dists->empty()) {
                     if (dp.dists->size() > result.size()) {
@@ -4706,11 +4704,13 @@ void common_speculative_draft(common_speculative * spec) {
                 }
 
                 if (!result.empty()) {
+                    dp.drafting = false;
                     if (dp.content_controller != nullptr) {
                         dp.content_controller->observe_draft(
                                 (uint32_t) seq_id, result.data(), result.size(),
                                 dp.content_controller->base_nmax(),
-                                dp.n_max_content > 0 ? dp.n_max_content : dp.n_max);
+                                dp.n_max_ngram > 0 ? dp.n_max_ngram : dp.n_max,
+                                used_k4v);
                     }
                     SPC_DBG("called impl %s, hist size = %zu, call_count = %zu, gen = %zu\n",
                             common_speculative_type_to_str(impl.get()->type).c_str(), dp.prompt->size(),

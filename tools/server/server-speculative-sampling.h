@@ -193,10 +193,9 @@ inline bool server_spec_gfx1030_dflash_dynamic_depth_profile(
     return n_dflash == 1 && n_k4v <= 1 && params.draft.n_max == 4;
 }
 
-// Content width is currently qualified only for one dense-MTP provider plus
-// an optional K4V map at baseline width four. Other ngram/neural combinations
-// retain their fixed behavior until separately qualified.
-inline bool server_spec_content_mtp_stack_profile(
+// Content selection may widen only K4V above one fixed-width sidecar neural
+// provider. Other ngram/neural combinations retain the anti-stutter cap.
+inline bool server_spec_content_stacked_verification_profile(
         const common_params_speculative & params) {
     return common_speculative_content_stack_eligible(params);
 }

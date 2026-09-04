@@ -272,30 +272,37 @@ bool common_speculative_content_token_attr_eligible(llama_token_attr attr) {
 bool common_speculative_content_stack_eligible(
         const common_params_speculative & params) {
     int n_mtp = 0;
+    int n_dflash = 0;
     int n_k4v = 0;
     for (common_speculative_type type : params.types) {
         switch (type) {
             case COMMON_SPECULATIVE_TYPE_DRAFT_MTP:     ++n_mtp; break;
+            case COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH:  ++n_dflash; break;
             case COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V: ++n_k4v; break;
             case COMMON_SPECULATIVE_TYPE_NONE:          break;
             default: return false;
         }
     }
-    return n_mtp == 1 && n_k4v <= 1 && params.draft.n_max == 4;
+    // Without K4V there is nothing to widen: content selection must never
+    // change the sole neural provider's generation width.
+    return n_mtp + n_dflash == 1 && n_k4v == 1 && params.draft.n_max == 4;
 }
 
 bool common_speculative_content_candidate_eligible(
         const common_params_speculative & params) {
-    return params.draft.content_width_eligible &&
+    return params.draft.content_verification_eligible &&
             params.draft.sidecar_candidate_ready && !params.has_synth() &&
             common_speculative_content_stack_eligible(params);
 }
 
 bool common_speculative_content_runtime_eligible(
         const common_params_speculative & params) {
+    const common_speculative_type sidecar_type = params.draft.sidecar_type;
+    const bool supported_sidecar = sidecar_type == COMMON_SPECULATIVE_TYPE_DRAFT_MTP ||
+            sidecar_type == COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH;
     return common_speculative_content_candidate_eligible(params) &&
-            params.draft.sidecar_only &&
-            params.draft.sidecar_type == COMMON_SPECULATIVE_TYPE_DRAFT_MTP;
+            params.draft.sidecar_only && supported_sidecar &&
+            std::find(params.types.begin(), params.types.end(), sidecar_type) != params.types.end();
 }
 
 bool common_speculative_content_env_enabled() {
@@ -362,7 +369,7 @@ void common_speculative_content::init(
     fence_prompt_open_.resize(n_seq, 0);
     inline_prompt_open_.resize(n_seq, 0);
 
-    LOG_INF("spec content boost POC enabled for qualified MTP sidecar: max=+%d window=%d hysteresis=%d provisional=%d adaptive=%d\n",
+    LOG_INF("spec content stacked-verification POC enabled: K4V max=neural+%d window=%d hysteresis=%d provisional=%d adaptive=%d\n",
             config_.max_boost, config_.window, config_.hysteresis,
             config_.provisional ? 1 : 0, config_.adaptive ? 1 : 0);
     if (config_.provisional) {
@@ -760,7 +767,7 @@ int common_speculative_content::selected_limit(
 
 void common_speculative_content::observe_draft(
         uint32_t seq_id, const llama_token * tokens, size_t n_tokens,
-        int base_nmax, int selected_nmax) {
+        int base_nmax, int selected_nmax, bool used_k4v) {
     auto * current = state(seq_id);
     if (current == nullptr) {
         return;
@@ -780,11 +787,25 @@ void common_speculative_content::observe_draft(
         current->level_final = level(provisional);
     }
     current->base_nmax = base_nmax;
-    current->final_nmax = selected_nmax;
+    current->selected_nmax = selected_nmax;
+    current->used_k4v = used_k4v;
+
+    // Selection raises only K4V's ceiling. A neural fallback remains a base
+    // cycle, and a short K4V result pays no wider target-verification pass.
+    if (selected_nmax < base_nmax) {
+        current->final_nmax = selected_nmax;
+    } else if (used_k4v) {
+        const int32_t drafted_width = (int32_t) std::min<size_t>(
+                n_tokens, (size_t) INT32_MAX);
+        current->final_nmax = std::min(
+                selected_nmax, std::max(base_nmax, drafted_width));
+    } else {
+        current->final_nmax = base_nmax;
+    }
     current->boost_used = (uint8_t) std::clamp(current->final_nmax - base_nmax, 0, 3);
     current->drafted = (uint32_t) n_tokens;
     current->cycle_valid = true;
-    current->stats_valid = current->final_nmax >= base_nmax;
+    current->stats_valid = selected_nmax >= base_nmax;
 }
 
 void common_speculative_content::accept(
@@ -825,10 +846,12 @@ void common_speculative_content::accept(
     }
 
     if (config_.trace) {
-        LOG_INF("spec content cycle seq=%u level_before=%u level_base=%u level_provisional=%u level_after=%u base_nmax=%d selected_nmax=%d boost=%u drafted=%u accepted_draft=%zu committed=%zu stats_valid=%d\n",
-                seq_id, cycle.level_before, cycle.level_at_base,
-                cycle.level_final, level_after, cycle.base_nmax, cycle.final_nmax,
-                cycle.boost_used, cycle.drafted, accepted_draft, committed,
+        LOG_INF("spec content stacked cycle seq=%u provider=%s level_before=%u level_base=%u level_provisional=%u level_after=%u neural_nmax=%d selected_k4v_nmax=%d verification_nmax=%d boost=%u drafted=%u accepted_draft=%zu committed=%zu stats_valid=%d\n",
+                seq_id, cycle.used_k4v ? "k4v" : "neural",
+                cycle.level_before, cycle.level_at_base,
+                cycle.level_final, level_after, cycle.base_nmax,
+                cycle.selected_nmax, cycle.final_nmax, cycle.boost_used,
+                cycle.drafted, accepted_draft, committed,
                 cycle.stats_valid ? 1 : 0);
     }
 
@@ -868,7 +891,7 @@ void common_speculative_content::print_stats(int32_t seq_id) const {
         const int last_pos = std::clamp(width - 1, 0, (int) stats.accepted_per_pos.size() - 1);
         const double last_pos_acceptance =
                 (double) stats.accepted_per_pos[(size_t) last_pos] / (double) stats.cycles;
-        LOG_INF("spec content %swidth=%d (+%d): cycles=%llu drafted=%llu accepted=%llu acceptance=%.5f mean_span=%.2f last_pos_acceptance=%.5f\n",
+        LOG_INF("spec content %sverification_width=%d (+%d over neural): cycles=%llu drafted=%llu accepted=%llu acceptance=%.5f mean_span=%.2f last_pos_acceptance=%.5f\n",
                 request_scope ? "request " : "lifetime ", width, i,
                 (unsigned long long) stats.cycles,
                 (unsigned long long) stats.drafted,

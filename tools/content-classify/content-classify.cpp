@@ -207,7 +207,7 @@ static sample_result classify_sample(
     if (detail) {
         std::printf("\nDETAIL sample=%s intent=\"%s\" window=%d tokens=%zu\n",
                 sample.name, sample.intent, window, tokens.size());
-        std::printf(" idx token  piece                              flags                                      score raw sel fence inline draft target\n");
+        std::printf(" idx token  piece                              flags                                      score raw sel fence inline k4v target\n");
     }
     for (size_t i = 0; i < tokens.size(); ++i) {
         const uint8_t selected = classifier.prepare(0, tokens.data(), i, tokens[i]);
@@ -321,7 +321,7 @@ int main(int argc, char ** argv) {
         samples = builtin_samples();
     }
 
-    std::printf("MODEL %s\nBASE draft=%d max_boost=+%d; target_rows=draft+1\n",
+    std::printf("MODEL %s\nBASE neural=%d K4V=neural+0..%d; target_rows=actual_K4V+1\n",
             model_path.c_str(), base_width, max_boost);
     std::printf("SUMMARY columns: window sample tokens +0 +1 +2 +3 boosted%% transitions score[min,max]\n");
     for (int window : windows) {

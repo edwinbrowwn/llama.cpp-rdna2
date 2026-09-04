@@ -16,19 +16,27 @@ static void test_cap_and_explicit_override() {
     common_speculative_draft_params dp;
     dp.n_max = 8;
     require(common_speculative_sidecar_cap_request_enabled(cap, dp), "default request uses cap");
-    require(common_speculative_sidecar_cap_limit(cap, dp) == 3, "cap follows configured MTP width");
+    require(common_speculative_sidecar_cap_limit(cap, dp) == 3, "cap follows configured neural width");
+
+    require(common_speculative_neural_draft_limit(4, 5) == 4 &&
+            common_speculative_neural_draft_limit(4, 3) == 3 &&
+            common_speculative_neural_draft_limit(4, 0) == 0 &&
+            common_speculative_neural_draft_limit(4, -1) == 4,
+            "K4V verification envelope never widens neural generation");
 
     common_speculative_sidecar_cap_config content_cap { 7 };
-    dp.n_max_content = 5;
-    require(common_speculative_sidecar_cap_limit(content_cap, dp) == 5,
-            "content-selected width narrows the sidecar envelope");
-    dp.n_max_content = 4;
+    dp.n_max_ngram = 5;
+    require(common_speculative_sidecar_cap_limit(content_cap, dp) == 5 &&
+            common_speculative_proposal_limit(dp, true) == 5 &&
+            common_speculative_proposal_limit(dp, false) == 8,
+            "content-selected width applies only to the K4V proposal");
+    dp.n_max_ngram = 4;
     require(common_speculative_sidecar_cap_limit(content_cap, dp) == 4,
             "runtime sidecar fallback narrows K4V to the configured baseline");
     dp.n_max = 3;
-    dp.n_max_content = 5;
+    dp.n_max_ngram = 5;
     require(common_speculative_sidecar_cap_limit(content_cap, dp) == 3,
-            "remaining context is authoritative over content width");
+            "remaining context is authoritative over K4V width");
     dp.n_max = 8;
 
     dp.n_max_user_override = true;
@@ -111,9 +119,9 @@ static void test_dynamic_mtp_deferred_widths() {
     require(!common_speculative_sidecar_mtp_deferred_width_eligible(4, 0, 6),
             "fixed width four rejects an unreserved sixth row");
     require(common_speculative_sidecar_mtp_deferred_width_eligible(4, 1, 6),
-            "content +1 keeps six-row deferred catch-up");
+            "K4V +1 keeps six-row deferred catch-up while MTP remains width four");
     require(common_speculative_sidecar_mtp_deferred_width_eligible(4, 3, 8),
-            "content +3 keeps the complete eight-row envelope");
+            "K4V +3 keeps the complete eight-row target envelope");
     require(!common_speculative_sidecar_mtp_deferred_width_eligible(4, 3, 9),
             "deferred catch-up rejects rows beyond the content envelope");
     require(common_speculative_sidecar_mtp_deferred_width_eligible(5, 0, 5) &&

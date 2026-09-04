@@ -175,10 +175,11 @@ The number of accepted tokens is stored for each used n-gram.
 llama-server [...] --spec-type ngram-map-k4v --spec-ngram-map-k4v-size-n 8 --spec-ngram-map-k4v-size-m 8 --spec-ngram-map-k4v-min-hits 2 --spec-draft-n-max 64
 ```
 
-#### Sidecar content-aware nmax POC
+#### Sidecar content-aware stacked-verification POC
 
-When an external sidecar is active, the opt-in experimental controller can
-grant a small relative nmax boost without changing the user's baseline:
+When a K4V map is stacked ahead of an external sidecar, the opt-in experimental
+controller can grant K4V a small relative verification-width boost without
+changing the neural provider's configured generation width:
 
 ```bash
 # Experimental only; fixed width four remains the qualified setting.
@@ -187,14 +188,18 @@ SPEC_SIDECAR=1 SPEC_CONTENT_BOOST=1 GGML_TP_SHARDED_OUTPUT=1 \
 ```
 
 The controller uses one scalar structural-confidence level and permits only
-`base+0` through `base+3`. It is restricted to sidecar MTP in this POC;
-host/native draft models are unchanged. DFlash remains fixed at its qualified
-width because its measured width-five path loses throughput and a positive-only
-controller cannot improve its width-four optimum. Runtime widening is limited
-to the dense `qwen35-mtp` gfx1030 TP4 tensor-split test envelope with
-vocabulary-sharded output, `--parallel 1`, baseline width four, deferred
-catch-up enabled, and no proposal stack beyond optional K4V. Other profiles
-remain fixed-width.
+`base+0` through `base+3` for K4V. Exactly one K4V map and one sidecar neural
+provider are required. MTP and DFlash generation remain fixed at the configured
+baseline (currently four); a K4V miss therefore falls back to an ordinary
+four-token neural cycle. The sixth target-verification row is added only when
+K4V actually returns a fifth proposal. Host/native draft models and stacks
+without K4V are unchanged.
+
+Runtime selection is limited to the `qwen35-mtp` or `qwen35-dflash` gfx1030 TP4
+tensor-split test envelope with vocabulary-sharded output, `--parallel 1`, and
+baseline width four. MTP additionally requires deferred catch-up and direct
+target-device rows; DFlash requires direct target-device layer rows. Other
+profiles retain the fixed anti-stutter cap.
 
 The experimental configuration uses an 8-token window, +1 maximum boost, and
 two-update upward hysteresis. The window accepts 4 through 32 tokens and
@@ -204,13 +209,14 @@ includes the current target-sampled token. Optional switches are
 maximum boost of zero disables the controller entirely. Values +2 and +3 are
 reserved experiments and must not be tested until +1 is profitable.
 
-Matched qualification did not promote width five. Two 1,024-token mostly-prose
-runs stayed byte-for-byte at width four and measured within noise. Across three
-768-token C++, Python, and Rust generation tasks, equal-workload throughput
-fell 5.54% with content width enabled; the fifth-position acceptance was too
-low to repay its verification row. One separate 1,024-token code task was
-neutral. Therefore fixed width four remains selected and `SPEC_CONTENT_BOOST`
-must remain unset outside explicit experiments.
+The earlier design widened MTP generation as well as target verification. It
+was rejected: across three 768-token C++, Python, and Rust tasks, equal-workload
+throughput fell 5.54%, and fifth-position neural acceptance did not repay the
+extra neural step plus sixth target row. This POC tests a different economic
+boundary: the neural width never changes, and the extra target row is paid only
+when K4V already has a longer continuation. It is not yet qualified; fixed
+neural/K4V width four remains selected and `SPEC_CONTENT_BOOST` must remain
+unset outside explicit experiments.
 
 The fixed classifier is conservative for the dominant workloads: mostly-prose
 xhigh thinking remains at the baseline, while sustained fenced or unfenced
@@ -234,20 +240,19 @@ prompt has the same length and terminal token. Score levels begin at 4, 10, and
 18.
 
 An explicit request-level `speculative.n_max` bypasses content selection and
-remains the authoritative cap. Runtime sidecar failure or a stale sidecar
-sequence also falls back to the fixed configured baseline. Dense MTP also
-retains the baseline when direct device-row handoff is unavailable, avoiding a
-costly host-staged automatic extension. A draft width of `N` produces `N + 1`
-target-verification rows because the sampled target token
-is verified with the draft. End-of-request summaries report cycles, drafted and
-accepted tokens, mean committed span, and last-position acceptance separately
-for each selected width. Every emitted proposal still receives complete target
-verification, and stochastic neural proposals still carry one complete
-validated proposal-distribution row per token.
+remains the authoritative cap. Runtime sidecar failure, a stale sequence, or
+loss of direct device handoff returns K4V to the fixed neural baseline. A K4V
+proposal of `N` tokens produces `N + 1` target-verification rows because the
+sampled target token is verified with the draft. End-of-request summaries
+bucket actual verification width: neural fallbacks and short K4V hits remain in
+the baseline bucket even when the classifier selected a wider ceiling. Every
+emitted proposal still receives complete target verification, and stochastic
+neural proposals still carry one complete validated proposal-distribution row
+per token.
 
-Sidecar providers draft a block in one call, so BEFORE-context selection is the
-wall-clock path: `SPEC_CONTENT_PROVISIONAL=1` records the provisional score but
-does not relaunch a provider or risk leaving extra uncommitted sidecar KV.
+BEFORE-context selection is the wall-clock path:
+`SPEC_CONTENT_PROVISIONAL=1` records a provisional score but does not relaunch
+K4V or a neural provider and cannot leave extra uncommitted sidecar KV.
 Only the target-accepted prefix is committed to content state. Adaptive
 weighting is parsed for future work but remains disabled. `SPEC_CONTENT_TRACE=1`
 emits one log line per cycle and is diagnostic only; disable it for timing.
@@ -263,7 +268,7 @@ cmake --build build --target llama-content-classify
 ```
 
 It prints each real tokenizer piece, structural flags, score, raw/selected
-level, fenced/inline mode, draft width, and target-verification row count.
+level, fenced/inline mode, selected K4V cap, and target-verification row count.
 Built-in samples prioritize chat-shaped xhigh thinking, technical reasoning,
 reasoning-to-code transitions, and fenced/unfenced code. Inline data, tables,
 formulas, URLs, paths, and short inline code remain adversarial controls.

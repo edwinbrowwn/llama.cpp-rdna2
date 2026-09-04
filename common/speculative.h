@@ -99,9 +99,10 @@ struct common_speculative_draft_params {
     float temperature = 0.0f;
     uint32_t seed = LLAMA_DEFAULT_SEED;
 
-    // Internal sidecar-only content-aware nmax controls.  n_max remains the
-    // context/request limit; these fields never alter target verification.
-    int32_t n_max_content = -1;
+    // Internal sidecar-only content-aware stacked-verification controls.
+    // n_max remains the request/capacity envelope; n_max_ngram may narrow the
+    // K4V proposal within that envelope and never widens neural generation.
+    int32_t n_max_ngram = -1;
     common_speculative_content * content_controller = nullptr;
 
 };

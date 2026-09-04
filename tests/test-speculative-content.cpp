@@ -130,7 +130,7 @@ static void test_piece_classification_guards() {
             !common_speculative_content_token_attr_eligible(LLAMA_TOKEN_ATTR_UNUSED) &&
             !common_speculative_content_token_attr_eligible(LLAMA_TOKEN_ATTR_BYTE) &&
             !common_speculative_content_token_attr_eligible(LLAMA_TOKEN_ATTR_UNDEFINED),
-            "only normal content tokens can drive content width");
+            "only normal content tokens can drive the K4V verification signal");
 }
 
 static void test_math_evidence_requires_code_context() {
@@ -188,64 +188,67 @@ static void test_sidecar_capacity_reservations() {
     params.speculative.types = { COMMON_SPECULATIVE_TYPE_DRAFT_MTP };
     params.speculative.draft.n_max = 4;
     params.speculative.draft.sidecar_candidate_ready = true;
-    require(common_speculative_n_max(&params.speculative) == 4 &&
+    params.speculative.draft.content_verification_eligible = true;
+    require(!common_speculative_content_candidate_eligible(params.speculative) &&
             common_context_params_to_llama(params).n_rs_seq == 4,
-            "an unqualified sidecar candidate stays at fixed width");
+            "a neural-only sidecar cannot acquire content generation width");
 
-    params.speculative.draft.content_width_eligible = true;
-    require(common_speculative_n_max(&params.speculative) == 7,
-            "sidecar candidate reserves target outputs through base plus boost");
-    require(common_context_params_to_llama(params).n_rs_seq == 7,
-            "sidecar candidate reserves recurrent rollback through base plus boost");
+    params.speculative.types = {
+        COMMON_SPECULATIVE_TYPE_DRAFT_MTP,
+        COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V,
+    };
     require(common_speculative_content_candidate_eligible(params.speculative),
-            "qualified MTP candidate enables pre-load reservation");
+            "qualified MTP plus K4V enables stacked verification");
+    require(common_speculative_n_max(&params.speculative) == 48,
+            "configured K4V width already reserves the target output envelope");
+    require(common_context_params_to_llama(params).n_rs_seq == 7,
+            "stacked verification reserves recurrent rollback through base plus boost");
 
     params.speculative.draft.sidecar_only = true;
     params.speculative.draft.sidecar_type = COMMON_SPECULATIVE_TYPE_DRAFT_MTP;
     require(common_speculative_content_runtime_eligible(params.speculative),
-            "qualified and probed MTP enables runtime content width");
+            "qualified and probed MTP plus K4V enables runtime selection");
     params.speculative.draft.sidecar_type = COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH;
     require(!common_speculative_content_runtime_eligible(params.speculative),
-            "runtime sidecar type mismatch fails closed");
-    params.speculative.draft.sidecar_only = false;
-    params.speculative.draft.sidecar_type = COMMON_SPECULATIVE_TYPE_NONE;
+            "runtime sidecar type must match the configured neural provider");
 
     params.speculative.synth_len = 1.0;
-    require(common_speculative_n_max(&params.speculative) == 4,
-            "synthetic mode does not acquire content output capacity");
-    require(common_context_params_to_llama(params).n_rs_seq == 4,
-            "synthetic mode does not acquire content rollback capacity");
-
+    require(!common_speculative_content_candidate_eligible(params.speculative) &&
+            common_context_params_to_llama(params).n_rs_seq == 4,
+            "synthetic mode cannot acquire stacked rollback capacity");
     params.speculative.synth_len = -1.0;
-    params.speculative.draft.sidecar_candidate_ready = false;
-    require(common_speculative_n_max(&params.speculative) == 4,
-            "native draft path does not acquire content output capacity");
-    require(common_context_params_to_llama(params).n_rs_seq == 4,
-            "native draft path does not acquire content rollback capacity");
+
+    params.speculative.types = {
+        COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH,
+        COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V,
+    };
+    params.speculative.draft.sidecar_type = COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH;
+    require(common_speculative_content_candidate_eligible(params.speculative) &&
+            common_speculative_content_runtime_eligible(params.speculative) &&
+            common_context_params_to_llama(params).n_rs_seq == 7,
+            "qualified DFlash plus K4V gets the same target rollback envelope");
 
     params.speculative.types = { COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH };
-    params.speculative.draft.sidecar_candidate_ready = true;
-    params.speculative.draft.content_width_eligible = true; // defensive rejection
-    require(common_speculative_n_max(&params.speculative) == 4,
-            "DFlash sidecar retains its qualified fixed output width");
-    require(common_context_params_to_llama(params).n_rs_seq == 4,
-            "DFlash sidecar does not reserve an unqualified positive boost");
-    require(!common_speculative_content_candidate_eligible(params.speculative),
-            "DFlash cannot acquire content eligibility even with a bad caller flag");
+    require(!common_speculative_content_candidate_eligible(params.speculative) &&
+            common_context_params_to_llama(params).n_rs_seq == 4,
+            "DFlash without K4V remains fixed and cannot invoke content selection");
+
     params.speculative.types = {
         COMMON_SPECULATIVE_TYPE_DRAFT_MTP,
         COMMON_SPECULATIVE_TYPE_DRAFT_MTP,
+        COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V,
     };
     require(!common_speculative_content_candidate_eligible(params.speculative),
-            "duplicate MTP providers cannot acquire content eligibility");
+            "duplicate neural providers cannot acquire content eligibility");
 
-    params.speculative.types = { COMMON_SPECULATIVE_TYPE_DRAFT_MTP };
-    params.speculative.draft.sidecar_candidate_ready = true;
-    params.speculative.draft.content_width_eligible = true;
+    params.speculative.types = {
+        COMMON_SPECULATIVE_TYPE_DRAFT_MTP,
+        COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V,
+    };
+    params.speculative.draft.sidecar_type = COMMON_SPECULATIVE_TYPE_DRAFT_MTP;
     unset_test_env("SPEC_CONTENT_BOOST");
-    require(common_speculative_n_max(&params.speculative) == 4 &&
-            common_context_params_to_llama(params).n_rs_seq == 4,
-            "content-off qualified MTP remains exactly fixed-width");
+    require(common_context_params_to_llama(params).n_rs_seq == 4,
+            "content-off stacked MTP remains exactly fixed-width");
     set_test_env("SPEC_CONTENT_BOOST", "1");
 }
 
@@ -480,6 +483,43 @@ static void test_request_stats_reset_at_begin() {
             "lifetime stats survive request reset");
 }
 
+static void test_stacked_verification_width_accounting() {
+    common_speculative_content content;
+    common_speculative_content_test_access::configure(content, 4, 1, 8);
+
+    const llama_token prompt[] = { 0, 1, 2 };
+    const llama_token draft5[] = { 3, 4, 5, 6, 7 };
+    const llama_token draft4[] = { 3, 4, 5, 6 };
+
+    content.prepare(0, prompt, 3, 3);
+    content.observe_draft(0, draft5, 5, 4, 5, false);
+    require(content.state(0)->selected_nmax == 5 &&
+            content.state(0)->final_nmax == 4 &&
+            content.state(0)->boost_used == 0 &&
+            !content.state(0)->used_k4v,
+            "neural fallback remains a width-four accounting cycle");
+    content.accept(0, draft5, 5, 4, 4);
+
+    content.prepare(0, prompt, 3, 3);
+    content.observe_draft(0, draft4, 4, 4, 5, true);
+    require(content.state(0)->final_nmax == 4 &&
+            content.state(0)->boost_used == 0 &&
+            content.state(0)->used_k4v,
+            "short K4V hit pays no widened verification width");
+    content.accept(0, draft4, 4, 4, 4);
+
+    content.prepare(0, prompt, 3, 3);
+    content.observe_draft(0, draft5, 5, 4, 5, true);
+    require(content.state(0)->final_nmax == 5 &&
+            content.state(0)->boost_used == 1,
+            "five-token K4V hit owns the widened verification bucket");
+    content.accept(0, draft5, 5, 5, 5);
+
+    require(common_speculative_content_test_access::stats(content, 0).cycles == 2 &&
+            common_speculative_content_test_access::stats(content, 1).cycles == 1,
+            "only an actual long K4V proposal is charged to the boost bucket");
+}
+
 static void test_incremental_commit_matches_fresh_rebuild() {
     common_speculative_content content;
     common_speculative_content_test_access::configure(content, 4, 1, 8);
@@ -579,6 +619,7 @@ int main() {
     test_request_replacement_and_sequence_isolation();
     test_provisional_is_separate();
     test_request_stats_reset_at_begin();
+    test_stacked_verification_width_accounting();
     test_incremental_commit_matches_fresh_rebuild();
     test_context_limited_cycles_do_not_pollute_width_stats();
     test_replay_commit_and_draft_accounting_are_separate();

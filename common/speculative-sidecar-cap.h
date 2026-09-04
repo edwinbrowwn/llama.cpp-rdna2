@@ -5,17 +5,16 @@
 #include <algorithm>
 #include <cstdint>
 
-// A sidecar n-gram proposal is capped at the configured MTP width by default.
-// A per-request speculative.n_max override remains authoritative and bypasses
-// this internal sidecar safety cap.
+// A stacked sidecar n-gram proposal is capped at the configured neural width
+// by default. A per-request speculative.n_max override remains authoritative
+// and bypasses this internal anti-stutter cap.
 struct common_speculative_sidecar_cap_config {
     int width = 0;
 };
 
-// Dense-MTP deferred catch-up was qualified for five-row target verification
-// at base width four. Content boosting extends the same exact scheduling path
-// through the reserved envelope; it must not silently fall back merely because
-// N draft tokens produce N+1 verification rows.
+// Dense-MTP deferred catch-up must accept every target row when a stacked K4V
+// proposal exceeds the fixed neural width. Content selection widens only K4V;
+// the reserved target envelope still has N+1 verification rows.
 inline bool common_speculative_sidecar_mtp_deferred_width_eligible(
         int base_nmax, int content_extra, int verification_rows) {
     if (base_nmax == 4) {
@@ -23,6 +22,26 @@ inline bool common_speculative_sidecar_mtp_deferred_width_eligible(
                 verification_rows <= base_nmax + std::max(0, content_extra) + 1;
     }
     return base_nmax == 5 && (verification_rows == 5 || verification_rows == 6);
+}
+
+// A request/capacity envelope may exceed the neural provider's configured
+// width for stacked K4V verification. Keep neural generation fixed regardless.
+inline int common_speculative_neural_draft_limit(
+        int configured_nmax, int request_envelope) {
+    if (configured_nmax <= 0) {
+        return 0;
+    }
+    if (request_envelope == 0) {
+        return 0;
+    }
+    return request_envelope > 0
+            ? std::min(configured_nmax, request_envelope)
+            : configured_nmax;
+}
+
+inline int common_speculative_proposal_limit(
+        const common_speculative_draft_params & dp, bool is_k4v) {
+    return is_k4v && dp.n_max_ngram > 0 ? dp.n_max_ngram : dp.n_max;
 }
 
 inline bool common_speculative_sidecar_cap_request_enabled(
@@ -38,8 +57,8 @@ inline int common_speculative_sidecar_cap_limit(
     if (dp.n_max > 0) {
         limit = std::min(limit, dp.n_max);
     }
-    if (dp.n_max_content > 0) {
-        limit = std::min(limit, dp.n_max_content);
+    if (dp.n_max_ngram > 0) {
+        limit = std::min(limit, dp.n_max_ngram);
     }
     return std::max(0, limit);
 }
