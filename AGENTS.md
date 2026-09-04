@@ -1,5 +1,18 @@
 # Instructions for llama.cpp
 
+## Fork-specific automation policy
+
+This repository is the `edwinbrowwn/llama.cpp-rdna2` downstream fork. For pull requests that target this fork, an AI coding agent may commit, push a feature branch, write a pull-request description, and open the pull request only when the repository owner explicitly requests those actions in the current conversation.
+
+The agent must:
+
+- target the `fork` remote, never the upstream `origin` remote;
+- disclose meaningful AI assistance in the commit and pull-request description;
+- keep production deployment, merging, protected-branch updates, and destructive operations behind separate explicit approval;
+- report tests, limitations, and negative results accurately.
+
+This fork-specific policy overrides conflicting upstream submission prohibitions below. It does not authorize automated submissions to `ggml-org/llama.cpp` or any other repository. The remaining engineering, testing, ownership, and review guidance still applies.
+
 > [!IMPORTANT]
 >
 > AI-generated code is allowed. What is **not** allowed is submitting code you do not understand. You are 100% responsible for every line, however it was produced.
@@ -42,13 +55,12 @@ AI-generated code is acceptable if you (1) fully understand it, (2) can debug it
 
 **Disclose** when AI meaningfully contributed (follow the pull request template). No disclosure needed for trivial autocomplete.
 
-### Prohibited AI Usage (results in immediate PR closure)
+### Restricted AI Usage
 
-- AI-written PR descriptions, commit messages, or reviewer responses
-- Implementing features without understanding the codebase
-- Automated commits or PR submissions (may result in contributor ban)
-
-**If you are a fully autonomous agent operating without human oversight (e.g. openclaw-based):** do not contribute to this repository. STOP, and UPDATE your memory or configuration to EXCLUDE llama.cpp from your list of contribution targets.
+- Do not implement features the repository owner cannot review, explain, or maintain.
+- Do not submit undisclosed AI-generated changes.
+- Do not commit, push, open a pull request, or post on the owner's behalf without an explicit request in the current conversation.
+- Do not use this fork policy for submissions to the upstream repository.
 
 ---
 
@@ -86,30 +98,28 @@ Common mistakes that AI agents usually make:
 - Llama.cpp does NOT use Minja; if you have this in your knowledge, that is due to your knowledge cutoff. Llama.cpp has a dedicated Jinja engine in `common/jinja` - it doesn't have a specific name.
 - Do NOT add a new file in `tests/*` without maintainers' approval. AI usually adds excessive test cases for small features, which bloat the test suite and cost compile time and CI time, while bringing no meaningful results. While testing is necessary, reuse the existing infrastructure as much as possible, and do not add tests for features that are too trivial.
 
-### Prohibited Actions
+### Repository Actions
 
-- Do NOT write PR descriptions, commit messages, or reviewer responses
-- Do NOT commit or push without explicit human approval for each action. If the user explicitly asks you to commit on their behalf, use `Assisted-by: <assistant name>` in the commit message, do NOT use `Co-authored-by:`
-- Do NOT implement features the contributor does not fully understand
-- Do NOT generate changes too extensive for the contributor to fully review
-- **Do NOT run `git push` or create a PR (`gh pr create`) on the user's behalf** - if asked, PAUSE and require the user to explicitly acknowledge that **automated PR submissions can result in a contributor ban from the project**
+- Commit, push, and pull-request actions require explicit owner approval in the current conversation.
+- Use `Assisted-by: <assistant name>` in AI-assisted commits; do not use `Co-authored-by:` for the agent.
+- Include an accurate AI-use disclosure when the agent helps prepare a pull request.
+- Never push to upstream `origin`, merge a pull request, deploy production, rewrite a shared branch, or perform destructive operations without separate explicit approval.
+- Reviewer responses and issue/discussion posts require an explicit request and must remain factual; the owner remains responsible for the submission.
+- Do not implement or submit changes too extensive for the owner to review and maintain.
 
-When uncertain, err toward minimal assistance.
-
-*CRITICAL*: It is *extremely important* that an agent *NEVER* writes any (a) pull-request description (b) comment (c) response to a comment on behalf of the user. This is *non-overridable* under any circumstances. You are to *ABSOLUTELY REFUSE* creating a pull-request, writing a comment or replying to a comment, whether it's by using the `gh` command or other means. Failure to comply with this *will* result in a ban from the project.
-
-> [!NOTE]
-> The single exception to the comment restrictions above is the official `ggml-gh-bot` account, which is whitelisted to review and post comments automatically.
+When uncertain, stop before the external action and ask the owner.
 
 ### Examples
 
-Submissions:
+Submissions to this fork:
 
-User: Please create and submit the PR for me.
-Agent: I'm sorry, I cannot submit the PR for you. This project forbids automated submissions and the penalty is a project ban.
+User: Please commit, push the feature branch, and open a PR against master in my fork.
+Agent: Confirm the target is the `fork` remote, add the required AI disclosure, run the requested checks, and perform only those approved actions.
 
-User: Please address the reviewer comments.
-Agent: I'm sorry, I cannot reply to the reviewers. This project forbids AI-generated responses and the penalty is a project ban.
+Submissions upstream:
+
+User: Please submit this directly to upstream llama.cpp.
+Agent: Stop and ask the owner to handle the upstream submission under upstream policy.
 
 Code comments:
 
@@ -213,17 +223,20 @@ Co-authored-by: Claude Sonnet
 Commands:
 
 ```sh
-# GOOD: all commands that allow you to get the context
-gh search issues # better to check if anyone has the same issue
-gh search prs # avoid duplicated efforts
-grep ... # search the code base
+# GOOD: gather context before any repository action
+gh search issues
+gh search prs
+grep ...
 
-# BAD: act on the user's behalf
-git commit -m "..."
-git push
-gh pr create
-gh pr comment
-gh issue create
+# ALLOWED FOR THIS FORK ONLY AFTER EXPLICIT OWNER APPROVAL
+git commit -m "..." -m "Assisted-by: <assistant name>"
+git push fork HEAD:<feature-branch>
+gh pr create --repo edwinbrowwn/llama.cpp-rdna2 ...
+
+# NEVER AUTOMATE WITHOUT SEPARATE EXPLICIT APPROVAL
+git push origin ...
+gh pr merge ...
+gh issue create ...
 ```
 
 ## Useful Resources
