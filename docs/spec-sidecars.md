@@ -275,8 +275,10 @@ never be read by a later draft. Set
   K4V miss therefore incurs no classifier pass, wider neural draft, or wider
   target pass. Only a K4V candidate longer than the MTP baseline invokes the
   classifier; an emitted longer hit still receives all `N + 1`
-  target-verification rows. DFlash retains its fixed K4V cap because a matched
-  K4V5 screen was slower even with complete fifth-position acceptance.
+  target-verification rows. DFlash retains the baseline selected by
+  `--spec-draft-n-max` (not a hard-coded width four) because adding a content
+  boost in a matched K4V5 screen was slower even with complete fifth-position
+  acceptance.
 - Prompt-cache and external slot-file restore do not persist the sidecar's
   device KV contents. If a restored target state does not receive a complete
   contiguous sidecar prefill, the sidecar rejects the gap and the host uses

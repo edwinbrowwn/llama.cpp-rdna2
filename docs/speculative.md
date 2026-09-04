@@ -196,8 +196,9 @@ a fifth proposal. Host/native draft models and stacks without K4V are unchanged.
 
 Runtime selection is limited to the `qwen35-mtp` gfx1030 TP4 tensor-split test
 envelope with vocabulary-sharded output, `--parallel 1`, baseline width four,
-deferred catch-up, and direct target-device rows. DFlash and other profiles
-retain the fixed anti-stutter cap.
+deferred catch-up, and direct target-device rows. DFlash retains its
+user-configured neural/K4V baseline; it is not hard-coded to width four and
+receives no automatic content boost.
 
 The experimental configuration uses an 8-token window, +1 maximum boost, and
 two-update upward hysteresis. The window accepts 4 through 32 tokens and
