@@ -11,9 +11,9 @@ struct common_params_speculative;
 
 // Content-aware stacked verification is a separately qualified sidecar
 // optimization. It may raise only a K4V proposal cap above the neural base;
-// MTP/DFlash generation remains fixed. Candidate checks are usable before
-// target loading and runtime checks additionally require a successful sidecar
-// preflight.
+// MTP generation remains fixed. DFlash was screened separately and stays at
+// its fixed K4V/neural width. Candidate checks are usable before target loading
+// and runtime checks additionally require a successful sidecar preflight.
 bool common_speculative_content_stack_eligible(
         const common_params_speculative & params);
 bool common_speculative_content_candidate_eligible(

@@ -160,19 +160,13 @@ static bool server_mtp_deferred_catchup_enabled() {
 }
 
 static bool server_gfx1030_content_stacked_profile(const common_params & params) {
-    if (!server_gfx1030_sidecar_runtime_profile(params) ||
-            params.n_parallel != 1 ||
-            !params.speculative.draft.sidecar_candidate_ready ||
-            !server_spec_content_stacked_verification_profile(params.speculative) ||
-            params.speculative.has_synth()) {
-        return false;
-    }
-
-    const std::string & profile = params.speculative.draft.sidecar_profile_name;
-    if (profile == "qwen35-mtp") {
-        return server_mtp_deferred_catchup_enabled();
-    }
-    return profile == "qwen35-dflash";
+    return server_gfx1030_sidecar_runtime_profile(params) &&
+            params.n_parallel == 1 &&
+            params.speculative.draft.sidecar_candidate_ready &&
+            params.speculative.draft.sidecar_profile_name == "qwen35-mtp" &&
+            server_spec_content_stacked_verification_profile(params.speculative) &&
+            !params.speculative.has_synth() &&
+            server_mtp_deferred_catchup_enabled();
 }
 
 static bool server_gfx1030_dflash_dynamic_depth_profile(const common_params & params) {
@@ -1332,7 +1326,7 @@ private:
                 server_gfx1030_content_stacked_profile(params_base);
         if (sidecar_candidate && common_speculative_content_env_enabled() &&
                 !params_base.speculative.draft.content_verification_eligible) {
-            SRV_WRN("%s", "content stacked verification disabled: requires one K4V plus one qwen35 MTP/DFlash sidecar on the gfx1030 TP4 tensor-split, sharded-output, --parallel 1, baseline-width-4 profile; MTP also requires deferred catch-up\n");
+            SRV_WRN("%s", "content stacked verification disabled: requires one K4V plus the qwen35 MTP sidecar on the gfx1030 TP4 tensor-split, sharded-output, --parallel 1, baseline-width-4, deferred-catch-up profile; DFlash remains fixed after a negative K4V5 screen\n");
         }
         const auto output_limits = server_output_limits(params_base);
         params_base.n_outputs_max = output_limits.total;

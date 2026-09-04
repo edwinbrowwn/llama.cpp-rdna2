@@ -188,18 +188,16 @@ SPEC_SIDECAR=1 SPEC_CONTENT_BOOST=1 GGML_TP_SHARDED_OUTPUT=1 \
 ```
 
 The controller uses one scalar structural-confidence level and permits only
-`base+0` through `base+3` for K4V. Exactly one K4V map and one sidecar neural
-provider are required. MTP and DFlash generation remain fixed at the configured
-baseline (currently four); a K4V miss therefore falls back to an ordinary
-four-token neural cycle. The sixth target-verification row is added only when
-K4V actually returns a fifth proposal. Host/native draft models and stacks
-without K4V are unchanged.
+`base+0` through `base+3` for K4V. Exactly one K4V map and the dense MTP
+sidecar are required. MTP generation remains fixed at the configured baseline
+(currently four); a K4V miss therefore falls back to an ordinary four-token MTP
+cycle. The sixth target-verification row is added only when K4V actually returns
+a fifth proposal. Host/native draft models and stacks without K4V are unchanged.
 
-Runtime selection is limited to the `qwen35-mtp` or `qwen35-dflash` gfx1030 TP4
-tensor-split test envelope with vocabulary-sharded output, `--parallel 1`, and
-baseline width four. MTP additionally requires deferred catch-up and direct
-target-device rows; DFlash requires direct target-device layer rows. Other
-profiles retain the fixed anti-stutter cap.
+Runtime selection is limited to the `qwen35-mtp` gfx1030 TP4 tensor-split test
+envelope with vocabulary-sharded output, `--parallel 1`, baseline width four,
+deferred catch-up, and direct target-device rows. DFlash and other profiles
+retain the fixed anti-stutter cap.
 
 The experimental configuration uses an 8-token window, +1 maximum boost, and
 two-update upward hysteresis. The window accepts 4 through 32 tokens and
@@ -214,9 +212,13 @@ was rejected: across three 768-token C++, Python, and Rust tasks, equal-workload
 throughput fell 5.54%, and fifth-position neural acceptance did not repay the
 extra neural step plus sixth target row. This POC tests a different economic
 boundary: the neural width never changes, and the extra target row is paid only
-when K4V already has a longer continuation. It is not yet qualified; fixed
-neural/K4V width four remains selected and `SPEC_CONTENT_BOOST` must remain
-unset outside explicit experiments.
+when K4V already has a longer continuation. MTP improved on an intentionally
+repetitive K4V fixture, but the realistic prose/C++/Python/Rust set produced no
+K4V candidate longer than four. DFlash was negative even on the repetitive
+fixture (`106.052 -> 100.769 tok/s`, -4.981%) despite complete fifth-position
+acceptance, so it is explicitly excluded. The controller is not promoted;
+fixed neural/K4V width four remains selected and `SPEC_CONTENT_BOOST` must
+remain unset outside explicit experiments.
 
 The fixed classifier is conservative for the dominant workloads: mostly-prose
 xhigh thinking remains at the baseline, while sustained fenced or unfenced

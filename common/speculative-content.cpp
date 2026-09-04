@@ -272,20 +272,19 @@ bool common_speculative_content_token_attr_eligible(llama_token_attr attr) {
 bool common_speculative_content_stack_eligible(
         const common_params_speculative & params) {
     int n_mtp = 0;
-    int n_dflash = 0;
     int n_k4v = 0;
     for (common_speculative_type type : params.types) {
         switch (type) {
             case COMMON_SPECULATIVE_TYPE_DRAFT_MTP:     ++n_mtp; break;
-            case COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH:  ++n_dflash; break;
             case COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V: ++n_k4v; break;
             case COMMON_SPECULATIVE_TYPE_NONE:          break;
             default: return false;
         }
     }
     // Without K4V there is nothing to widen: content selection must never
-    // change the sole neural provider's generation width.
-    return n_mtp + n_dflash == 1 && n_k4v == 1 && params.draft.n_max == 4;
+    // change the sole neural provider's generation width. DFlash remains fixed
+    // because its matched K4V5 verification screen was negative.
+    return n_mtp == 1 && n_k4v == 1 && params.draft.n_max == 4;
 }
 
 bool common_speculative_content_candidate_eligible(
@@ -297,12 +296,9 @@ bool common_speculative_content_candidate_eligible(
 
 bool common_speculative_content_runtime_eligible(
         const common_params_speculative & params) {
-    const common_speculative_type sidecar_type = params.draft.sidecar_type;
-    const bool supported_sidecar = sidecar_type == COMMON_SPECULATIVE_TYPE_DRAFT_MTP ||
-            sidecar_type == COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH;
     return common_speculative_content_candidate_eligible(params) &&
-            params.draft.sidecar_only && supported_sidecar &&
-            std::find(params.types.begin(), params.types.end(), sidecar_type) != params.types.end();
+            params.draft.sidecar_only &&
+            params.draft.sidecar_type == COMMON_SPECULATIVE_TYPE_DRAFT_MTP;
 }
 
 bool common_speculative_content_env_enabled() {

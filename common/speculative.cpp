@@ -1724,12 +1724,6 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         return true;
     }
 
-    bool content_sidecar_ready(llama_seq_id seq_id) const override {
-        return n_seq == 1 && sidecar.active() && sidecar_input_mode_logged == 1 &&
-                seq_id >= 0 && seq_id < (llama_seq_id) sidecar_stale.size() &&
-                !sidecar_stale[(size_t) seq_id];
-    }
-
     void draft(common_speculative_draft_params_vec & dparams) override {
         if (sidecar_target_only) {
             return;

@@ -193,8 +193,8 @@ inline bool server_spec_gfx1030_dflash_dynamic_depth_profile(
     return n_dflash == 1 && n_k4v <= 1 && params.draft.n_max == 4;
 }
 
-// Content selection may widen only K4V above one fixed-width sidecar neural
-// provider. Other ngram/neural combinations retain the anti-stutter cap.
+// Content selection may widen only K4V above one fixed-width MTP sidecar.
+// DFlash and other ngram/neural combinations retain the anti-stutter cap.
 inline bool server_spec_content_stacked_verification_profile(
         const common_params_speculative & params) {
     return common_speculative_content_stack_eligible(params);

@@ -153,10 +153,10 @@ int main() {
                 make_spec({COMMON_SPECULATIVE_TYPE_DRAFT_MTP,
                            COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V}, 4)),
             "dense MTP plus K4V can select stacked verification width");
-    require(server_spec_content_stacked_verification_profile(
+    require(!server_spec_content_stacked_verification_profile(
                 make_spec({COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH,
                            COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V}, 4)),
-            "DFlash plus K4V can select stacked verification width");
+            "DFlash remains fixed after its negative K4V5 verification screen");
     require(!server_spec_content_stacked_verification_profile(
                 make_spec({COMMON_SPECULATIVE_TYPE_DRAFT_MTP,
                            COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V}, 3)),

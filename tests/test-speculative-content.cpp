@@ -223,10 +223,10 @@ static void test_sidecar_capacity_reservations() {
         COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V,
     };
     params.speculative.draft.sidecar_type = COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH;
-    require(common_speculative_content_candidate_eligible(params.speculative) &&
-            common_speculative_content_runtime_eligible(params.speculative) &&
-            common_context_params_to_llama(params).n_rs_seq == 7,
-            "qualified DFlash plus K4V gets the same target rollback envelope");
+    require(!common_speculative_content_candidate_eligible(params.speculative) &&
+            !common_speculative_content_runtime_eligible(params.speculative) &&
+            common_context_params_to_llama(params).n_rs_seq == 4,
+            "DFlash plus K4V cannot acquire the negative wider target envelope");
 
     params.speculative.types = { COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH };
     require(!common_speculative_content_candidate_eligible(params.speculative) &&
