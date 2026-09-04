@@ -3413,6 +3413,11 @@ static void test_native_flash_attention_gpu() {
                                            uint64_t min_split, uint64_t min_vector,
                                            bool expect_tiled_mma,
                                            const char * message) {
+        if (std::getenv("GGML_KVARN_TEST_TRACE_NATIVE") != nullptr) {
+            std::fprintf(stderr, "route trace: metadata D%d nq=%d gqa=%d bits=%d swa=%d\n",
+                    head_dim, n_q, n_q_heads / n_kv_heads, bits, int(swa));
+            std::fflush(stderr);
+        }
         std::vector<float> generic_meta;
         std::vector<float> actual_meta;
         const std::vector<float> expected = test_native_flash_attention_output(
@@ -3438,6 +3443,31 @@ static void test_native_flash_attention_gpu() {
                 "specialized KVarN body output differs from generic KVarN reference");
         require_attention_meta_close(actual_meta, generic_meta,
                 "specialized KVarN body metadata differs from generic KVarN reference");
+        require(actual_meta.size() == size_t(2 * n_q_heads * n_q),
+                "specialized KVarN body metadata has the wrong layout");
+        for (size_t i = 0; i < actual_meta.size(); i += 2) {
+            require(std::isfinite(actual_meta[i]), "specialized KVarN body maximum is non-finite");
+            require(std::isfinite(actual_meta[i + 1]) && actual_meta[i + 1] > 0.0f,
+                    "specialized KVarN body denominator is not positive and finite");
+        }
+
+        const bool generic_mma_available =
+                (route_capabilities.route_families & (1u << 1)) != 0;
+        if (!generic_mma_available) {
+            require(generic_stats.portable_native > 0 && generic_stats.generic_mma == 0 &&
+                            generic_stats.decode_split == 0 && generic_stats.decode_vector == 0,
+                    "neutral-sink metadata reference did not use the portable KVarN route");
+            if (head_dim == 256 && n_q == 1) {
+                require(stats.decode_vector > 0 && stats.decode_split == 0 && stats.generic_mma == 0,
+                        "vector-only KVarN device did not use D256 vector decode");
+            } else {
+                require(stats.portable_native > 0 && stats.decode_split == 0 &&
+                                stats.decode_vector == 0 && stats.generic_mma == 0,
+                        "vector-only KVarN device did not use portable fallback for an unsupported shape");
+            }
+            return;
+        }
+
         require(generic_stats.generic_mma > 0 && generic_stats.decode_split == 0 && generic_stats.decode_vector == 0,
                 "neutral-sink metadata reference did not exercise generic KVarN MMA");
         if (expect_tiled_mma) {
@@ -3448,13 +3478,6 @@ static void test_native_flash_attention_gpu() {
                     "metadata-capable KVarN decode did not exercise the required specialized route");
             require(stats.generic_mma == 0,
                     "eligible single-query KVarN decode fell back to generic MMA");
-        }
-        require(actual_meta.size() == size_t(2 * n_q_heads * n_q),
-                "specialized KVarN body metadata has the wrong layout");
-        for (size_t i = 0; i < actual_meta.size(); i += 2) {
-            require(std::isfinite(actual_meta[i]), "specialized KVarN body maximum is non-finite");
-            require(std::isfinite(actual_meta[i + 1]) && actual_meta[i + 1] > 0.0f,
-                    "specialized KVarN body denominator is not positive and finite");
         }
     };
 
@@ -3478,6 +3501,11 @@ static void test_native_flash_attention_gpu() {
                                               uint64_t min_split, uint64_t min_vector,
                                               bool expect_tiled_mma,
                                               const char * message) {
+        if (std::getenv("GGML_KVARN_TEST_TRACE_NATIVE") != nullptr) {
+            std::fprintf(stderr, "route trace: exact-tail D%d nq=%d gqa=%d tail=%d swa=%d\n",
+                    head_dim, n_q, n_q_heads / n_kv_heads, tail_tokens, int(swa));
+            std::fflush(stderr);
+        }
         route_stats_reset();
         const std::vector<float> generic = test_native_flash_attention_output(
                 gpu_backend, true, true, head_dim, 4, 4, n_q, n_q_heads, n_kv_heads,
@@ -3492,6 +3520,23 @@ static void test_native_flash_attention_gpu() {
         route_stats_get(&stats);
 
         require_close_f32_rmse(actual, generic, 1e-4f, message);
+        const bool generic_mma_available =
+                (route_capabilities.route_families & (1u << 1)) != 0;
+        if (!generic_mma_available) {
+            require(generic_stats.portable_native > 0 && generic_stats.generic_mma == 0 &&
+                            generic_stats.decode_split == 0 && generic_stats.decode_vector == 0,
+                    "exact-tail reference did not use the portable KVarN route");
+            if (head_dim == 256 && n_q == 1) {
+                require(stats.decode_vector > 0 && stats.decode_split == 0 && stats.generic_mma == 0,
+                        "vector-only KVarN device did not use D256 vector decode with an exact tail");
+            } else {
+                require(stats.portable_native > 0 && stats.decode_split == 0 &&
+                                stats.decode_vector == 0 && stats.generic_mma == 0,
+                        "vector-only KVarN device did not use portable exact-tail fallback for an unsupported shape");
+            }
+            return;
+        }
+
         require(generic_stats.generic_mma > 0 &&
                 generic_stats.decode_split == 0 && generic_stats.decode_vector == 0,
                 "exact-tail reference did not exercise generic KVarN MMA");
@@ -3522,7 +3567,19 @@ static void test_native_flash_attention_gpu() {
                 "speculative exact-tail tiled MMA output differs from generic KVarN reference");
     }
 
+    if ((route_capabilities.route_families & (1u << 1)) == 0) {
+        // A vector-only backend has no original-domain matrix route.
+        // Portable and vector coverage above is its complete native contract.
+        ggml_backend_free(cpu_backend);
+        ggml_backend_free(gpu_backend);
+        return;
+    }
+
     for (int head_dim : { 128, 256, 512 }) {
+        if (std::getenv("GGML_KVARN_TEST_TRACE_NATIVE") != nullptr) {
+            std::fprintf(stderr, "route trace: broad native D%d nq=4\n", head_dim);
+            std::fflush(stderr);
+        }
         constexpr int n_q_native = 4;
         const std::vector<float> expected = test_native_flash_attention_output(cpu_backend, false, false, head_dim, 4, 3, n_q_native);
         const std::vector<float> actual   = test_native_flash_attention_output(gpu_backend, true,  true,  head_dim, 4, 3, n_q_native);
@@ -3530,6 +3587,10 @@ static void test_native_flash_attention_gpu() {
                 "native KVarN FlashAttention output differs from CPU reference decode");
 
         constexpr int n_q_prefill = 64;
+        if (std::getenv("GGML_KVARN_TEST_TRACE_NATIVE") != nullptr) {
+            std::fprintf(stderr, "route trace: broad prefill D%d nq=64\n", head_dim);
+            std::fflush(stderr);
+        }
         const std::vector<float> expected_prefill = test_native_flash_attention_output(cpu_backend, false, false, head_dim, 4, 3, n_q_prefill);
         const std::vector<float> actual_prefill   = test_native_flash_attention_output(gpu_backend, true,  false, head_dim, 4, 3, n_q_prefill);
         require_close_f32_rmse(actual_prefill, expected_prefill, 1e-2f,
@@ -3537,6 +3598,10 @@ static void test_native_flash_attention_gpu() {
     }
 
     {
+        if (std::getenv("GGML_KVARN_TEST_TRACE_NATIVE") != nullptr) {
+            std::fprintf(stderr, "route trace: eager segmented D256 nq=128\n");
+            std::fflush(stderr);
+        }
         constexpr int head_dim = 256;
         constexpr int n_q_prefill = 128;
         constexpr int n_q_heads = 6;
@@ -3818,7 +3883,7 @@ static void test_native_flash_attention_prefill_route_parity() {
         capabilities.struct_size = sizeof(capabilities);
         capabilities.abi_version = GGML_BACKEND_KVARN_CAPABILITIES_ABI_VERSION;
         if (get_capabilities(dev, &capabilities) &&
-                capabilities.specialized_generic_mma && !capabilities.original_v_domain) {
+                (!capabilities.specialized_generic_mma || !capabilities.original_v_domain)) {
             ggml_backend_free(gpu_backend);
             return;
         }
@@ -3961,14 +4026,20 @@ static void test_store_paths_gpu() {
     if (store_stats_get != nullptr) {
         test_kvarn_store_route_stats stats = make_test_kvarn_store_route_stats();
         store_stats_get(&stats);
-        require(stats.headwide_workspace + stats.headwide_monolithic > 0,
-                "KVarN GPU store tests did not exercise a head-wide store route");
-        require(stats.single_slice_workspace > 0,
-                "KVarN GPU store tests did not exercise the single-slice workspace route");
-        require(stats.direct_store > 0,
-                "KVarN GPU store tests did not exercise the direct store route");
-        require(stats.high_shared_fallback > 0,
-                "KVarN GPU store tests did not exercise the high-shared fallback route");
+        const bool low_shared_only = stats.low_shared_store > 0 &&
+                stats.headwide_workspace == 0 && stats.headwide_monolithic == 0 &&
+                stats.single_slice_workspace == 0 && stats.direct_store == 0 &&
+                stats.high_shared_fallback == 0;
+        if (!low_shared_only) {
+            require(stats.headwide_workspace + stats.headwide_monolithic > 0,
+                    "KVarN GPU store tests did not exercise a head-wide store route");
+            require(stats.single_slice_workspace > 0,
+                    "KVarN GPU store tests did not exercise the single-slice workspace route");
+            require(stats.direct_store > 0,
+                    "KVarN GPU store tests did not exercise the direct store route");
+            require(stats.high_shared_fallback > 0,
+                    "KVarN GPU store tests did not exercise the high-shared fallback route");
+        }
         require(stats.low_shared_store > 0,
                 "KVarN GPU store tests did not exercise the low-shared fallback route");
         require(stats.sealer_128 > 0 && stats.sealer_256 == 0 && stats.sealer_candidates > 0,

@@ -565,7 +565,9 @@ static __global__ void ggml_cuda_fattn_kvarn_decode_combine_kernel(
 
     const size_t output_row = ((size_t) stream * n_q + q_index) * n_q_heads + q_head;
     if (tid == 0 && dst_meta != nullptr) {
-        dst_meta[output_row] = make_float2(m, denom);
+        dst_meta[output_row] = make_float2(
+                m - FATTN_KQ_MAX_OFFSET,
+                denom * expf(FATTN_KQ_MAX_OFFSET));
     }
 
     for (int dim = tid; dim < D; dim += blockDim.x) {
