@@ -941,6 +941,8 @@ static void check_qwen4exp_sequence_ops(
     if (expected_fresh != actual_fresh) {
         throw std::runtime_error("Qwen4Exp sequence keep left removed state behind");
     }
+}
+
 static bool mtp_sync_test_decode(llama_model * model, uint32_t n_ubatch) {
     const int32_t n_tokens = 4;
     const int32_t n_embd   = llama_model_n_embd_out(model);
