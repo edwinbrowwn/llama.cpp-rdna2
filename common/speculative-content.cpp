@@ -403,7 +403,7 @@ void common_speculative_content::begin(
     if (current == nullptr) {
         return;
     }
-    *current = {};
+    *current = common_speculative_content_state{};
     if (seq_id < request_stats_.size()) {
         request_stats_[seq_id] = {};
     }
@@ -500,7 +500,7 @@ uint8_t common_speculative_content::prepare(
     }
 
     const uint8_t previous_level = current->current_level;
-    *current = {};
+    *current = common_speculative_content_state{};
     current->current_level = (spec_content_boost_level)
             std::min(previous_level, (uint8_t) config_.max_boost);
     current->candidate_level = current->current_level;
@@ -692,7 +692,7 @@ void common_speculative_content::extend_window(
     }
 
     const uint8_t previous_level = current.current_level;
-    current = {};
+    current = common_speculative_content_state{};
     current.current_level = (spec_content_boost_level)
             std::min(previous_level, (uint8_t) config_.max_boost);
     current.candidate_level = current.current_level;
@@ -870,7 +870,7 @@ void common_speculative_content::accept(
 
 void common_speculative_content::reset(uint32_t seq_id) {
     if (auto * current = state(seq_id)) {
-        *current = {};
+        *current = common_speculative_content_state{};
     }
     if (seq_id < fence_prompt_open_.size()) {
         fence_prompt_open_[seq_id] = 0;
