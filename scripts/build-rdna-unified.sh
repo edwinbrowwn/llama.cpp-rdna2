@@ -143,3 +143,6 @@ grep -Eq "^CMAKE_HIP_ARCHITECTURES:[^=]*=$TARGET_ARCH$" "$BUILD_DIR/CMakeCache.t
 } > "$BUILD_DIR/rdna-build-manifest.txt"
 
 printf 'Build complete: %s\nManifest: %s\n' "$SERVER" "$BUILD_DIR/rdna-build-manifest.txt"
+if [[ $BUILD_SIDECARS == ON ]]; then
+    printf '%s\n' 'With SPEC_SIDECAR=1, supported target and -md GGUFs automatically create and repair model-keyed provider assets.'
+fi

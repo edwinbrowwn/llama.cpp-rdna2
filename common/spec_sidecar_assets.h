@@ -7,6 +7,12 @@
 #include <string>
 #include <vector>
 
+// Validate the exact model-specific manifest schema used by a provider.
+bool common_spec_sidecar_validate_artifact_schema(
+        const common_spec_sidecar_profile & profile,
+        const common_spec_sidecar_paths & paths,
+        std::string & error);
+
 // Generates model-derived sidecar artifacts without Python or external tools.
 // The caller must still provide a provider library built with llama-server.
 // Artifacts are committed atomically and reused when their source/cache key

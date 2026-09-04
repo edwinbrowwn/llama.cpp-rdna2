@@ -366,7 +366,7 @@ Use exactly one of these options:
 
 ```
 --spec-draft-model, -md, --model-draft  FNAME
-                                        draft model for speculative decoding (default: unused)
+                                        draft model; SPEC_SIDECAR=1 automatically prepares supported DFlash/Qwen4Exp provider assets (default: unused)
                                         (env: LLAMA_ARG_SPEC_DRAFT_MODEL)
 --spec-draft-hf, -hfd, -hfrd, --hf-repo-draft  <user>/<model>[:quant]
                                         HuggingFace repository for the draft model

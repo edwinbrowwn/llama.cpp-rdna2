@@ -1,4 +1,5 @@
 #include "spec_sidecar.h"
+#include "spec_sidecar_assets.h"
 #include "ggml.h"
 #include "gguf.h"
 #include "llama.h"
@@ -741,7 +742,8 @@ bool common_spec_sidecar_get_paths(const common_spec_sidecar_profile & profile,
 
 bool common_spec_sidecar_validate_artifacts(const common_spec_sidecar_profile & profile,
         const common_spec_sidecar_paths & paths, std::string & error) {
-    return validate_profile_artifacts_impl(profile, paths, error);
+    return validate_profile_artifacts_impl(profile, paths, error) &&
+            common_spec_sidecar_validate_artifact_schema(profile, paths, error);
 }
 
 bool common_spec_sidecar_probe(const common_spec_sidecar_profile & profile,
