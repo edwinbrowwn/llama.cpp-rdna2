@@ -12,52 +12,51 @@ and support both keyed stochastic and greedy text inference. The host treats
 them as stateful speculative implementations rather than stateless token
 generators.
 
-## Prepare the 27B artifacts
+## Automatic provider assets
 
-The preparation tools require `gguf-py` from this checkout and NumPy:
+On Linux, normal sidecar launches prepare provider assets automatically. Users do not need Python, a manual conversion command, provider path variables, or a separately prepared bundle.
+
+Dense MTP needs only its target GGUF:
+
+```sh
+SPEC_SIDECAR=1 ./build/bin/llama-server \
+  -m /models/Qwen3.8-27B-Q4_0.gguf [...]
+```
+
+DFlash and Qwen4Exp use the normal `-md` draft-model argument. When no explicit speculative type is supplied, the draft GGUF metadata selects the matching sidecar type automatically:
+
+```sh
+SPEC_SIDECAR=1 ./build/bin/llama-server \
+  -m /models/Qwen3.8-27B-Q4_0.gguf \
+  -md /models/Qwen3.8-27B-DFlash2-Q4_0.gguf [...]
+```
+
+The first launch validates the target and draft, converts only the required tensors, writes a model-keyed bundle under the normal llama.cpp cache, validates the exact provider schema, and atomically commits it. Later launches reuse that bundle. Incomplete, truncated, or schema-invalid automatic entries are rebuilt under a process lock. Source GGUFs are never modified. `--spec-sidecar-cache DIR` or `LLAMA_ARG_SPEC_SIDECAR_CACHE` changes the cache root but is not required.
+
+The dense Qwen3.8 and Qwen3.6 MoE MTP profiles convert compatible target tensors to their fixed provider schemas. Qwen4Exp converts its `-md` GGUF and creates a full identity vocabulary map. DFlash accepts the exact 81-tensor model geometry from canonical Q4_K_M as well as Q4_0, Q8_0, F16, and BF16 sources, then writes the fixed F32/Q4_K/Q6_K runtime schema. DFlash does not use INT5; that format was an unretained experiment.
+
+The bundled draft-vocabulary map is integrity checked. Optional explicit ID and provider paths remain expert overrides, not normal setup requirements. Automatic preparation fails closed with a specific warning for unsupported model identities, shapes, tensor encodings, missing `-md`, unwritable caches, or missing provider libraries.
+
+### Manual/offline preparation (optional)
+
+The Python tools remain available for inspecting or preparing an explicit offline bundle. They require `gguf-py` from this checkout and NumPy:
 
 ```sh
 python3 -m pip install -e ./gguf-py
-```
-
-Obtain the 40,960-ID draft vocabulary from the matching, licensed source and
-keep it outside the source tree. Then prepare the artifacts from a compatible
-Qwen3.8-27B Q4_0 target and the matching DFlash2 Q4_K_M draft:
-
-```sh
-python3 tools/spec-sidecar/prepare_assets.py mtp \
-  --target /absolute/models/Qwen3.8-27B-Q4_0.gguf \
-  --ids /absolute/artifacts/draft_vocab_ids.json \
-  --output /absolute/artifacts/spec-sidecar-mtp
-
 python3 tools/spec-sidecar/prepare_assets.py dflash \
-  --target /absolute/models/Qwen3.8-27B-Q4_0.gguf \
-  --draft /absolute/models/Qwen3.8-27B-DFlash2-Q4_K_M.gguf \
-  --ids /absolute/artifacts/draft_vocab_ids.json \
-  --output /absolute/artifacts/spec-sidecar-dflash
-
-python3 tools/spec-sidecar/validate_assets.py mtp /absolute/artifacts/spec-sidecar-mtp
-python3 tools/spec-sidecar/validate_assets.py dflash /absolute/artifacts/spec-sidecar-dflash
+  --target /models/Qwen3.8-27B-Q4_0.gguf \
+  --draft /models/Qwen3.8-27B-DFlash2-Q4_K_M.gguf \
+  --output /artifacts/spec-sidecar-dflash
+python3 tools/spec-sidecar/validate_assets.py dflash /artifacts/spec-sidecar-dflash
 ```
 
-The target must have Q4_0 token embeddings, a Q6_K output head, vocabulary
-size 248,320, and one MTP block at index 64. The DFlash artifacts must provide
-the 81-tensor Qwen3.8-27B DFlash2 schema. Do not mix an ID table, sliced head, and
-weights from different preparation runs. The generated MTP `*-spec-sidecar.gguf`
-is retained as a prepared derivative, but the sidecar-only path uses the target
-for hidden-state extraction and does not create a native MTP draft context. It
-uses the original full-vocabulary target because sliced native MTP-head loading is
-not enabled in this integration yet.
+Do not mix an ID table, head, manifest, or weights from different preparation runs.
 
-## Prepare the Qwen3.6 35B-A3B MoE artifacts
+## Qwen3.6 35B-A3B MoE MTP
 
-`qwen35moe-mtp` is a separate compatibility provider for the Qwen3.6/Qwen3.5
-MoE model identified by GGUF as `qwen35moe` (`35B-A3B`). It cannot reuse the
-dense Qwen3.8-27B provider: the MoE target has a 2,048-wide hidden state, 40
-trunk blocks plus one MTP block, 16/2 attention heads, and an 8-of-256 expert
-MTP FFN. The preparation step converts the trained MTP block and output head to
-the provider's Q4_0/F32 artifact layout and uses the validated 40,960-row draft
-vocabulary ID table:
+`qwen35moe-mtp` is a separate compatibility provider for the Qwen3.6/Qwen3.5 MoE model identified by GGUF as `qwen35moe` (`35B-A3B`). It cannot reuse the dense Qwen3.8-27B provider: the MoE target has a 2,048-wide hidden state, 40 trunk blocks plus one MTP block, 16/2 attention heads, and an 8-of-256 expert MTP FFN.
+
+With exact `SPEC_SIDECAR=1`, a matching target automatically selects the bundled provider, converts the trained MTP block and output head to the Q4_0/F32 cache schema, and uses the built-in integrity-checked 40,960-row ID map. The following Python command is only for an explicit offline bundle:
 
 ```sh
 python3 tools/spec-sidecar/prepare_assets.py qwen35moe-mtp \
@@ -69,18 +68,7 @@ python3 tools/spec-sidecar/validate_assets.py qwen35moe-mtp \
   /absolute/artifacts/spec-sidecar-qwen35moe-mtp
 ```
 
-The MoE sidecar is currently an **explicit-path experimental compatibility
-provider**. It is not selected merely because its DLL is beside
-`llama-server`; this prevents an unqualified provider from replacing native
-MTP. Set both variables below when deliberately testing it. Without them,
-Qwen3.6 35B-A3B retains native MTP loading:
-
-```sh
-export SPEC_SIDECAR=1
-export LLAMA_SPEC_QWEN35MOE_HIP_SIDECAR=/absolute/build/bin/spec_qwen35moe_mtp_sidecar.so
-export LLAMA_SPEC_QWEN35MOE_HIP_WEIGHTS=/absolute/artifacts/spec-sidecar-qwen35moe-mtp
-# The ID path defaults to $LLAMA_SPEC_QWEN35MOE_HIP_WEIGHTS/draft_head_ids.bin.
-```
+The `LLAMA_SPEC_QWEN35MOE_*` paths remain optional overrides for explicit bundles.
 
 On gfx1030 the provider uses rocPRIM for the 40,960-row stochastic top-k,
 cooperatively sorts/remaps its 32 candidates, and routes the 8-of-256 MoE in a
@@ -89,28 +77,24 @@ cooperatively sorts/remaps its 32 candidates, and routes the 8-of-256 MoE in a
 `LLAMA_SPEC_QWEN35MOE_PARALLEL_ROUTER=0`. Batched prompt catch-up can be
 reverted with `LLAMA_SPEC_QWEN35MOE_BATCHED_CATCHUP=0`.
 
-The provider remains explicit-path because profitability depends on the
-request shape. On the validated four-gfx1030 layer-split model, 256-token
+Automatic activation still requires workload qualification because profitability depends on the request shape. On the validated four-gfx1030 layer-split model, 256-token
 code/prose/JSON runs improved 28.6–40.3% over native MTP. A 6,336-token prompt
 with only 128 output tokens remained slower end to end because reconstructing
 the sidecar's MTP KV is less efficient than the native large-batch graph.
 Qualify acceptance and prompt/output balance on the exact deployment workload;
 do not reuse the Qwen3.8-27B tensor-split launch policy for this MoE model.
 
-## Prepare the Flash Next artifacts
+## Flash Next MTP
 
-Flash Next uses its own provider and cannot reuse the 27B bundle. Prepare it
-from the matching base target and Qwen4Exp MTP GGUF:
+Flash Next uses its own provider and cannot reuse the 27B bundle. Supply the matching base target and Qwen4Exp MTP GGUF with `-md`; automatic preparation converts its 34 tensors and writes the required full 248,320-row identity map:
 
 ```sh
-python3 tools/spec-sidecar/prepare_assets.py qwen4exp-mtp \
-  --target /models/Qwen3.8-Flash-Next-00001-of-00004.gguf \
-  --draft /models/Qwen3.8-Flash-Next-MTP-Q4_0.gguf \
-  --output /artifacts/spec-sidecar-qwen4exp-mtp
+SPEC_SIDECAR=1 ./build/bin/llama-server \
+  -m /models/Qwen3.8-Flash-Next-00001-of-00004.gguf \
+  -md /models/Qwen3.8-Flash-Next-MTP-Q4_0.gguf [...]
 ```
 
-The profile requires `qwen4exp`, width 2,560 with a 10,240-wide target handoff,
-48 target blocks, 512 experts, and vocabulary 248,320.
+The profile requires `qwen4exp`, width 2,560 with a 10,240-wide target handoff, 48 target blocks, 512 experts, and vocabulary 248,320.
 
 ## Build
 
@@ -140,15 +124,7 @@ When `LLAMA_BUILD_SPEC_SIDECARS=ON`, `llama-server` depends on the complete
 registered provider set. A targeted server build therefore produces
 `spec_hip_sidecar.so`, `spec_dflash_sidecar.so`,
 `spec_qwen35moe_mtp_sidecar.so`, and `spec_qwen4exp_mtp_sidecar.so` in the
-build `bin` directory; providers do not need to be named manually. For automatic
-runtime discovery of the qualified providers, put the prepared bundles at
-`bin/spec-sidecar-mtp` and `bin/spec-sidecar-dflash` beside those libraries (or
-under the documented installed `share/llama.cpp/spec-sidecar` layout). Flash
-Next uses `spec-sidecar-qwen4exp-mtp` or its dedicated explicit path variables.
-The Qwen35MoE bundle is intentionally explicit-path only until its end-to-end speed
-and acceptance matrix is complete. These targets are optional because each
-provider contains fixed model dimensions and is not a replacement for the
-normal HIP backend.
+build `bin` directory; providers do not need to be named manually. At runtime, the server discovers the matching library beside the executable or in the installed `lib` directory and creates model-derived assets in its cache. Prebuilt directories under `bin/spec-sidecar-*` or installed `share/llama.cpp/spec-sidecar` paths remain optional overrides. These targets are optional because each provider contains fixed model dimensions and is not a replacement for the normal HIP backend.
 
 ## Run MTP
 
@@ -171,14 +147,12 @@ export GGML_TP_SHARDED_OUTPUT=1
 
 ## Run Flash Next MTP
 
-Install the matching bundle as `bin/spec-sidecar-qwen4exp-mtp`, or set
-`LLAMA_SPEC_QWEN4EXP_HIP_SIDECAR`, `LLAMA_SPEC_QWEN4EXP_HIP_WEIGHTS`, and
-`LLAMA_QWEN4EXP_DRAFT_HEAD_IDS` explicitly. No `-md` model is used by this
-sidecar path.
+Supply the matching Qwen4Exp MTP model with `-md`; the provider, assets, and full identity ID map are discovered or prepared automatically.
 
 ```sh
 SPEC_SIDECAR=1 ./build/bin/llama-server \
   -m /models/Qwen3.8-Flash-Next-00001-of-00004.gguf \
+  -md /models/Qwen3.8-Flash-Next-MTP-Q4_0.gguf \
   --spec-type draft-mtp,ngram-map-k4v --spec-draft-n-max 3 \
   --batch-size 128 --ubatch-size 128 --spec-draft-ubatch-size 128 \
   --parallel 1 --ctx-checkpoints 0
@@ -190,17 +164,14 @@ contexts safely fall back after that boundary.
 
 ## Run DFlash2
 
-When the DFlash sidecar probe succeeds, no DFlash GGUF model or draft context
-is loaded by the host; the sidecar loads all prepared controller artifacts.
-The matching GGUF may still be supplied when native fallback is desired, but it
-is not needed for the sidecar-only path:
+Pass the DFlash GGUF with `-md`. Its metadata selects DFlash and the server automatically prepares the provider cache. After the sidecar probe succeeds, the host does not load a native DFlash model or draft context:
 
 ```sh
 export SPEC_SIDECAR=1
 
 ./build-spec-sidecar/bin/llama-server \
   -m /absolute/models/Qwen3.8-27B-Q4_0.gguf \
-  --spec-type draft-dflash \
+  -md /absolute/models/Qwen3.8-27B-DFlash2-Q4_0.gguf \
   --spec-draft-n-max 7 --spec-draft-p-min 0 \
   -np 1 --no-context-shift \
   --ctx-checkpoints 0 --cache-ram 0 --no-cache-idle-slots
@@ -244,7 +215,8 @@ never be read by a later draft. Set
   decodes materialize each ubatch in stream order before its graph storage is
   reused. Otherwise the sidecar uses the synchronized host-copy path.
   `LLAMA_SPEC_HIP_DFLASH_DEVICE_INPUT=0` is a diagnostic rollback to force the
-  synchronized DFlash host-input path.
+  synchronized DFlash host-input path; it does not alter DFlash's fixed draft
+  width.
 - The ABI exposes sequence-scoped `state_size`, `get_state`, `set_state`,
   `reset_state`, `truncate_state`, `commit_state`, and `rebase_state` for both
   sidecars. Snapshots contain only a position cursor plus an epoch; the large
@@ -256,12 +228,9 @@ never be read by a later draft. Set
   context; growth recaptures the per-sequence graph once, and
   reset releases grown storage.
 - Qwen3.8-27B sidecar KV capacity follows the effective per-sequence target
-  context and is allocated on demand. Before each dense-MTP draft, capacity is
-  reserved through `n_past + n_draft`, including speculative lookahead across
-  16K/32K geometric allocation boundaries. `LLAMA_SPEC_HIP_MAX_POS=N` may
-  impose a lower position cap to reduce VRAM use; it cannot raise capacity
-  above the target context and does not change the fixed F16 sidecar KV
-  datatype.
+  context and is allocated on demand. `LLAMA_SPEC_HIP_MAX_POS=N` may impose a lower position
+  cap to reduce VRAM use; it cannot raise capacity above the target context and
+  does not change the fixed F16 sidecar KV datatype.
 - Prompt and ordinary target rows are implicitly committed; target
   verification stages rows and acceptance commits only the accepted prefix.
   Checkpoint rollback discards pending rows and restores the cursor, slot reset
@@ -270,13 +239,19 @@ never be read by a later draft. Set
   state.
 - N-gram and other speculative implementations may remain stacked with MTP
   or DFlash. A sidecar stages/commits target rows even when another
-  implementation wins, so it can take over on a later round. Proposal
-  distributions are implementation-owned: deterministic n-gram cycles cannot
-  inherit neural q rows, and a partial distribution discards that proposal
-  instead of silently changing verification semantics. After context shrink,
-  K4V rebuilds its map while preserving the selected per-cycle cap. Checkpoint
-  replay advances model/sidecar state with every committed row but excludes the
-  replayed target replacement from n-gram adaptation and acceptance statistics.
+  implementation wins, so it can take over on a later round. The gfx1030
+  anti-stutter policy normally caps K4V at the configured neural width. Under
+  exact `SPEC_SIDECAR=1`, the qualified dense-MTP+K4V profile automatically
+  enables content-aware stacked verification: only the K4V cap may rise through
+  MTP width plus the selected boost, while MTP generation remains fixed. Set
+  `SPEC_CONTENT_BOOST=0` to retain the prior fixed cap. A
+  K4V miss therefore incurs no classifier pass, wider neural draft, or wider
+  target pass. Only a K4V candidate longer than the MTP baseline invokes the
+  classifier; an emitted longer hit still receives all `N + 1`
+  target-verification rows. DFlash retains the baseline selected by
+  `--spec-draft-n-max` (not a hard-coded width four) because adding a content
+  boost in a matched K4V5 screen was slower even with complete fifth-position
+  acceptance.
 - Prompt-cache and external slot-file restore do not persist the sidecar's
   device KV contents. If a restored target state does not receive a complete
   contiguous sidecar prefill, the sidecar rejects the gap and the host uses

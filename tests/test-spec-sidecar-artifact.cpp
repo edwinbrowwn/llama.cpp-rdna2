@@ -49,6 +49,77 @@ static void unset_environment(const char * name) {
 #endif
 }
 
+static int test_auto_prepare_fixture() {
+    const char * target = std::getenv("LLAMA_TEST_AUTO_SIDECAR_TARGET");
+    if (target == nullptr) {
+        return 0;
+    }
+    const char * kind_value = std::getenv("LLAMA_TEST_AUTO_SIDECAR_KIND");
+    const char * draft = std::getenv("LLAMA_TEST_AUTO_SIDECAR_DRAFT");
+    const char * cache = std::getenv("LLAMA_TEST_AUTO_SIDECAR_CACHE");
+    if (kind_value == nullptr || cache == nullptr) {
+        std::fprintf(stderr, "FAILED: automatic fixture requires kind and cache\n");
+        return 1;
+    }
+    common_spec_sidecar_kind kind;
+    if (std::strcmp(kind_value, "mtp") == 0) {
+        kind = COMMON_SPEC_SIDECAR_KIND_MTP;
+    } else if (std::strcmp(kind_value, "dflash") == 0) {
+        kind = COMMON_SPEC_SIDECAR_KIND_DFLASH;
+    } else {
+        std::fprintf(stderr, "FAILED: unknown automatic fixture kind: %s\n", kind_value);
+        return 1;
+    }
+
+    std::string error;
+    const auto * profile = common_spec_sidecar_profile_for_target_file(kind, target, error);
+    if (profile == nullptr) {
+        std::fprintf(stderr, "FAILED: automatic fixture profile: %s\n", error.c_str());
+        return 1;
+    }
+    common_spec_sidecar_paths paths;
+    bool cache_hit = false;
+    if (!common_spec_sidecar_prepare_artifacts(*profile, target,
+            draft != nullptr ? draft : "", cache, paths, cache_hit, error) ||
+            !common_spec_sidecar_validate_artifacts(*profile, paths, error)) {
+        std::fprintf(stderr, "FAILED: automatic fixture preparation: %s\n", error.c_str());
+        return 1;
+    }
+
+    common_spec_sidecar_paths cached_paths;
+    bool second_cache_hit = false;
+    if (!common_spec_sidecar_prepare_artifacts(*profile, target,
+            draft != nullptr ? draft : "", cache, cached_paths, second_cache_hit, error) ||
+            !second_cache_hit || cached_paths.artifact_dir != paths.artifact_dir) {
+        std::fprintf(stderr, "FAILED: automatic fixture cache reuse: %s\n", error.c_str());
+        return 1;
+    }
+    set_environment("SPEC_SIDECAR", "1");
+    common_params_speculative automatic;
+    automatic.sidecar_cache = cache;
+    if (draft != nullptr) {
+        automatic.draft.mparams.path = draft;
+    }
+    const bool candidate = common_speculative_sidecar_candidate(automatic, target, 1);
+    unset_environment("SPEC_SIDECAR");
+    const common_speculative_type expected = kind == COMMON_SPEC_SIDECAR_KIND_DFLASH
+            ? COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH : COMMON_SPECULATIVE_TYPE_DRAFT_MTP;
+    if (!candidate || automatic.types != std::vector<common_speculative_type>{expected} ||
+            !automatic.draft.sidecar_candidate_ready ||
+            automatic.draft.sidecar_artifact_dir.empty()) {
+        std::fprintf(stderr, "FAILED: automatic fixture -md/type discovery: candidate=%d types=%zu ready=%d path='%s' expected='%s' error='%s'\n",
+                candidate ? 1 : 0, automatic.types.size(),
+                automatic.draft.sidecar_candidate_ready ? 1 : 0,
+                automatic.draft.sidecar_artifact_dir.c_str(), paths.artifact_dir.c_str(),
+                automatic.draft.sidecar_prepare_error.c_str());
+        return 1;
+    }
+
+    std::printf("automatic_fixture_test: PASS profile=%s initial_cache_hit=%d path=%s\n",
+            profile->name, cache_hit ? 1 : 0, paths.artifact_dir.c_str());
+    return 0;
+}
+
 int main(int argc, char ** argv) {
     int failures = 0;
 
@@ -369,6 +440,7 @@ int main(int argc, char ** argv) {
                         error.find("context must be positive") != std::string::npos,
                         "DFlash loader rejects a non-positive target context");
 
+    failures += test_auto_prepare_fixture();
     if (failures == 0) std::puts("artifact_manifest_test: PASS");
     return failures == 0 ? 0 : 1;
 }

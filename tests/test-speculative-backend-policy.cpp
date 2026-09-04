@@ -146,6 +146,55 @@ int main() {
                 make_spec({COMMON_SPECULATIVE_TYPE_DRAFT_MTP}, 4)),
             "MTP does not select DFlash depth schedule");
 
+    require(!server_spec_content_stacked_verification_profile(
+                make_spec({COMMON_SPECULATIVE_TYPE_DRAFT_MTP}, 4)),
+            "neural-only MTP cannot select content generation width");
+    require(server_spec_content_stacked_verification_profile(
+                make_spec({COMMON_SPECULATIVE_TYPE_DRAFT_MTP,
+                           COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V}, 4)),
+            "dense MTP plus K4V can select stacked verification width");
+    require(!server_spec_content_stacked_verification_profile(
+                make_spec({COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH,
+                           COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V}, 4)),
+            "DFlash remains fixed after its negative K4V5 verification screen");
+    require(!server_spec_content_stacked_verification_profile(
+                make_spec({COMMON_SPECULATIVE_TYPE_DRAFT_MTP,
+                           COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V}, 3)),
+            "unqualified baseline width stays fixed");
+    require(!server_spec_content_stacked_verification_profile(
+                make_spec({COMMON_SPECULATIVE_TYPE_DRAFT_MTP,
+                           COMMON_SPECULATIVE_TYPE_NGRAM_MOD}, 4)),
+            "unqualified ngram composition stays fixed");
+    require(!server_spec_content_stacked_verification_profile(
+                make_spec({COMMON_SPECULATIVE_TYPE_DRAFT_MTP,
+                           COMMON_SPECULATIVE_TYPE_DRAFT_MTP,
+                           COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V}, 4)),
+            "duplicate neural providers cannot select stacked verification");
+    require(!server_spec_content_stacked_verification_profile(
+                make_spec({COMMON_SPECULATIVE_TYPE_DRAFT_MTP,
+                           COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V,
+                           COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V}, 4)),
+            "duplicate K4V providers cannot select stacked verification");
+
+    require(server_spec_mtp_deferred_setting_enabled(nullptr) &&
+            server_spec_mtp_deferred_setting_enabled("auto") &&
+            server_spec_mtp_deferred_setting_enabled("1"),
+            "qualified deferred MTP settings enable content composition");
+    require(!server_spec_mtp_deferred_setting_enabled("0") &&
+            !server_spec_mtp_deferred_setting_enabled("off") &&
+            !server_spec_mtp_deferred_setting_enabled("on") &&
+            !server_spec_mtp_deferred_setting_enabled("invalid"),
+            "non-operative deferred MTP settings fail content composition closed");
+
+    require(server_spec_auto_backend_width_eligible(-1, false, -1, 4),
+            "omitted request width preserves automatic backend sampling");
+    require(server_spec_auto_backend_width_eligible(7, false, 4, 4),
+            "internal base-plus-boost cap preserves automatic backend sampling");
+    require(server_spec_auto_backend_width_eligible(4, true, 4, 4),
+            "explicit baseline width remains eligible");
+    require(!server_spec_auto_backend_width_eligible(7, true, 4, 4),
+            "explicit non-baseline width remains ineligible");
+
     auto dflash_k4v = make_spec({
         COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH,
         COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V,
@@ -221,11 +270,6 @@ int main() {
     extended_stack.ngram_map_k4v.size_m = 48;
     require(server_spec_gfx1030_neural_k4v_cycle_cap(extended_stack) == -1,
             "unqualified extended stack is unchanged");
-
-    require(server_spec_accepted_draft_count(4, false) == 4 &&
-            server_spec_accepted_draft_count(4, true) == 3 &&
-            server_spec_accepted_draft_count(0, true) == 0,
-            "checkpoint replay is excluded only from true draft acceptance");
 
     return 0;
 }

@@ -274,8 +274,7 @@ echo "For V620 runtime optimizations set HSA_OVERRIDE_GFX_VERSION=10.3.0 before 
 case "$BUILD_SPEC_SIDECARS" in
     ON|1|TRUE|on|true)
         echo "Speculative sidecars built (dormant unless SPEC_SIDECAR=1 at runtime)."
-        echo "For automatic discovery, place prepared bundles at:"
-        echo "  $BUILD_DIR/bin/spec-sidecar-mtp and $BUILD_DIR/bin/spec-sidecar-dflash"
+        echo "Supported target and -md GGUFs automatically create and repair model-keyed provider assets on first launch."
         echo "See docs/spec-sidecars.md. Disable at build time with BUILD_SPEC_SIDECARS=OFF."
         ;;
 esac

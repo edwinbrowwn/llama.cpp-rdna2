@@ -97,6 +97,12 @@ struct common_speculative_draft_params {
 
     float temperature = 0.0f;
     uint32_t seed = LLAMA_DEFAULT_SEED;
+
+    // Internal sidecar-only content-aware stacked-verification controls.
+    // n_max remains the request/capacity envelope; n_max_ngram may narrow the
+    // K4V proposal within that envelope and never widens neural generation.
+    int32_t n_max_ngram = -1;
+
 };
 
 common_speculative_draft_params & common_speculative_get_draft_params(common_speculative * spec, llama_seq_id seq_id);
@@ -110,12 +116,12 @@ bool common_speculative_process(common_speculative * spec, const llama_batch & b
 // generate drafts for the sequences specified with `common_speculative_get_draft_params`
 void common_speculative_draft(common_speculative * spec);
 
-// Inform the speculative context that verified tokens were accepted by the
+// Informs the speculative context that verified tokens were accepted by the
 // target model. The four-argument form separates committed replay context from
-// the true accepted-draft count used by proposal adaptation and statistics.
+// the true accepted-draft count used by telemetry.
 void common_speculative_accept(common_speculative * spec, llama_seq_id, uint16_t n_accepted);
 void common_speculative_accept(common_speculative * spec, llama_seq_id,
-                               uint16_t n_committed, uint16_t n_accepted_draft);
+                               uint16_t n_accepted, uint16_t n_accepted_draft);
 
 // (optional) checkpoint and lifecycle state. State is keyed by implementation;
 // sidecars store only a small cursor/epoch while keeping device KV resident.
@@ -137,7 +143,7 @@ bool common_speculative_rebase_state(common_speculative * spec, llama_seq_id seq
         llama_pos pos_min, llama_pos pos_max, llama_pos delta);
 
 // print statistics about the speculative decoding
-void common_speculative_print_stats(const common_speculative * spec);
+void common_speculative_print_stats(const common_speculative * spec, llama_seq_id seq_id = -1);
 
 struct common_speculative_deleter {
     void operator()(common_speculative * s) { common_speculative_free(s); }

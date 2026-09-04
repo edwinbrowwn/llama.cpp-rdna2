@@ -46,9 +46,7 @@ Auto.
 
 ### Model and sidecar assets
 
-The supplied launcher requires the verified Qwen3.8-27B Q4 model, projector,
-and sidecar assets. Set `MODEL_DIR` if they are not under the default model
-location. The pinned model revision is:
+The supplied launcher requires the verified Qwen3.8-27B Q4 model and projector. Set `MODEL_DIR` if they are not under the default model location. Sidecar provider libraries are built with the server and model-derived assets are created automatically. The pinned model revision is:
 
 ```text
 04a41723de3622e56bb499676ebaaacaa430f345
@@ -59,9 +57,7 @@ mmproj-model.gguf                     9da757136cb044abdf552334c56f2dcb63839799ea
 With `SPEC_SIDECAR=1`, the server detects the embedded MTP block and prepares
 the required 40,960-row sidecar assets natively on first start. Later starts
 reuse the validated cache under `${LLAMA_CACHE:-~/.cache/llama.cpp}/spec-sidecar`.
-No Python preparation step is required; use `--spec-sidecar-cache /path` to
-choose a different cache root. The launcher uses this automatic path unless an
-existing explicit bundle is supplied with `--bundle`.
+No Python preparation step is required; use `--spec-sidecar-cache /path` to choose a different cache root. A DFlash or Qwen4Exp draft supplied with `-md` is detected and converted automatically. The launcher uses this automatic path unless an existing explicit bundle is supplied with `--bundle`.
 
 ### Launch: all available RDNA3 options
 
@@ -195,8 +191,8 @@ safely and leaves target-only decoding available.
 | GDN sibling projection fusion | **Automatic** when eligible | Applies to validated Qwen MoE loader/model conditions, not dense Qwen3.8-27B. |
 | V620 topology/P2P/RCCL policy | **Automatic** on the qualified topology | `GGML_HIP_GFX1030_P2P_ALLREDUCE=auto-expanded` controls the certified TP4 host-snapshot experiment. Qualified TP2 uses the shared two-rank host-snapshot candidate under the RDNA2 Auto policy. |
 | TP output-head sharding | Explicit `GGML_TP_SHARDED_OUTPUT=1` | Uses vocabulary-axis output for CPU/sidecar sampling; an explicit backend-sampling request retains hidden-axis/full logits instead. |
-| Automatic MTP/DFlash assets | `SPEC_SIDECAR=1` | Detects supported runtime GGUFs, creates a validated first-start cache, and reuses it on warm starts. |
-| Flash Next MTP sidecar | `SPEC_SIDECAR=1` with the matching Qwen4Exp provider bundle | Uses the separate 10,240-wide handoff/full-vocabulary provider; batch and ubatch 128 are the validated gfx1030 settings. |
+| Automatic MTP/DFlash assets | `SPEC_SIDECAR=1` | Detects supported target or `-md` GGUFs, converts compatible source tensor types to the fixed provider schema, atomically creates a validated first-start cache, repairs damaged entries, and reuses warm caches. |
+| Flash Next MTP sidecar | `SPEC_SIDECAR=1` with the matching Qwen4Exp `-md` GGUF | Automatically creates the separate 34-tensor, 10,240-wide handoff/full-vocabulary provider bundle; batch and ubatch 128 are the validated gfx1030 settings. |
 
 ## Shared rules
 

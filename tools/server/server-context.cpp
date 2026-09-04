@@ -14,6 +14,7 @@
 #include "log.h"
 #include "sampling.h"
 #include "speculative.h"
+#include "speculative-content.h"
 #include "server-speculative-sampling.h"
 #include "mtmd.h"
 #include "mtmd-helper.h"
@@ -60,6 +61,14 @@ static bool server_gfx1030_native_auto_enabled() {
 
 static bool server_env_enabled(const char * name) {
     return std::getenv(name) != nullptr && !server_env_disabled(name);
+}
+
+// The gfx1030 stacked K4V cap is a server-level safety envelope. The
+// sidecar-only content POC may widen K4V within a reserved base+boost envelope,
+// while neural generation, native paths, and explicit overrides stay fixed.
+static bool server_sidecar_content_boost_enabled(const common_params & params) {
+    return common_speculative_content_runtime_eligible(params.speculative) &&
+            common_speculative_content_env_enabled();
 }
 
 static bool server_vocab_sharded_output_enabled() {
@@ -143,6 +152,21 @@ static bool server_gfx1030_sidecar_runtime_profile(const common_params & params)
         ++n_rocm_devices;
     }
     return n_rocm_devices == 4;
+}
+
+static bool server_mtp_deferred_catchup_enabled() {
+    return server_spec_mtp_deferred_setting_enabled(
+            std::getenv("GGML_MTP_DEFER_CATCHUP"));
+}
+
+static bool server_gfx1030_content_stacked_profile(const common_params & params) {
+    return server_gfx1030_sidecar_runtime_profile(params) &&
+            params.n_parallel == 1 &&
+            params.speculative.draft.sidecar_candidate_ready &&
+            params.speculative.draft.sidecar_profile_name == "qwen35-mtp" &&
+            server_spec_content_stacked_verification_profile(params.speculative) &&
+            !params.speculative.has_synth() &&
+            server_mtp_deferred_catchup_enabled();
 }
 
 static bool server_gfx1030_dflash_dynamic_depth_profile(const common_params & params) {
@@ -953,7 +977,7 @@ struct server_slot {
             SLT_INF(*this, "draft activity = 0 tokens (%d verification steps)\n", n_draft_verif_steps);
         }
 
-        common_speculative_print_stats(spec);
+        common_speculative_print_stats(spec, id);
     }
 
     json to_json(bool only_metrics = false) const {
@@ -1298,6 +1322,20 @@ private:
         const bool sidecar_candidate = common_speculative_sidecar_candidate(
                 params_base.speculative, params_base.model.path,
                 (uint32_t) params_base.n_parallel);
+        params_base.speculative.draft.content_verification_eligible = sidecar_candidate &&
+                server_gfx1030_content_stacked_profile(params_base);
+        const bool content_mtp_stack =
+                std::find(params_base.speculative.types.begin(),
+                          params_base.speculative.types.end(),
+                          COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params_base.speculative.types.end() &&
+                std::find(params_base.speculative.types.begin(),
+                          params_base.speculative.types.end(),
+                          COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V) != params_base.speculative.types.end();
+        if (sidecar_candidate && content_mtp_stack &&
+                common_speculative_content_env_enabled() &&
+                !params_base.speculative.draft.content_verification_eligible) {
+            SRV_WRN("%s", "content stacked verification disabled: requires one K4V plus the qwen35 MTP sidecar on the gfx1030 TP4 tensor-split, sharded-output, --parallel 1, baseline-width-4, deferred-catch-up profile; DFlash remains fixed after a negative K4V5 screen\n");
+        }
         const auto output_limits = server_output_limits(params_base);
         params_base.n_outputs_max = output_limits.total;
         params_base.n_outputs_max_per_seq = output_limits.per_seq;
@@ -1439,10 +1477,21 @@ private:
             const bool is_mtp = std::find(params_base.speculative.types.begin(),
                                           params_base.speculative.types.end(),
                                           COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params_base.speculative.types.end();
-            SRV_INF("capping automatic gfx1030 %s+K4V cycles at %d draft tokens "
-                    "(configured K4V m=%u); explicit request speculative.n_max overrides\n",
-                    is_mtp ? "MTP" : "DFlash", gfx1030_neural_k4v_cycle_cap,
-                    params_base.speculative.ngram_map_k4v.size_m);
+            if (params_base.speculative.draft.content_verification_eligible &&
+                    common_speculative_content_env_enabled()) {
+                SRV_INF("keeping automatic gfx1030 %s generation at %d while content-gating K4V "
+                        "from %d through %d draft tokens (configured K4V m=%u); "
+                        "explicit request speculative.n_max still overrides\n",
+                        is_mtp ? "MTP" : "DFlash", gfx1030_neural_k4v_cycle_cap,
+                        gfx1030_neural_k4v_cycle_cap,
+                        gfx1030_neural_k4v_cycle_cap + common_speculative_content_env_max_boost(),
+                        params_base.speculative.ngram_map_k4v.size_m);
+            } else {
+                SRV_INF("capping automatic gfx1030 %s+K4V cycles at %d draft tokens "
+                        "(configured K4V m=%u); explicit request speculative.n_max overrides\n",
+                        is_mtp ? "MTP" : "DFlash", gfx1030_neural_k4v_cycle_cap,
+                        params_base.speculative.ngram_map_k4v.size_m);
+            }
         }
 
         needs_reeval = llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt);
@@ -2241,13 +2290,22 @@ private:
         if (task.need_sampling()) {
             slot.spec_n_max_user_override = task.params.speculative_n_max >= 0;
             if (!slot.spec_n_max_user_override && gfx1030_neural_k4v_cycle_cap > 0) {
-                task.params.speculative_n_max = gfx1030_neural_k4v_cycle_cap;
+                task.params.speculative_n_max = server_sidecar_content_boost_enabled(params_base)
+                        ? gfx1030_neural_k4v_cycle_cap + common_speculative_content_env_max_boost()
+                        : gfx1030_neural_k4v_cycle_cap;
             }
 
+            // The automatic gfx1030 K4V envelope is not a user override.
+            // It reserves base+boost for K4V/target verification only; neural
+            // providers still clamp to their configured width. Preserve the
+            // existing target backend-sampling profile for this internal cap.
             const auto auto_backend_sampling_mode = !task.params.backend_sampling_set &&
                 !task.params.sampling.backend_sampling &&
-                (task.params.speculative_n_max < 0 ||
-                    task.params.speculative_n_max == params_base.speculative.draft.n_max)
+                server_spec_auto_backend_width_eligible(
+                    task.params.speculative_n_max,
+                    slot.spec_n_max_user_override,
+                    gfx1030_neural_k4v_cycle_cap,
+                    params_base.speculative.draft.n_max)
                 ? server_auto_spec_target_backend_sampling(params_base, task.params.sampling, vocab)
                 : server_auto_spec_target_backend_sampling_mode::NONE;
             const bool auto_backend_sampling =
@@ -4591,8 +4649,8 @@ private:
                 }
 
                 const uint16_t n_committed = (uint16_t) (accepted.size() - 1);
-                const uint16_t n_accepted_draft =
-                        server_spec_accepted_draft_count(n_committed, slot.spec_is_replay);
+                const uint16_t n_accepted_draft = n_committed -
+                        (slot.spec_is_replay && n_committed > 0 ? 1 : 0);
                 common_speculative_accept(
                         spec.get(), slot.id, n_committed, n_accepted_draft);
 

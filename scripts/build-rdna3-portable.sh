@@ -294,3 +294,6 @@ fi
 echo
 echo "Build complete: $SERVER"
 echo "For the qualified native gfx1100 multi-GPU profile, build with RCCL (default) and launch with GGML_HIP_RDNA3_AUTO=1."
+if [[ "$BUILD_SIDECARS" == ON || "$BUILD_SIDECARS" == 1 || "$BUILD_SIDECARS" == TRUE || "$BUILD_SIDECARS" == on || "$BUILD_SIDECARS" == true ]]; then
+    echo "With SPEC_SIDECAR=1, supported target and -md GGUFs automatically create and repair model-keyed provider assets."
+fi
