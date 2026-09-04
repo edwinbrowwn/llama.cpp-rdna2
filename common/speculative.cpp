@@ -4628,9 +4628,10 @@ void common_speculative_draft(common_speculative * spec) {
                 continue;
             }
 
-            // Fail closed to the configured baseline before consulting any
-            // runtime state. A static K4V envelope can never widen because a
-            // sidecar or sequence-state check unexpectedly failed.
+            // Fail closed to the configured baseline unless the matching
+            // sidecar is ready. A ready K4V may form a cheap maximum-width
+            // candidate; classification is deferred until that candidate is
+            // actually longer than the neural width.
             const int context_limit = dp.n_max > 0
                     ? dp.n_max : spec->content.base_nmax();
             dp.n_max_ngram = std::min(
@@ -4645,14 +4646,9 @@ void common_speculative_draft(common_speculative * spec) {
                 continue;
             }
 
-            const uint8_t level_before = spec->content.prepare(
-                    (uint32_t) seq_id,
-                    dp.prompt != nullptr && !dp.prompt->empty() ? dp.prompt->data() : nullptr,
-                    dp.prompt != nullptr ? dp.prompt->size() : 0,
-                    dp.id_last);
             dp.n_max_ngram = spec->content.selected_limit(
-                    spec->content.base_nmax(), context_limit,
-                    false, level_before);
+                    spec->content.base_nmax(), context_limit, false,
+                    (uint8_t) spec->content.max_boost());
             dp.content_controller = &spec->content;
         }
     }
@@ -4685,6 +4681,23 @@ void common_speculative_draft(common_speculative * spec) {
             if (dp.drafting && !result.empty()) {
                 const bool used_k4v =
                         impl->type == COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V;
+                bool content_prepared = false;
+                if (used_k4v && dp.content_controller != nullptr &&
+                        common_speculative_k4v_needs_content_selection(
+                            result.size(), dp.content_controller->base_nmax())) {
+                    const uint8_t level_before = dp.content_controller->prepare(
+                            (uint32_t) seq_id,
+                            dp.prompt != nullptr && !dp.prompt->empty()
+                                ? dp.prompt->data() : nullptr,
+                            dp.prompt != nullptr ? dp.prompt->size() : 0,
+                            dp.id_last);
+                    const int context_limit = dp.n_max > 0
+                            ? dp.n_max : dp.content_controller->base_nmax();
+                    dp.n_max_ngram = dp.content_controller->selected_limit(
+                            dp.content_controller->base_nmax(), context_limit,
+                            false, level_before);
+                    content_prepared = true;
+                }
                 const int proposal_limit =
                         common_speculative_proposal_limit(dp, used_k4v);
                 if (proposal_limit > 0 && (int) result.size() > proposal_limit) {
@@ -4705,7 +4718,7 @@ void common_speculative_draft(common_speculative * spec) {
 
                 if (!result.empty()) {
                     dp.drafting = false;
-                    if (dp.content_controller != nullptr) {
+                    if (content_prepared) {
                         dp.content_controller->observe_draft(
                                 (uint32_t) seq_id, result.data(), result.size(),
                                 dp.content_controller->base_nmax(),

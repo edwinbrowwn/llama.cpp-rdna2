@@ -272,8 +272,10 @@ never be read by a later draft. Set
   anti-stutter policy normally caps K4V at the configured neural width. In the
   experimental content-aware stacked mode, only that K4V cap may rise through
   neural width plus the selected boost; MTP/DFlash generation remains fixed.
-  A K4V miss therefore incurs no wider neural draft or target pass, while a
-  real longer K4V hit still receives all `N + 1` target-verification rows.
+  A K4V miss therefore incurs no classifier pass, wider neural draft, or wider
+  target pass. Only a K4V candidate longer than the neural baseline invokes the
+  classifier; an emitted longer hit still receives all `N + 1`
+  target-verification rows.
 - Prompt-cache and external slot-file restore do not persist the sidecar's
   device KV contents. If a restored target state does not receive a complete
   contiguous sidecar prefill, the sidecar rejects the gap and the host uses

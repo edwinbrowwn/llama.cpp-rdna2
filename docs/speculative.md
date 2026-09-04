@@ -244,13 +244,16 @@ remains the authoritative cap. Runtime sidecar failure, a stale sequence, or
 loss of direct device handoff returns K4V to the fixed neural baseline. A K4V
 proposal of `N` tokens produces `N + 1` target-verification rows because the
 sampled target token is verified with the draft. End-of-request summaries
-bucket actual verification width: neural fallbacks and short K4V hits remain in
-the baseline bucket even when the classifier selected a wider ceiling. Every
-emitted proposal still receives complete target verification, and stochastic
-neural proposals still carry one complete validated proposal-distribution row
-per token.
+bucket actual candidate verification width. Neural fallbacks and K4V results
+no longer than the neural baseline do not invoke or update the classifier;
+when a later long K4V candidate appears, `prepare()` reconstructs exact state
+from committed prompt history. Every emitted proposal still receives complete
+target verification, and stochastic neural proposals still carry one complete
+validated proposal-distribution row per token.
 
-BEFORE-context selection is the wall-clock path:
+K4V first forms a cheap candidate within the reserved maximum envelope. The
+classifier runs only when that candidate exceeds the fixed neural width, then
+trims it to the content-selected cap before target decoding.
 `SPEC_CONTENT_PROVISIONAL=1` records a provisional score but does not relaunch
 K4V or a neural provider and cannot leave extra uncommitted sidecar KV.
 Only the target-accepted prefix is committed to content state. Adaptive

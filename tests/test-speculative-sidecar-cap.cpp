@@ -23,6 +23,9 @@ static void test_cap_and_explicit_override() {
             common_speculative_neural_draft_limit(4, 0) == 0 &&
             common_speculative_neural_draft_limit(4, -1) == 4,
             "K4V verification envelope never widens neural generation");
+    require(!common_speculative_k4v_needs_content_selection(4, 4) &&
+            common_speculative_k4v_needs_content_selection(5, 4),
+            "classification runs only for a K4V candidate beyond neural width");
 
     common_speculative_sidecar_cap_config content_cap { 7 };
     dp.n_max_ngram = 5;

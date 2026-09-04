@@ -3,6 +3,7 @@
 #include "speculative.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 
 // A stacked sidecar n-gram proposal is capped at the configured neural width
@@ -37,6 +38,11 @@ inline int common_speculative_neural_draft_limit(
     return request_envelope > 0
             ? std::min(configured_nmax, request_envelope)
             : configured_nmax;
+}
+
+inline bool common_speculative_k4v_needs_content_selection(
+        size_t candidate_size, int neural_nmax) {
+    return neural_nmax > 0 && candidate_size > (size_t) neural_nmax;
 }
 
 inline int common_speculative_proposal_limit(
