@@ -1,6 +1,9 @@
 #pragma once
 
 #include "common.h"
+#include "speculative-content.h"
+
+#include <cstring>
 
 enum class server_spec_target_backend_profile_kind {
     NONE,
@@ -167,11 +170,58 @@ inline server_spec_target_backend_profile server_spec_target_backend_profile_sel
     return {};
 }
 
+// Structural gate for the qualified gfx1030 TP4 DFlash active-batch schedule.
+// Device, output-mode, sidecar, and parallelism checks remain in the server.
+inline bool server_spec_gfx1030_dflash_dynamic_depth_profile(
+        const common_params_speculative & params) {
+    int n_dflash = 0;
+    int n_k4v = 0;
+    for (common_speculative_type type : params.types) {
+        switch (type) {
+            case COMMON_SPECULATIVE_TYPE_NONE:
+                break;
+            case COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH:
+                ++n_dflash;
+                break;
+            case COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V:
+                ++n_k4v;
+                break;
+            default:
+                return false;
+        }
+    }
+    return n_dflash == 1 && n_k4v <= 1 && params.draft.n_max == 4;
+}
+
+// Content selection may widen only K4V above one fixed-width MTP sidecar.
+// DFlash and other ngram/neural combinations retain the anti-stutter cap.
+inline bool server_spec_content_stacked_verification_profile(
+        const common_params_speculative & params) {
+    return common_speculative_content_stack_eligible(params);
+}
+
+inline bool server_spec_mtp_deferred_setting_enabled(const char * value) {
+    return value == nullptr || std::strcmp(value, "auto") == 0 ||
+            std::strcmp(value, "1") == 0;
+}
+
+// An automatic K4V cycle cap is internal policy, not a request override.
+// Keep target backend sampling eligible when content awareness expands that
+// cap from the neural baseline to its base+boost envelope.
+inline bool server_spec_auto_backend_width_eligible(
+        int32_t request_n_max, bool request_override,
+        int32_t automatic_cycle_cap, int32_t neural_n_max) {
+    return request_n_max < 0 ||
+            (!request_override && automatic_cycle_cap > 0) ||
+            request_n_max == neural_n_max;
+}
+
 // A stacked n-gram map has its own value width and can otherwise override the
 // neural drafter's much smaller cycle. On the certified gfx1030 profiles, K4V
 // m=48 can turn a new hit into a 49-row target pass and make the 248K-vocabulary
-// output visibly pause. Reuse the existing request-level cap to chunk those
-// hits at the validated neural-drafter width. The server applies this policy
+// output visibly pause. Reuse the existing request-level cap to limit those
+// hits at the validated neural-drafter width; this is a cap, not chunking, so
+// any unverified tail is discarded. The server applies this policy
 // only after separately confirming gfx1030 TP4; an explicit request-level
 // speculative.n_max continues to take precedence.
 inline int32_t server_spec_gfx1030_neural_k4v_cycle_cap(
@@ -202,10 +252,11 @@ inline int32_t server_spec_gfx1030_neural_k4v_cycle_cap(
             params.ngram_map_k4v.size_m <= params.draft.n_max) {
         return -1;
     }
-    if (n_dflash == 1 && params.draft.n_max == 5) {
-        return 5;
+    if (n_dflash == 1 &&
+            (params.draft.n_max == 4 || params.draft.n_max == 5)) {
+        return params.draft.n_max;
     }
-    if (n_mtp == 1 && params.draft.n_max >= 2 && params.draft.n_max <= 4) {
+    if (n_mtp == 1 && params.draft.n_max >= 2 && params.draft.n_max <= 5) {
         return params.draft.n_max;
     }
     return -1;

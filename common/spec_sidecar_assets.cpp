@@ -6,6 +6,7 @@
 #include "ggml.h"
 #include "gguf.h"
 #include "hash/hash.h"
+#include "../src/spec_sidecar/artifact_manifest.h"
 #include "../src/spec_sidecar/qwen35_draft_vocab_bitmap.h"
 
 #include <nlohmann/json.hpp>
@@ -253,6 +254,16 @@ static bool load_external_ids(const fs::path & path, std::vector<int32_t> & ids,
 
 static bool resolve_ids(const common_spec_sidecar_profile & profile, gguf_file & target,
         std::vector<int32_t> & ids, std::string & source, std::string & error) {
+    if (profile.kind == COMMON_SPEC_SIDECAR_KIND_MTP &&
+            profile.mtp_head_rows == profile.target_n_vocab) {
+        ids.resize((size_t) profile.target_n_vocab);
+        for (int32_t id = 0; id < profile.target_n_vocab; ++id) {
+            ids[(size_t) id] = id;
+        }
+        source = "identity:full-target-vocabulary";
+        return true;
+    }
+
     const char * external = profile.ids_env != nullptr ? std::getenv(profile.ids_env) : nullptr;
     if (external != nullptr && external[0] != '\0') {
         const std::string path = normalized_absolute(external);
@@ -358,6 +369,45 @@ static std::vector<tensor_spec> qwen35moe_mtp_specs() {
     };
 }
 
+static std::vector<tensor_spec> qwen4exp_mtp_specs() {
+    return {
+        make_spec("output.weight",                         GGML_TYPE_Q6_K, {2560, 248320}),
+        make_spec("output_hc_down.weight",                 GGML_TYPE_Q4_0, {10240, 320}),
+        make_spec("output_hc_norm.weight",                 GGML_TYPE_F32,  {10240}),
+        make_spec("output_hc_up.weight",                   GGML_TYPE_Q4_0, {320, 10240}),
+        make_spec("token_embd.weight",                     GGML_TYPE_Q4_0, {2560, 248320}),
+        make_spec("blk.48.attn_k.weight",                  GGML_TYPE_Q4_0, {2560, 512}),
+        make_spec("blk.48.attn_k_norm.weight",             GGML_TYPE_F32,  {256}),
+        make_spec("blk.48.attn_output.weight",             GGML_TYPE_Q4_0, {6144, 2560}),
+        make_spec("blk.48.attn_q.weight",                  GGML_TYPE_Q4_0, {2560, 12288}),
+        make_spec("blk.48.attn_q_norm.weight",             GGML_TYPE_F32,  {256}),
+        make_spec("blk.48.attn_v.weight",                  GGML_TYPE_Q4_0, {2560, 512}),
+        make_spec("blk.48.ffn_down_exps.weight",           GGML_TYPE_Q4_0, {640, 2560, 512}),
+        make_spec("blk.48.ffn_down_shexp.weight",          GGML_TYPE_Q4_0, {640, 2560}),
+        make_spec("blk.48.ffn_gate_exps.weight",           GGML_TYPE_Q4_0, {2560, 640, 512}),
+        make_spec("blk.48.ffn_gate_inp.weight",            GGML_TYPE_F32,  {2560, 512}),
+        make_spec("blk.48.ffn_gate_inp_shexp.weight",      GGML_TYPE_F32,  {2560}),
+        make_spec("blk.48.ffn_gate_shexp.weight",          GGML_TYPE_Q4_0, {2560, 640}),
+        make_spec("blk.48.ffn_up_exps.weight",             GGML_TYPE_Q4_0, {2560, 640, 512}),
+        make_spec("blk.48.ffn_up_shexp.weight",            GGML_TYPE_Q4_0, {2560, 640}),
+        make_spec("blk.48.hc_attn_down.weight",            GGML_TYPE_Q4_0, {10240, 320}),
+        make_spec("blk.48.hc_attn_inject.weight",          GGML_TYPE_Q4_0, {10240, 4}),
+        make_spec("blk.48.hc_attn_norm.weight",            GGML_TYPE_F32,  {10240}),
+        make_spec("blk.48.hc_attn_up.weight",              GGML_TYPE_Q4_0, {320, 10240}),
+        make_spec("blk.48.hc_ffn_down.weight",             GGML_TYPE_Q4_0, {10240, 320}),
+        make_spec("blk.48.hc_ffn_inject.weight",           GGML_TYPE_Q4_0, {10240, 4}),
+        make_spec("blk.48.hc_ffn_norm.weight",             GGML_TYPE_F32,  {10240}),
+        make_spec("blk.48.hc_ffn_up.weight",               GGML_TYPE_Q4_0, {320, 10240}),
+        make_spec("blk.48.indexer.k_norm.weight",          GGML_TYPE_F32,  {128}),
+        make_spec("blk.48.indexer.k_proj.weight",          GGML_TYPE_F16,  {2560, 128}),
+        make_spec("blk.48.indexer.q_norm.weight",          GGML_TYPE_F32,  {128}),
+        make_spec("blk.48.indexer.q_proj.weight",          GGML_TYPE_F16,  {2560, 512}),
+        make_spec("blk.48.nextn.eh_proj.weight",           GGML_TYPE_Q4_0, {5120, 2560}),
+        make_spec("blk.48.nextn.enorm.weight",             GGML_TYPE_F32,  {2560}),
+        make_spec("blk.48.nextn.hnorm.weight",             GGML_TYPE_F32,  {10240}),
+    };
+}
+
 static std::vector<tensor_spec> dflash_specs() {
     std::vector<tensor_spec> specs = {
         make_spec("enc.output_norm.weight",       GGML_TYPE_F32,  {5120}),
@@ -424,6 +474,57 @@ static bool validate_specs(gguf_file & source, const std::vector<tensor_spec> & 
         }
     }
     return true;
+}
+
+static bool manifest_matches_specs(const fs::path & path,
+        const std::vector<tensor_spec> & specs, const char * label, std::string & error) {
+    std::vector<spec_sidecar_artifact::TensorDesc> tensors;
+    const std::string manifest_path = path.string();
+    if (!spec_sidecar_artifact::load_manifest(manifest_path.c_str(), tensors, error)) {
+        error = std::string(label) + " manifest invalid: " + error;
+        return false;
+    }
+    if (tensors.size() != specs.size()) {
+        error = std::string(label) + " manifest has an unexpected tensor count";
+        return false;
+    }
+    for (const auto & spec : specs) {
+        const auto * tensor = spec_sidecar_artifact::find_tensor(tensors, spec.output_name.c_str());
+        if (tensor == nullptr || tensor->dtype != std::to_string(static_cast<int>(spec.output_type)) ||
+                tensor->shape != spec.output_shape || spec.output_shape.empty()) {
+            error = std::string(label) + " manifest tensor does not match provider schema: " + spec.output_name;
+            return false;
+        }
+        const int64_t width = spec.output_shape[0];
+        int64_t elements = 1;
+        for (const int64_t dim : spec.output_shape) {
+            if (dim <= 0 || elements > std::numeric_limits<int64_t>::max() / dim) {
+                error = std::string(label) + " manifest tensor shape overflows: " + spec.output_name;
+                return false;
+            }
+            elements *= dim;
+        }
+        const size_t row_size = ggml_row_size(spec.output_type, width);
+        if (row_size == 0 || elements % width != 0 ||
+                static_cast<uint64_t>(elements / width) > std::numeric_limits<uint64_t>::max() / row_size ||
+                tensor->nbytes != static_cast<uint64_t>(elements / width) * row_size) {
+            error = std::string(label) + " manifest tensor size does not match provider schema: " + spec.output_name;
+            return false;
+        }
+    }
+    return true;
+}
+
+static size_t count_type_conversions(
+        const gguf_file & source, const std::vector<tensor_spec> & specs) {
+    size_t count = 0;
+    for (const auto & spec : specs) {
+        const ggml_tensor * tensor = source.tensor(spec.source_name);
+        if (tensor != nullptr && tensor->type != spec.output_type) {
+            ++count;
+        }
+    }
+    return count;
 }
 
 static bool dequantize_rows(ggml_type type, const void * source, float * output,
@@ -679,9 +780,7 @@ static bool write_ids(const fs::path & path, const std::vector<int32_t> & ids, s
 
 static bool write_full_head(gguf_file & target, const fs::path & path, std::string & error) {
     const ggml_tensor * head = target.tensor("output.weight");
-    if (!check_shape(head, {5120, QWEN35_VOCAB}, "output.weight", error) ||
-            head->type != GGML_TYPE_Q6_K) {
-        if (error.empty()) error = "DFlash full head requires Q6_K output.weight";
+    if (!check_shape(head, {5120, QWEN35_VOCAB}, "output.weight", error)) {
         return false;
     }
     uint64_t offset = 0;
@@ -691,18 +790,41 @@ static bool write_full_head(gguf_file & target, const fs::path & path, std::stri
         error = "cannot create " + path.string();
         return false;
     }
-    return write_direct_range(target, offset, ggml_nbytes(head), output, error);
+    uint64_t written = 0;
+    if (head->type == GGML_TYPE_Q6_K) {
+        written = ggml_nbytes(head);
+        if (!write_direct_range(target, offset, written, output, error)) {
+            return false;
+        }
+    } else if (!write_converted_tensor(target, head, offset, GGML_TYPE_Q6_K,
+            output, written, error)) {
+        return false;
+    }
+    const uint64_t expected = static_cast<uint64_t>(QWEN35_VOCAB) *
+            ggml_row_size(GGML_TYPE_Q6_K, 5120);
+    if (written != expected) {
+        error = "failed writing converted DFlash full head";
+        return false;
+    }
+    return true;
 }
 
-static bool build_mtp_bundle(const common_spec_sidecar_profile & profile, gguf_file & target,
+static bool build_mtp_bundle(const common_spec_sidecar_profile & profile, gguf_file & source,
         const std::vector<int32_t> & ids, const fs::path & directory,
         const std::string & cache_key, std::string & error) {
     const bool moe = profile.name != nullptr && std::strcmp(profile.name, "qwen35moe-mtp") == 0;
-    const auto specs = moe ? qwen35moe_mtp_specs() : qwen35_mtp_specs();
-    if (!validate_specs(target, specs, false, false, error)) {
+    const bool qwen4exp = profile.name != nullptr && std::strcmp(profile.name, "qwen4exp-mtp") == 0;
+    const auto specs = qwen4exp ? qwen4exp_mtp_specs() :
+            (moe ? qwen35moe_mtp_specs() : qwen35_mtp_specs());
+    if (!validate_specs(source, specs, false, qwen4exp, error)) {
         return false;
     }
-    return write_blob(target, specs, ids,
+    const size_t converted = count_type_conversions(source, specs);
+    if (converted > 0) {
+        LOG_INF("spec sidecar: converting %zu/%zu %s tensors to the provider cache schema; source GGUF is unchanged\n",
+                converted, specs.size(), profile.name);
+    }
+    return write_blob(source, specs, ids,
             directory / "drafter_weights.bin", directory / "drafter_manifest.json",
             cache_key, profile, error) &&
            write_ids(directory / "draft_head_ids.bin", ids, error);
@@ -712,19 +834,26 @@ static bool build_dflash_bundle(const common_spec_sidecar_profile & profile, ggu
         gguf_file & draft, const std::vector<int32_t> & ids, bool full_head,
         const fs::path & directory, const std::string & cache_key, std::string & error) {
     const auto draft_specs = dflash_specs();
-    if (!validate_specs(draft, draft_specs, true, true, error)) {
+    if (!validate_specs(draft, draft_specs, false, true, error)) {
         return false;
+    }
+    const size_t converted = count_type_conversions(draft, draft_specs);
+    if (converted > 0) {
+        LOG_INF("spec sidecar: converting %zu/%zu DFlash tensors to the F32/Q4_K/Q6_K provider cache schema; source GGUF is unchanged\n",
+                converted, draft_specs.size());
     }
     const std::vector<tensor_spec> embedding = {
         make_spec("token_embd.weight", GGML_TYPE_Q4_0, {5120, QWEN35_VOCAB}),
     };
-    if (!validate_specs(target, embedding, true, false, error)) {
+    // The runtime sidecar consumes a compact Q4_0 embedding and Q6_K head,
+    // but target GGUFs do not have to use those storage types. Automatic
+    // preparation streams supported source rows through f32 and writes the
+    // provider's fixed artifact schema once into the cache.
+    if (!validate_specs(target, embedding, false, false, error)) {
         return false;
     }
     const ggml_tensor * head = target.tensor("output.weight");
-    if (!check_shape(head, {5120, QWEN35_VOCAB}, "output.weight", error) ||
-            head->type != GGML_TYPE_Q6_K) {
-        if (error.empty()) error = "DFlash sidecar requires Q6_K output.weight";
+    if (!check_shape(head, {5120, QWEN35_VOCAB}, "output.weight", error)) {
         return false;
     }
 
@@ -944,6 +1073,51 @@ bool common_spec_sidecar_builtin_draft_vocab_ids(
     return true;
 }
 
+bool common_spec_sidecar_validate_artifact_schema(
+        const common_spec_sidecar_profile & profile,
+        const common_spec_sidecar_paths & paths,
+        std::string & error) {
+    error.clear();
+    const fs::path directory(paths.artifact_dir);
+    if (profile.kind == COMMON_SPEC_SIDECAR_KIND_DFLASH) {
+        if (profile.name == nullptr || std::strcmp(profile.name, "qwen35-dflash") != 0) {
+            error = "no automatic artifact schema is registered for this DFlash profile";
+            return false;
+        }
+        const std::vector<tensor_spec> embedding = {
+            make_spec("token_embd.weight", GGML_TYPE_Q4_0, {5120, QWEN35_VOCAB}),
+        };
+        if (!manifest_matches_specs(directory / "dflash_manifest.json",
+                dflash_specs(), "DFlash sidecar", error)) {
+            return false;
+        }
+        std::string embedding_error;
+        if (manifest_matches_specs(directory / "drafter_manifest.json",
+                embedding, "DFlash target embedding", embedding_error)) {
+            return true;
+        }
+        std::string mtp_error;
+        if (manifest_matches_specs(directory / "drafter_manifest.json",
+                qwen35_mtp_specs(), "DFlash target MTP", mtp_error)) {
+            return true;
+        }
+        error = embedding_error + "; " + mtp_error;
+        return false;
+    }
+
+    const bool dense = profile.name != nullptr && std::strcmp(profile.name, "qwen35-mtp") == 0;
+    const bool moe = profile.name != nullptr && std::strcmp(profile.name, "qwen35moe-mtp") == 0;
+    const bool qwen4exp = profile.name != nullptr && std::strcmp(profile.name, "qwen4exp-mtp") == 0;
+    if (!dense && !moe && !qwen4exp) {
+        error = "no automatic artifact schema is registered for this MTP profile";
+        return false;
+    }
+    const auto specs = qwen4exp ? qwen4exp_mtp_specs() :
+            (moe ? qwen35moe_mtp_specs() : qwen35_mtp_specs());
+    return manifest_matches_specs(directory / "drafter_manifest.json",
+            specs, "MTP sidecar", error);
+}
+
 bool common_spec_sidecar_prepare_artifacts(
         const common_spec_sidecar_profile & profile,
         const std::string & target_path,
@@ -968,10 +1142,14 @@ bool common_spec_sidecar_prepare_artifacts(
     gguf_file target(target_normalized, error);
     if (!target.valid()) return false;
 
+    const bool qwen4exp = profile.name != nullptr &&
+            std::strcmp(profile.name, "qwen4exp-mtp") == 0;
     std::unique_ptr<gguf_file> draft;
-    if (profile.kind == COMMON_SPEC_SIDECAR_KIND_DFLASH) {
+    if (profile.kind == COMMON_SPEC_SIDECAR_KIND_DFLASH || qwen4exp) {
         if (draft_path.empty()) {
-            error = "DFlash sidecar cache is missing; provide the DFlash GGUF with --spec-draft-model";
+            error = std::string("automatic ") +
+                    (profile.name != nullptr ? profile.name : "sidecar") +
+                    " preparation requires its draft GGUF via -md/--spec-draft-model";
             return false;
         }
         const std::string draft_normalized = normalized_absolute(draft_path);
@@ -1061,6 +1239,13 @@ bool common_spec_sidecar_prepare_artifacts(
         fs::remove_all(destination, ec);
         ec.clear();
     } else if (fs::exists(destination, ec)) {
+        if (validation_error.empty()) {
+            LOG_WRN("spec sidecar: rebuilding incomplete %s cache at %s\n",
+                    profile.name, destination.string().c_str());
+        } else {
+            LOG_WRN("spec sidecar: rebuilding damaged %s cache at %s (%s)\n",
+                    profile.name, destination.string().c_str(), validation_error.c_str());
+        }
         fs::remove_all(destination, ec);
         if (ec) {
             error = "cannot clear incomplete sidecar cache entry: " + ec.message();
@@ -1083,7 +1268,8 @@ bool common_spec_sidecar_prepare_artifacts(
             profile.name, destination.string().c_str());
     bool built = false;
     if (profile.kind == COMMON_SPEC_SIDECAR_KIND_MTP) {
-        built = build_mtp_bundle(profile, target, ids, temporary, cache_key, error);
+        gguf_file & source = qwen4exp ? *draft : target;
+        built = build_mtp_bundle(profile, source, ids, temporary, cache_key, error);
     } else if (draft != nullptr) {
         built = build_dflash_bundle(profile, target, *draft, ids, full_head, temporary, cache_key, error);
     }

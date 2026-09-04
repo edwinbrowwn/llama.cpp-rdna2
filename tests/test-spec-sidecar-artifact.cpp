@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "artifact_manifest.h"
+#include "dflash/stochastic_distribution.h"
 #include "mtp/catchup_alignment.h"
 #include "spec_sidecar.h"
 #include "spec_sidecar_assets.h"
@@ -7,6 +8,7 @@
 #include "../include/spec_sidecar/sidecar_abi.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -47,6 +49,77 @@ static void unset_environment(const char * name) {
 #endif
 }
 
+static int test_auto_prepare_fixture() {
+    const char * target = std::getenv("LLAMA_TEST_AUTO_SIDECAR_TARGET");
+    if (target == nullptr) {
+        return 0;
+    }
+    const char * kind_value = std::getenv("LLAMA_TEST_AUTO_SIDECAR_KIND");
+    const char * draft = std::getenv("LLAMA_TEST_AUTO_SIDECAR_DRAFT");
+    const char * cache = std::getenv("LLAMA_TEST_AUTO_SIDECAR_CACHE");
+    if (kind_value == nullptr || cache == nullptr) {
+        std::fprintf(stderr, "FAILED: automatic fixture requires kind and cache\n");
+        return 1;
+    }
+    common_spec_sidecar_kind kind;
+    if (std::strcmp(kind_value, "mtp") == 0) {
+        kind = COMMON_SPEC_SIDECAR_KIND_MTP;
+    } else if (std::strcmp(kind_value, "dflash") == 0) {
+        kind = COMMON_SPEC_SIDECAR_KIND_DFLASH;
+    } else {
+        std::fprintf(stderr, "FAILED: unknown automatic fixture kind: %s\n", kind_value);
+        return 1;
+    }
+
+    std::string error;
+    const auto * profile = common_spec_sidecar_profile_for_target_file(kind, target, error);
+    if (profile == nullptr) {
+        std::fprintf(stderr, "FAILED: automatic fixture profile: %s\n", error.c_str());
+        return 1;
+    }
+    common_spec_sidecar_paths paths;
+    bool cache_hit = false;
+    if (!common_spec_sidecar_prepare_artifacts(*profile, target,
+            draft != nullptr ? draft : "", cache, paths, cache_hit, error) ||
+            !common_spec_sidecar_validate_artifacts(*profile, paths, error)) {
+        std::fprintf(stderr, "FAILED: automatic fixture preparation: %s\n", error.c_str());
+        return 1;
+    }
+
+    common_spec_sidecar_paths cached_paths;
+    bool second_cache_hit = false;
+    if (!common_spec_sidecar_prepare_artifacts(*profile, target,
+            draft != nullptr ? draft : "", cache, cached_paths, second_cache_hit, error) ||
+            !second_cache_hit || cached_paths.artifact_dir != paths.artifact_dir) {
+        std::fprintf(stderr, "FAILED: automatic fixture cache reuse: %s\n", error.c_str());
+        return 1;
+    }
+    set_environment("SPEC_SIDECAR", "1");
+    common_params_speculative automatic;
+    automatic.sidecar_cache = cache;
+    if (draft != nullptr) {
+        automatic.draft.mparams.path = draft;
+    }
+    const bool candidate = common_speculative_sidecar_candidate(automatic, target, 1);
+    unset_environment("SPEC_SIDECAR");
+    const common_speculative_type expected = kind == COMMON_SPEC_SIDECAR_KIND_DFLASH
+            ? COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH : COMMON_SPECULATIVE_TYPE_DRAFT_MTP;
+    if (!candidate || automatic.types != std::vector<common_speculative_type>{expected} ||
+            !automatic.draft.sidecar_candidate_ready ||
+            automatic.draft.sidecar_artifact_dir.empty()) {
+        std::fprintf(stderr, "FAILED: automatic fixture -md/type discovery: candidate=%d types=%zu ready=%d path='%s' expected='%s' error='%s'\n",
+                candidate ? 1 : 0, automatic.types.size(),
+                automatic.draft.sidecar_candidate_ready ? 1 : 0,
+                automatic.draft.sidecar_artifact_dir.c_str(), paths.artifact_dir.c_str(),
+                automatic.draft.sidecar_prepare_error.c_str());
+        return 1;
+    }
+
+    std::printf("automatic_fixture_test: PASS profile=%s initial_cache_hit=%d path=%s\n",
+            profile->name, cache_hit ? 1 : 0, paths.artifact_dir.c_str());
+    return 0;
+}
+
 int main(int argc, char ** argv) {
     int failures = 0;
 
@@ -62,6 +135,9 @@ int main(int argc, char ** argv) {
     failures += require(spec_sidecar_mtp::committed_hidden_matches_tip(7, 7) &&
                         !spec_sidecar_mtp::committed_hidden_matches_tip(7, 5),
                         "MTP restore retains hidden state only at the unchanged committed tip");
+    failures += require(spec_sidecar_mtp::draft_storage_required(16381, 4) == 16385 &&
+                        spec_sidecar_mtp::draft_storage_required(32766, 3) == 32769,
+                        "MTP draft storage includes lookahead across geometric KV boundaries");
 
     // The master gate must run before target metadata, artifact, or library
     // inspection. The deliberately invalid model pointer makes an accidental
@@ -116,10 +192,11 @@ int main(int argc, char ** argv) {
                         "built-in Apache-2.0 draft vocabulary passes its integrity check");
 
     const auto profile_count = common_spec_sidecar_profile_count();
-    failures += require(profile_count >= 3, "provider registry exposes all independent profiles");
+    failures += require(profile_count >= 4, "provider registry exposes all independent profiles");
     const common_spec_sidecar_profile * qwen35_mtp = nullptr;
     const common_spec_sidecar_profile * qwen35moe_mtp = nullptr;
     const common_spec_sidecar_profile * qwen35_dflash = nullptr;
+    const common_spec_sidecar_profile * qwen4exp_mtp = nullptr;
     for (size_t i = 0; i < profile_count; ++i) {
         const auto * profile = common_spec_sidecar_profile_at(i);
         if (profile == nullptr || profile->name == nullptr) {
@@ -128,14 +205,17 @@ int main(int argc, char ** argv) {
         if (std::strcmp(profile->name, "qwen35-mtp") == 0) qwen35_mtp = profile;
         if (std::strcmp(profile->name, "qwen35moe-mtp") == 0) qwen35moe_mtp = profile;
         if (std::strcmp(profile->name, "qwen35-dflash") == 0) qwen35_dflash = profile;
+        if (std::strcmp(profile->name, "qwen4exp-mtp") == 0) qwen4exp_mtp = profile;
     }
     failures += require(qwen35_mtp != nullptr && qwen35moe_mtp != nullptr &&
-                        qwen35_dflash != nullptr &&
+                        qwen35_dflash != nullptr && qwen4exp_mtp != nullptr &&
                         qwen35_mtp->kind == COMMON_SPEC_SIDECAR_KIND_MTP &&
                         qwen35moe_mtp->kind == COMMON_SPEC_SIDECAR_KIND_MTP &&
-                        qwen35_dflash->kind == COMMON_SPEC_SIDECAR_KIND_DFLASH,
-                        "Qwen3.8-27B providers use distinct named profiles");
-    failures += require(qwen35_mtp != nullptr && qwen35moe_mtp != nullptr && qwen35_dflash != nullptr &&
+                        qwen35_dflash->kind == COMMON_SPEC_SIDECAR_KIND_DFLASH &&
+                        qwen4exp_mtp->kind == COMMON_SPEC_SIDECAR_KIND_MTP,
+                        "model-specific providers use distinct named profiles");
+    failures += require(qwen35_mtp != nullptr && qwen35moe_mtp != nullptr &&
+                        qwen35_dflash != nullptr && qwen4exp_mtp != nullptr &&
                         common_spec_sidecar_profile_name_matches(*qwen35_mtp, "Qwen/Qwen3.8-27B") &&
                         common_spec_sidecar_profile_name_matches(*qwen35_mtp, "..") &&
                         common_spec_sidecar_profile_name_matches(*qwen35_dflash, "..") &&
@@ -153,12 +233,55 @@ int main(int argc, char ** argv) {
                         qwen35moe_mtp->target_n_vocab == 248320 &&
                         qwen35moe_mtp->mtp_embedding_width == 2048 &&
                         qwen35moe_mtp->mtp_head_rows == 40960 &&
-                        qwen35moe_mtp->explicit_paths_only &&
+                        !qwen35moe_mtp->explicit_paths_only &&
                         std::strcmp(qwen35moe_mtp->default_library_name,
                                     "spec_qwen35moe_mtp_sidecar.so") == 0 &&
                         qwen35_dflash->dflash_encoded_width == 25600 && qwen35_dflash->dflash_block_size == 8 &&
-                        qwen35_dflash->dflash_head_rows == 40960,
-                        "Qwen3.8-27B providers retain narrow identity and independent capability contracts");
+                        qwen35_dflash->dflash_head_rows == 40960 &&
+                        std::strcmp(qwen4exp_mtp->target_architecture, "qwen4exp") == 0 &&
+                        qwen4exp_mtp->target_n_embd == 2560 &&
+                        qwen4exp_mtp->target_n_embd_out == 10240 &&
+                        qwen4exp_mtp->target_n_layer == 48 &&
+                        qwen4exp_mtp->target_n_layer_nextn == 0 &&
+                        qwen4exp_mtp->target_n_vocab == 248320 &&
+                        qwen4exp_mtp->mtp_embedding_width == 10240 &&
+                        qwen4exp_mtp->mtp_head_rows == 248320,
+                        "providers retain narrow identity and independent capability contracts");
+
+    if (qwen4exp_mtp != nullptr) {
+        if (const char * target = std::getenv("LLAMA_TEST_QWEN4EXP_TARGET")) {
+            std::string fixture_error;
+            const auto * fixture = common_spec_sidecar_profile_for_target_file(
+                    COMMON_SPEC_SIDECAR_KIND_MTP, target, fixture_error);
+            failures += require(fixture != nullptr && fixture->name != nullptr &&
+                                std::strcmp(fixture->name, "qwen4exp-mtp") == 0,
+                                "real Flash Next target selects qwen4exp-mtp");
+            set_environment("SPEC_SIDECAR", "1");
+            common_params_speculative probe_params;
+            probe_params.types = { COMMON_SPECULATIVE_TYPE_DRAFT_MTP };
+            failures += require(common_speculative_sidecar_candidate(probe_params, target, 8),
+                                "Flash Next provider and artifact pass the eight-slot probe");
+            unset_environment("SPEC_SIDECAR");
+        }
+    }
+
+    if (qwen35moe_mtp != nullptr) {
+        const char * provider = std::getenv("LLAMA_TEST_QWEN35MOE_PROVIDER");
+        const char * bundle = std::getenv("LLAMA_TEST_QWEN35MOE_BUNDLE");
+        if (provider != nullptr || bundle != nullptr) {
+            std::string provider_error;
+            const std::string weights = bundle != nullptr ? bundle : "";
+            const std::string ids = weights.empty() ? "" : weights + "/draft_head_ids.bin";
+            failures += require(provider != nullptr && bundle != nullptr &&
+                            common_spec_sidecar_mtp_probe(provider, weights, ids,
+                                qwen35moe_mtp->mtp_embedding_width,
+                                qwen35moe_mtp->mtp_head_rows, 1, provider_error),
+                        "Qwen35MoE provider exports the current MTP release ABI");
+            if (!provider_error.empty()) {
+                std::fprintf(stderr, "Qwen35MoE provider probe: %s\n", provider_error.c_str());
+            }
+        }
+    }
 
     if (qwen35_mtp != nullptr) {
         set_environment(qwen35_mtp->library_env, "/definitely/missing/spec_hip_sidecar.so");
@@ -195,14 +318,26 @@ int main(int argc, char ** argv) {
         unset_environment(qwen35moe_mtp->artifact_env);
     }
 
-    failures += require(SPEC_SIDECAR_MTP_DRAFT_TOP_K == 32 &&
+    failures += require(SPEC_SIDECAR_MTP_RELEASE_ABI == 6 &&
+                        SPEC_SIDECAR_DFLASH_RELEASE_ABI == 7 &&
+                        SPEC_SIDECAR_MTP_DRAFT_TOP_K == 32 &&
                         SPEC_SIDECAR_DFLASH_DRAFT_TOP_K == 16,
-                        "sidecar stochastic top-k constants are stable");
+                        "sidecar release and stochastic top-k ABI constants match");
     const double u0 = spec_sidecar_stochastic_uniform(UINT64_C(1234), 0);
     failures += require(u0 >= 0.0 && u0 < 1.0 &&
                         u0 == spec_sidecar_stochastic_uniform(UINT64_C(1234), 0) &&
                         u0 != spec_sidecar_stochastic_uniform(UINT64_C(1234), 1),
                         "sidecar proposal RNG is deterministic and bounded");
+
+    float proposal_probs[] = { 2.0f, 1.0f, 1.0f, 0.0f };
+    const int proposal_selected = spec_sidecar_dflash::normalize_and_select(
+            proposal_probs, 4, 4.0f, 0.8);
+    failures += require(proposal_selected == 2 &&
+                        std::abs(proposal_probs[0] - 0.5f) < 1e-6f &&
+                        std::abs(proposal_probs[1] - 0.25f) < 1e-6f &&
+                        std::abs(proposal_probs[2] - 0.25f) < 1e-6f &&
+                        proposal_probs[3] == 0.0f,
+                        "DFlash normalizes the complete q row before selection");
 
     std::vector<TensorDesc> tensors;
     const char * valid =
@@ -283,18 +418,29 @@ int main(int argc, char ** argv) {
 
     common_spec_sidecar_mtp mtp;
     error.clear();
-    failures += require(!mtp.load("relative-sidecar.so", "/absolute/artifacts", "/absolute/ids.bin", 5120, 40960, 1, error) &&
+    failures += require(!mtp.load("relative-sidecar.so", "/absolute/artifacts", "/absolute/ids.bin", 5120, 40960, 1, 262144, error) &&
                         error.find("absolute path") != std::string::npos,
                         "MTP loader rejects relative library paths");
     failures += require(!mtp.active(), "MTP loader remains inactive after path rejection");
+    error.clear();
+    failures += require(!mtp.load("/absolute/sidecar.so", "/absolute/artifacts", "/absolute/ids.bin",
+                                5120, 40960, 1, 0, error) &&
+                        error.find("context must be positive") != std::string::npos,
+                        "MTP loader rejects a non-positive target context");
 
     common_spec_sidecar_dflash dflash;
     error.clear();
-    failures += require(!dflash.load("relative-sidecar.so", "/absolute/artifacts", 25600, 8, 1, error) &&
+    failures += require(!dflash.load("relative-sidecar.so", "/absolute/artifacts", 25600, 8, 1, 262144, error) &&
                         error.find("absolute path") != std::string::npos,
                         "DFlash loader rejects relative library paths");
     failures += require(!dflash.active(), "DFlash loader remains inactive after path rejection");
+    error.clear();
+    failures += require(!dflash.load("/absolute/sidecar.so", "/absolute/artifacts",
+                                    25600, 8, 1, 0, error) &&
+                        error.find("context must be positive") != std::string::npos,
+                        "DFlash loader rejects a non-positive target context");
 
+    failures += test_auto_prepare_fixture();
     if (failures == 0) std::puts("artifact_manifest_test: PASS");
     return failures == 0 ? 0 : 1;
 }

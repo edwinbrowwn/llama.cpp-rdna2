@@ -462,6 +462,13 @@ extern "C" {
     GGML_API size_t             ggml_backend_meta_device_count (ggml_backend_dev_t meta_dev);
     GGML_API ggml_backend_dev_t ggml_backend_meta_device_get   (ggml_backend_dev_t meta_dev, size_t index);
 
+    // Return one physical copy of a mirrored meta tensor together with the
+    // backend that owns it. Split and partial tensors deliberately fail: one
+    // physical shard does not represent their complete logical value.
+    GGML_API bool ggml_backend_meta_get_mirrored_tensor(
+        ggml_backend_t meta_backend, const struct ggml_tensor * meta_tensor, size_t index,
+        ggml_backend_t * simple_backend, const struct ggml_tensor ** simple_tensor);
+
     //
     // Utils
     //

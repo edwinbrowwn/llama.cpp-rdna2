@@ -171,6 +171,118 @@ The number of accepted tokens is stored for each used n-gram.
 llama-server [...] --spec-type ngram-map-k4v --spec-ngram-map-k4v-size-n 8 --spec-ngram-map-k4v-size-m 8 --spec-ngram-map-k4v-min-hits 2 --spec-draft-n-max 64
 ```
 
+#### Sidecar content-aware stacked verification
+
+When a K4V map is stacked ahead of the qualified dense-MTP sidecar, content-aware
+K4V verification is enabled automatically by the exact `SPEC_SIDECAR=1` master
+gate. It can grant K4V a small relative verification-width boost without
+changing the neural provider's configured generation width:
+
+```bash
+SPEC_SIDECAR=1 GGML_TP_SHARDED_OUTPUT=1 \
+  ./llama-server [...] --parallel 1 \
+  --spec-type draft-mtp,ngram-map-k4v --spec-draft-n-max 4
+```
+
+The controller uses one scalar structural-confidence level and permits only
+`base+0` through `base+3` for K4V. Exactly one K4V map and the dense MTP
+sidecar are required. MTP generation remains fixed at the configured baseline
+(currently four); a K4V miss therefore falls back to an ordinary four-token MTP
+cycle. The sixth target-verification row is added only when K4V actually returns
+a fifth proposal. Host/native draft models and stacks without K4V are unchanged.
+
+Runtime selection is limited to the `qwen35-mtp` gfx1030 TP4 tensor-split test
+envelope with vocabulary-sharded output, `--parallel 1`, baseline width four,
+deferred catch-up, and direct target-device rows. DFlash retains its
+user-configured neural/K4V baseline; it is not hard-coded to width four and
+receives no automatic content boost.
+
+The default configuration uses an 8-token window, +1 maximum boost, and
+two-update upward hysteresis. The window accepts 4 through 32 tokens and
+includes the current target-sampled token. Set `SPEC_CONTENT_BOOST=0` (also
+`off` or `false`) to disable stacked verification while leaving the sidecar
+active. The legacy values `1`, `on`, and `true` remain explicit enables.
+`SPEC_CONTENT_MAX_BOOST=0` is an independent opt-out; positive values through 3,
+`SPEC_CONTENT_WINDOW`, and `SPEC_CONTENT_HYST` override the defaults. Values +2
+and +3 remain unqualified experiments. `SPEC_CONTENT_TRACE`,
+`SPEC_CONTENT_PROVISIONAL`, and `SPEC_CONTENT_ADAPT` remain diagnostic/reserved
+switches.
+
+The earlier design widened MTP generation as well as target verification. It
+was rejected: across three 768-token C++, Python, and Rust tasks, equal-workload
+throughput fell 5.54%, and fifth-position neural acceptance did not repay the
+extra neural step plus sixth target row. This POC tests a different economic
+boundary: the neural width never changes, and the extra target row is paid only
+when K4V already has a longer continuation. MTP improved on an intentionally
+repetitive K4V fixture (`120.820 -> 127.608 tok/s`, +5.618%): 31 width-five
+K4V cycles accepted all five proposals and avoided six target cycles. However,
+the realistic prose/C++/Python/Rust set produced no K4V candidate longer than
+four; matched xhigh prose and three-code aggregate results were -0.431% and
+-0.475%, respectively, with identical token hashes and draft counts. DFlash
+was negative even on the repetitive fixture (`106.052 -> 100.769 tok/s`,
+-4.981%) despite complete fifth-position acceptance, so it is explicitly
+excluded. Automatic activation is therefore restricted to the exact MTP+K4V
+sidecar profile; deployments whose workload does not contain useful long K4V
+continuations can retain the prior behavior with `SPEC_CONTENT_BOOST=0`.
+
+The fixed classifier is conservative for the dominant workloads: mostly-prose
+xhigh thinking remains at the baseline, while sustained fenced or unfenced
+source code can select +1. Short inline identifiers, inline JSON, Markdown
+tables, and protocol/control tokens are not positive anchors; realistic
+reasoning math remains at the baseline. Parentheses and arithmetic operators
+receive positive weight only in a local source-code context. Single table
+pipes, Markdown emphasis/separator pieces, hyphenated prose, and punctuation
+such as `?`, `%`, and `~` are excluded from code evidence; `||` remains a code
+operator. Braces and brackets remain local evidence, while URL/path pieces are
+not treated as comments or operators.
+
+Backtick-fenced blocks are a committed mode and inline backticks are a local
+delimiter mode. Closing fences and inline spans are evidence barriers, so
+source tokens still present in the local window cannot re-boost trailing
+explanatory prose.
+Mode state is synchronized only from committed prompt tokens plus the current
+target token; rejected drafts cannot alter it. A replacement request starts
+with `common_speculative_begin()`, which rebuilds mode state even when the new
+prompt has the same length and terminal token. Score levels begin at 4, 10, and
+18.
+
+An explicit request-level `speculative.n_max` bypasses content selection and
+remains the authoritative cap. Runtime sidecar failure, a stale sequence, or
+loss of direct device handoff returns K4V to the fixed neural baseline. A K4V
+proposal of `N` tokens produces `N + 1` target-verification rows because the
+sampled target token is verified with the draft. End-of-request summaries
+bucket actual candidate verification width. Neural fallbacks and K4V results
+no longer than the neural baseline do not invoke or update the classifier;
+when a later long K4V candidate appears, `prepare()` reconstructs exact state
+from committed prompt history. Every emitted proposal still receives complete
+target verification, and stochastic neural proposals still carry one complete
+validated proposal-distribution row per token.
+
+K4V first forms a cheap candidate within the reserved maximum envelope. The
+classifier runs only when that candidate exceeds the fixed neural width, then
+trims it to the content-selected cap before target decoding.
+`SPEC_CONTENT_PROVISIONAL=1` records a provisional score but does not relaunch
+K4V or a neural provider and cannot leave extra uncommitted sidecar KV.
+Only the target-accepted prefix is committed to content state. Adaptive
+weighting is parsed for future work but remains disabled. `SPEC_CONTENT_TRACE=1`
+emits one log line per cycle and is diagnostic only; disable it for timing.
+
+The vocabulary-only visual probe runs the exact classifier without loading
+model weights or launching inference:
+
+```sh
+cmake --build build --target llama-content-classify
+./build/bin/llama-content-classify -m /models/target.gguf
+./build/bin/llama-content-classify -m /models/target.gguf \
+  --windows 8 --detail-window 8 --file /tmp/mixed-sample.txt
+```
+
+It prints each real tokenizer piece, structural flags, score, raw/selected
+level, fenced/inline mode, selected K4V cap, and target-verification row count.
+Built-in samples prioritize chat-shaped xhigh thinking, technical reasoning,
+reasoning-to-code transitions, and fenced/unfenced code. Inline data, tables,
+formulas, URLs, paths, and short inline code remain adversarial controls.
+
 ### n-gram Mod (`ngram-mod`)
 
 Add basic ngram hasher for speculative decoding:
@@ -250,7 +362,7 @@ Use exactly one of these options:
 
 ```
 --spec-draft-model, -md, --model-draft  FNAME
-                                        draft model for speculative decoding (default: unused)
+                                        draft model; SPEC_SIDECAR=1 automatically prepares supported DFlash/Qwen4Exp provider assets (default: unused)
                                         (env: LLAMA_ARG_SPEC_DRAFT_MODEL)
 --spec-draft-hf, -hfd, -hfrd, --hf-repo-draft  <user>/<model>[:quant]
                                         HuggingFace repository for the draft model

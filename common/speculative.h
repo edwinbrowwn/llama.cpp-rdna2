@@ -80,8 +80,12 @@ struct common_speculative_draft_params {
     bool drafting = false;
 
     // overrides individual configurations (-1 disabled)
-    // can be used to constraint the max draft based on the remaining context size
+    // can be used to constrain the max draft based on the remaining context size
     int32_t n_max = -1;
+
+    // Set by the server only when the request supplied speculative.n_max.
+    // This is internal metadata; it does not add a command-line/API setting.
+    bool n_max_user_override = false;
 
     llama_pos   n_past;
     llama_token id_last;
@@ -97,6 +101,12 @@ struct common_speculative_draft_params {
 
     float temperature = 0.0f;
     uint32_t seed = LLAMA_DEFAULT_SEED;
+
+    // Internal sidecar-only content-aware stacked-verification controls.
+    // n_max remains the request/capacity envelope; n_max_ngram may narrow the
+    // K4V proposal within that envelope and never widens neural generation.
+    int32_t n_max_ngram = -1;
+
 };
 
 common_speculative_draft_params & common_speculative_get_draft_params(common_speculative * spec, llama_seq_id seq_id);
@@ -110,8 +120,12 @@ bool common_speculative_process(common_speculative * spec, const llama_batch & b
 // generate drafts for the sequences specified with `common_speculative_get_draft_params`
 void common_speculative_draft(common_speculative * spec);
 
-// informs the speculative context that n_accepted tokens were accepted by the target model
+// Informs the speculative context that verified tokens were accepted by the
+// target model. The four-argument form separates committed replay context from
+// the true accepted-draft count used by telemetry.
 void common_speculative_accept(common_speculative * spec, llama_seq_id, uint16_t n_accepted);
+void common_speculative_accept(common_speculative * spec, llama_seq_id,
+                               uint16_t n_accepted, uint16_t n_accepted_draft);
 
 // (optional) checkpoint and lifecycle state. State is keyed by implementation;
 // sidecars store only a small cursor/epoch while keeping device KV resident.
@@ -145,7 +159,7 @@ void common_speculative_state_restore_plan_commit(common_speculative_state_resto
 void common_speculative_state_restore_plan_free(common_speculative_state_restore_plan * plan);
 
 // print statistics about the speculative decoding
-void common_speculative_print_stats(const common_speculative * spec);
+void common_speculative_print_stats(const common_speculative * spec, llama_seq_id seq_id = -1);
 
 struct common_speculative_deleter {
     void operator()(common_speculative * s) { common_speculative_free(s); }

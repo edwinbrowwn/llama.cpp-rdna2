@@ -262,7 +262,7 @@ if ! compgen -G "$BUILD_DIR/bin/*ggml-hip*.so*" >/dev/null 2>&1; then
 fi
 case "$BUILD_SPEC_SIDECARS" in
     ON|1|TRUE|on|true)
-        for so in spec_hip_sidecar.so spec_dflash_sidecar.so spec_qwen35moe_mtp_sidecar.so; do
+        for so in spec_hip_sidecar.so spec_dflash_sidecar.so spec_qwen35moe_mtp_sidecar.so spec_qwen4exp_mtp_sidecar.so; do
             [[ -f "$BUILD_DIR/bin/$so" ]] || fail "speculative sidecar was not produced: $so"
         done
         ;;
@@ -274,8 +274,7 @@ echo "For V620 runtime optimizations set HSA_OVERRIDE_GFX_VERSION=10.3.0 before 
 case "$BUILD_SPEC_SIDECARS" in
     ON|1|TRUE|on|true)
         echo "Speculative sidecars built (dormant unless SPEC_SIDECAR=1 at runtime)."
-        echo "For automatic discovery, place prepared bundles at:"
-        echo "  $BUILD_DIR/bin/spec-sidecar-mtp and $BUILD_DIR/bin/spec-sidecar-dflash"
+        echo "Supported target and -md GGUFs automatically create and repair model-keyed provider assets on first launch."
         echo "See docs/spec-sidecars.md. Disable at build time with BUILD_SPEC_SIDECARS=OFF."
         ;;
 esac

@@ -58,7 +58,7 @@ HIP_LIB="$BUILD_DIR/bin/libggml-hip.so.0"
 [ -f "$HIP_LIB" ] || fail "HIP backend library was not produced"
 case "$BUILD_SPEC_SIDECARS" in
     ON|1|TRUE|on|true)
-        for so in spec_hip_sidecar.so spec_dflash_sidecar.so spec_qwen35moe_mtp_sidecar.so; do
+        for so in spec_hip_sidecar.so spec_dflash_sidecar.so spec_qwen35moe_mtp_sidecar.so spec_qwen4exp_mtp_sidecar.so; do
             [ -f "$BUILD_DIR/bin/$so" ] || fail "speculative sidecar was not produced: $so"
         done
         ;;
@@ -76,8 +76,7 @@ echo "Run tensor split with GGML_CUDA_ALLREDUCE=nccl"
 case "$BUILD_SPEC_SIDECARS" in
     ON|1|TRUE|on|true)
         echo "Speculative sidecars built (dormant unless SPEC_SIDECAR=1 at runtime)."
-        echo "For automatic discovery, place prepared bundles at:"
-        echo "  $BUILD_DIR/bin/spec-sidecar-mtp and $BUILD_DIR/bin/spec-sidecar-dflash"
+        echo "Supported target and -md GGUFs automatically create and repair model-keyed provider assets on first launch."
         echo "See docs/spec-sidecars.md. Disable at build time with BUILD_SPEC_SIDECARS=OFF."
         ;;
 esac

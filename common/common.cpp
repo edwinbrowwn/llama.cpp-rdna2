@@ -8,6 +8,7 @@
 #include "llama.h"
 #include "sampling.h"
 #include "speculative.h"
+#include "speculative-content.h"
 #include "unicode.h"
 
 #include <algorithm>
@@ -1555,12 +1556,11 @@ common_init_result_ptr common_init_from_params(common_params & params, bool mode
         output_sharding != nullptr && std::strcmp(output_sharding, "1") == 0;
     if (use_vocab_sharded_output) {
         if (params.sampling.backend_sampling) {
-            COM_WRN("%s", "vocabulary-sharded target output is incompatible with backend sampling; using CPU target sampling\n");
-            params.sampling.backend_sampling = false;
+            COM_WRN("%s", "backend sampling requested with GGML_TP_SHARDED_OUTPUT=1; using hidden-axis/full-logit output instead of vocabulary sharding\n");
         }
         const bool has_mtp = std::find(params.speculative.types.begin(), params.speculative.types.end(),
             COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params.speculative.types.end();
-        if (has_mtp && params.speculative.draft.backend_sampling) {
+        if (!params.sampling.backend_sampling && has_mtp && params.speculative.draft.backend_sampling) {
             COM_WRN("%s", "vocabulary-sharded output disables native MTP backend draft sampling; sidecar-local sampling is unaffected\n");
             params.speculative.draft.backend_sampling = false;
         }
@@ -1913,6 +1913,11 @@ struct llama_model_params common_model_params_to_llama(common_params & params) {
             (uint32_t) params.n_parallel);
     mparams.no_tp_output_head_sharding = has_external_shared_head_draft && !sidecar_only_candidate;
 
+    const char * output_sharding = std::getenv("GGML_TP_SHARDED_OUTPUT");
+    mparams.no_tp_output_vocab_sharding = params.sampling.backend_sampling &&
+        params.split_mode == LLAMA_SPLIT_MODE_TENSOR &&
+        output_sharding != nullptr && std::strcmp(output_sharding, "1") == 0;
+
     if (params.kv_overrides.empty()) {
         mparams.kv_overrides = NULL;
     } else {
@@ -1941,6 +1946,14 @@ struct llama_context_params common_context_params_to_llama(const common_params &
     cparams.n_ctx             = params.n_ctx;
     cparams.n_seq_max         = params.n_parallel;
     cparams.n_rs_seq          = params.speculative.need_n_rs_seq();
+    if (common_speculative_content_candidate_eligible(params.speculative) &&
+            common_speculative_content_env_enabled()) {
+        const uint32_t content_n_max = (uint32_t) std::min<int64_t>(
+                UINT32_MAX,
+                (int64_t) std::max(0, params.speculative.draft.n_max) +
+                    common_speculative_content_env_max_boost());
+        cparams.n_rs_seq = std::max(cparams.n_rs_seq, content_n_max);
+    }
     cparams.n_outputs_max     = std::max(params.n_outputs_max, 0);
     cparams.n_outputs_max_per_seq = std::max(params.n_outputs_max_per_seq, 0);
     cparams.n_batch           = params.n_batch;

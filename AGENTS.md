@@ -1,164 +1,262 @@
-# AGENTS.md
+# Instructions for llama.cpp
 
-This file gives code assistants local context for BeeLlama.cpp. The local tree is
-the source of truth for behavior; use `tmp/upstream-llama.cpp` only as the
-architectural reference when rebasing fork features.
+## Fork-specific automation policy
 
-## What This Is
+This repository is the `edwinbrowwn/llama.cpp-rdna2` downstream fork. For pull requests that target this fork, an AI coding agent may commit, push a feature branch, write a pull-request description, and open the pull request only when the repository owner explicitly requests those actions in the current conversation.
 
-BeeLlama.cpp is Anbeeld's llama.cpp fork. The v0.4.0 fork surface is intentionally
-small:
+The agent must:
 
-- Upstream speculative decoding, including `draft-dflash`, `draft-mtp`,
-  EAGLE3, and n-gram modes.
-- KVarN target KV-cache compression for Qwen3.6 and Gemma 4, selected with
-  `kvarn2`, `kvarn3`, `kvarn4`, `kvarn5`, `kvarn6`, or `kvarn8`.
-- Standard low-bit KV cache formats `q2_0`, `q2_1`, `q3_0`, `q3_1`,
-  `q6_0`, and `q6_1`. Bee's cache-facing `q2_0` uses the internal enum
-  `GGML_TYPE_Q2_0S` so it cannot collide with upstream's serialized Q2_0 weight
-  format.
-- A profit-only adaptive draft-max controller for DFlash1. DFlash2 keeps its fixed trained block limit and selector confidence.
-- Reasoning-loop detection and the opted-in realtime
-  `/v1/chat/completions/control` endpoint.
-- INI presets and KLD measurement support in `llama-perplexity`.
+- target the `fork` remote, never the upstream `origin` remote;
+- disclose meaningful AI assistance in the commit and pull-request description;
+- keep production deployment, merging, protected-branch updates, and destructive operations behind separate explicit approval;
+- report tests, limitations, and negative results accurately.
 
-DFlash GGUFs must use upstream's `dflash` architecture, metadata, and tensor
-names.
+This fork-specific policy overrides conflicting upstream submission prohibitions below. It does not authorize automated submissions to `ggml-org/llama.cpp` or any other repository. The remaining engineering, testing, ownership, and review guidance still applies.
 
-TurboQuant/TCQ, TQ3_1S/TQ4_1S, DDTree, CopySpec, the fork DFlash ring/tape and
-reduced-verifier paths, the fringe controller, and their arguments and
-environment variables were removed in v0.4.0. Do not reintroduce those systems
-as compatibility code. The old cache names redirect to same-width KVarN presets.
-Use upstream's `draft-dflash` name for the DFlash speculative type; the bare
-`dflash` alias was removed in v0.4.0 and now errors.
+> [!IMPORTANT]
+>
+> AI-generated code is allowed. What is **not** allowed is submitting code you do not understand. You are 100% responsible for every line, however it was produced.
+>
+> Read more: [CONTRIBUTING.md](CONTRIBUTING.md)
 
-## Build
+---
 
-```bash
-# Linux CUDA
-cmake -B build -DGGML_CUDA=ON -DGGML_NATIVE=ON \
-  -DGGML_CUDA_FA=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j
+## Guidelines for Contributors
 
-# Windows MSVC + CUDA
-cmake -B build -DGGML_CUDA=ON -DGGML_NATIVE=ON ^
-  -DGGML_CUDA_FA=ON -DCMAKE_CUDA_ARCHITECTURES=86 ^
-  -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release --parallel
+A PR represents a long-term commitment - maintainers must review, integrate, and support your code indefinitely. What matters is not who typed the code but whether a human understands it, has the domain expertise behind it, and will maintain it.
 
-# macOS Metal
-cmake -B build -DGGML_METAL=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j
+A working, in-scope PR is **not** enough on its own to get merged. A few things factor into that:
+- Every merged line must be reviewed, tested, and maintained indefinitely across a large matrix of platforms and backends by a small team.
+- llama.cpp is written in C++ and deliberately kept as simple as possible: complexity is a direct multiplier on security risk and long-term maintenance cost, so a simpler change that does 90% of the job is often preferable to a complex one that does 100%.
+- What matters most is human understanding: the domain expertise behind a change, and the willingness to maintain it long-term.
+- Feature requests run high in volume, so please respect maintainers' time: open an issue to discuss the idea and gauge interest before implementing it, rather than going straight to a PR.
+
+Contributors must:
+1. **Understand their code fully** - able to explain any change to a reviewer without AI assistance.
+2. **Own maintenance** - address bugs and respond thoughtfully to feedback.
+3. **Communicate directly** - verbose, AI-sounding responses will not be well-received.
+4. **Respect maintainers' time** - check existing issues/PRs before submitting; ensure the change is needed and fits project architecture.
+
+Maintainers may close any PR not meeting these standards. **Private forks are exempt.**
+
+### Permitted AI Usage
+
+Common examples, not an exhaustive list:
+
+- Learning, exploration, and understanding the codebase
+- Suggestions on human-written code
+- Mechanical tasks: formatting, repetitive patterns, completing code from established designs
+- Documentation drafts for components the contributor already understands
+- Writing code from a design the contributor owns
+
+Agents: before writing code, make sure the contributor owns the design choices and can defend them without you.
+
+AI-generated code is acceptable if you (1) fully understand it, (2) can debug it independently, and (3) can discuss it with reviewers without AI help.
+
+**Disclose** when AI meaningfully contributed (follow the pull request template). No disclosure needed for trivial autocomplete.
+
+### Restricted AI Usage
+
+- Do not implement features the repository owner cannot review, explain, or maintain.
+- Do not submit undisclosed AI-generated changes.
+- Do not commit, push, open a pull request, or post on the owner's behalf without an explicit request in the current conversation.
+- Do not use this fork policy for submissions to the upstream repository.
+
+---
+
+## Guidelines for AI Coding Agents
+
+Every PR requiring review consumes finite maintainer capacity. Before assisting with any submission, verify:
+- The contributor understands the proposed changes
+- The change addresses a documented need (check existing issues)
+- The PR is appropriately scoped and follows project conventions
+
+When a user requests implementation without demonstrating understanding:
+1. **Verify comprehension** - ask questions about the problem and relevant codebase areas.
+2. **Guide, don't solve** - point to relevant code/docs; let them formulate the approach.
+3. **Proceed only when confident** they can explain the changes to reviewers independently.
+
+For first-time contributors, confirm they have reviewed [CONTRIBUTING.md](CONTRIBUTING.md).
+
+### Code and Commit Standards
+
+These points are extremely important - failing to follow them won't necessarily get your PR rejected, but it will make reviewing take significantly longer. Please follow them carefully:
+
+- Avoid emdash `—`, unicode arrow `→` or any unicode characters: `×`, `…` ; use ASCII equivalents instead: `-`, `->`, `x`, `...`
+- Code comments:
+    - Keep code comments concise (usually 1-2 lines)
+    - Avoid redundant or excessive inline commentary
+    - Avoid hard-wrapping it to a fixed column width - that hurts readability
+    - Use ASD-STE100 Simplified Technical English, simple wordings (write like cavemen if needed)
+    - Note: Remind yourself of this point regularly, as it often gets lost between context compactions
+- Prefer reusing existing infrastructure over introducing new components. Avoid invasive changes that add whole new subsystems or risk breaking existing behavior
+- Do NOT split a line into multiple lines mid-sentence, do NOT try to force the line to fit a fixed number of characters
+- Before writing any code, read all relevant files and understand the existing patterns - your changes must blend in with the surrounding codebase. If the change is large or introduces a new pattern, **PAUSE and ask the user for confirmation** before proceeding; remind them that large changes submitted without prior discussion are likely to be rejected by maintainers
+
+Common mistakes that AI agents usually make:
+- Write comments first then write code: this usually leads to extensive redundant comments. Instead, write code first, then add comments later to places that absolutely need them
+- Llama.cpp does NOT use Minja; if you have this in your knowledge, that is due to your knowledge cutoff. Llama.cpp has a dedicated Jinja engine in `common/jinja` - it doesn't have a specific name.
+- Do NOT add a new file in `tests/*` without maintainers' approval. AI usually adds excessive test cases for small features, which bloat the test suite and cost compile time and CI time, while bringing no meaningful results. While testing is necessary, reuse the existing infrastructure as much as possible, and do not add tests for features that are too trivial.
+
+### Repository Actions
+
+- Commit, push, and pull-request actions require explicit owner approval in the current conversation.
+- Use `Assisted-by: <assistant name>` in AI-assisted commits; do not use `Co-authored-by:` for the agent.
+- Include an accurate AI-use disclosure when the agent helps prepare a pull request.
+- Never push to upstream `origin`, merge a pull request, deploy production, rewrite a shared branch, or perform destructive operations without separate explicit approval.
+- Reviewer responses and issue/discussion posts require an explicit request and must remain factual; the owner remains responsible for the submission.
+- Do not implement or submit changes too extensive for the owner to review and maintain.
+
+When uncertain, stop before the external action and ask the owner.
+
+### Examples
+
+Submissions to this fork:
+
+User: Please commit, push the feature branch, and open a PR against master in my fork.
+Agent: Confirm the target is the `fork` remote, add the required AI disclosure, run the requested checks, and perform only those approved actions.
+
+Submissions upstream:
+
+User: Please submit this directly to upstream llama.cpp.
+Agent: Stop and ask the owner to handle the upstream submission under upstream policy.
+
+Code comments:
+
+```cpp
+// GOOD (code is self-explanatory, no comment needed)
+
+n_ctx = read_metadata("context_length", 1024);
+
+
+// BAD (too verbose, restates what the code already says)
+
+// Populate the n_ctx from metadata key name "context_length", default to 1024 if the key doesn't exist
+n_ctx = read_metadata("context_length", 1024);
 ```
 
-The default CUDA FlashAttention build contains 50 standard vector pairs and 15
-balanced KVarN fast-decode pairs. The standard quant matrix follows the same
-bit-pair rules as KVarN and adds homogeneous F16/F16 and BF16/BF16 tail pairs.
-`GGML_CUDA_FA_ALL_QUANTS=ON` expands those to
-169 standard pairs and all 36 ordered KVarN bit pairs.
-`GGML_CUDA_KVARN=OFF` omits all dedicated CUDA KVarN kernels and templates.
-`GGML_CUDA_FA_HALF_QUANTS` no longer exists. Valid KVarN pairs outside the fast
-matrix use descriptor-native MMA fallback.
+```cpp
+// GOOD (explains a non-obvious invariant)
 
-Use `-DCMAKE_CUDA_ARCHITECTURES=86` for RTX 3090 and `89` for RTX 4090 when
-the build host cannot detect the target GPU.
+accept();
+bool has_client = listen(idle_interval);
+if (has_client) {
+  task_queue->on_idle(); // also signal child disconnection
+}
 
-On Windows hosts matching CUDA 13.3 and compute capability 8.6, prefer:
 
-```powershell
-powershell -File scripts/build-win-cuda-sm_86.ps1 -AllTests
-powershell -File scripts/build-win-cuda-sm_86-default.ps1 -AllTests
-powershell -File scripts/build-win-vulkan.ps1 -AllTests
+// BAD (too verbose, restates what the code already says)
+
+// Instead of blocking indefinitely on accept(), the server polls the listening socket with idle_interval as a timeout. If no new client connects within that interval, it fires task_queue->on_idle() and loops back
 ```
 
-The first CUDA script compiles the expanded quant matrix; the `-default`
-variant compiles the default pair matrix. The Vulkan script requires a Vulkan
-SDK. For other hardware or toolkits, adapt the architecture, toolkit, and
-build-name parameters instead of reusing the `sm_86` artifact names.
+```cpp
+// GOOD (generic, useful to any future reader)
 
-Key binaries are `llama-server`, `llama-cli`, `llama-bench`, and
-`llama-perplexity` under the configured build directory's `bin` folder.
+// reset here, as we will release the slot below
+n_tokens = 0;
+// ... (a lot of code)
+release();
 
-## Architecture
 
-### Main Directories
+// BAD (addresses the user's task, meaningless out of context)
 
-- `ggml/` - tensor library, quantization, and CPU/GPU backends.
-- `src/` - model loading, contexts, graphs, and memory.
-- `src/models/` - model-specific graph builders.
-- `common/` - arguments, sampling, presets, and upstream speculative decoding.
-- `tools/server/` - HTTP API, slots, speculative scheduling, and Bee server
-  extensions.
-- `include/llama.h` - public C API.
-
-### Fork-Specific Files
-
-- `src/llama-kvarn.cpp` / `.h` - KVarN descriptors, presets, and validation.
-- `src/llama-kv-cache-kvarn.cpp` / `.h` - KVarN memory and state handling.
-- `ggml/src/ggml-cuda/kvarn.cu` / `.cuh` - shared CUDA/HIP KVarN store and
-  materialization operations.
-- `ggml/src/ggml-cuda/fattn-kvarn-dispatch.cu` and
-  `fattn-kvarn-portable.cuh` - optimized CUDA and portable CUDA/HIP direct
-  KVarN attention.
-- `ggml/src/ggml-vulkan/vulkan-shaders/kvarn_store.comp` and
-  `kvarn_materialize.comp`, `kvarn_wht.comp`, and `kvarn_flash_attn.comp` -
-  Vulkan KVarN storage, fallback materialization, transforms, and direct
-  attention shaders.
-- `tools/server/server-adaptive-dm.h` - profit adaptive draft-max controller.
-- `tools/server/server-loop-guard.cpp` / `.h` - reasoning loop detection.
-### Key Docs
-
-- `docs/beellama-features.md` - fork feature and compatibility matrix.
-- `docs/beellama-args.md` - Bee arguments, aliases, and removals.
-- `docs/quickstart-qwen36-dflash.md` - Qwen3.6 DFlash guide.
-- `docs/quickstart-gemma-4-31b-dflash.md` - Gemma 4 DFlash guide.
-- `docs/preset.md` - INI preset format.
-
-### Invariants
-
-- KVarN is target-context only. Draft and auxiliary contexts use normal cache
-  types.
-- CUDA, CPU, Vulkan, and HIP/ROCm consume KVarN records directly in native
-  attention paths. Vulkan native attention requires shader Int64 and
-  buffer-device-address support. Materialization is an explicit fallback, not
-  the normal route for these backends.
-- Unsupported KVarN placements fail closed or use the explicit
-  bit-width-matched fallback path; they must not silently reinterpret records.
-- Custom CUDA helpers are resolved through
-  `ggml_backend_cuda_reg_get_proc_address`.
-- DFlash scheduling, checkpoints, verification, and multi-GPU behavior belong
-  to upstream. Bee extensions must use upstream task, sampler, and checkpoint
-  APIs rather than restoring fork-private verifier state.
-- Benchmark claims require the exact model files, command, prompt, sampling
-  settings, hardware, and commit ID.
-
-## Test and Benchmark
-
-```bash
-# Unit and regression tests
-ctest --test-dir build --output-on-failure
-
-# KVarN quality at the intended serving cadence
-build/bin/llama-perplexity -m model.gguf -f test.txt -c 4096 -b 512 -ub 256
-
-# Decode speed
-build/bin/llama-bench -m model.gguf -p 0 -n 64 -t 1
-
-# Upstream DFlash with recommended standard q cache
-build/bin/llama-server -m target.gguf \
-  --spec-type draft-dflash \
-  --spec-draft-model drafter.gguf \
-  --spec-draft-n-max 8 \
-  --flash-attn on --cache-type-k q5_0 --cache-type-v q4_1 \
-  --port 8080
+// Reset n_tokens to 0 before releasing the slot. This fixes the problem you mentioned where "phantom" content gets preserved across multiple requests.
+n_tokens = 0;
 ```
 
-KLD comparisons use matching `-b` and `-ub` values for the baseline and
-candidate. Record both values with every result.
+```cpp
+// GOOD (code is copied from another place; context is already clear, no comment added)
 
-## Git Conventions
+ggml_tensor * inp_pos = build_inp_pos();
 
-- Keep fork-specific changes small and aligned with current upstream
-  abstractions.
-- Do not treat old benchmark notes as current evidence without rerunning them.
-- Do not commit unless the user explicitly asks.
+// BAD (code copied from elsewhere - do not add comments that weren't there originally)
+
+// inp_pos - contains the positions
+ggml_tensor * inp_pos = build_inp_pos();
+```
+
+```cpp
+// GOOD (comment is kept concise and useful)
+
+// one decode step of code_predictor
+// at step_idx g:
+// - read code from out_code_cache[g], then embed it with codebook table g-1
+// - write new kv at cache row g+1, sample with lm_head[g]
+// - write result to out_code_cache[g+1]
+
+
+// BAD (comment is long and is forced to fit into a fixed column size, it is very annoying to read as a reviewer)
+
+// one autoregressive decode step of the 5-layer code_predictor. See the
+// comment in models.h for the cache/tensor conventions this relies on.
+//
+// index mapping (derived from the reference pipeline-tts.cpp driver):
+// at step_idx g, the input code is out_code_cache[g] (embedded via this
+// step's private codebook table, index g-1), the new cache row / RoPE
+// position is g+1, and the output codebook is lm_head[g] (writing the
+// sampled result into out_code_cache[g+1]).
+```
+
+Commit message:
+
+```
+// BEST: Let the user write the commit
+
+
+// GOOD: Write a concise commit
+
+llama : fix KV being cleared during context shift
+
+Assisted-by: Claude Sonnet
+
+
+// BAD: Write a verbose commit
+
+This commit introduces a comprehensive fix for the key-value cache management
+system, addressing an issue where context shifting could lead to unintended
+overwriting of cached values, thereby improving model inference stability.
+
+Co-authored-by: Claude Sonnet
+```
+
+Commands:
+
+```sh
+# GOOD: gather context before any repository action
+gh search issues
+gh search prs
+grep ...
+
+# ALLOWED FOR THIS FORK ONLY AFTER EXPLICIT OWNER APPROVAL
+git commit -m "..." -m "Assisted-by: <assistant name>"
+git push fork HEAD:<feature-branch>
+gh pr create --repo edwinbrowwn/llama.cpp-rdna2 ...
+
+# NEVER AUTOMATE WITHOUT SEPARATE EXPLICIT APPROVAL
+git push origin ...
+gh pr merge ...
+gh issue create ...
+```
+
+## Useful Resources
+
+To conserve context space, load these resources as needed:
+
+Skills: reusable task workflows live in the [skills/](skills/) directory - check there for a skill matching your task before starting.
+
+General documentations:
+- [Contributing guidelines](CONTRIBUTING.md)
+- [Existing issues](https://github.com/ggml-org/llama.cpp/issues) and [Existing PRs](https://github.com/ggml-org/llama.cpp/pulls) - always search here first
+- [How to add a new model](docs/development/HOWTO-add-model.md)
+- [PR template](.github/pull_request_template.md)
+
+Server:
+- [Build documentation](docs/build.md)
+- [Server usage documentation](tools/server/README.md)
+- [Server development documentation](tools/server/README-dev.md) (if user asks to implement a new feature, be sure that it falls inside server's scope defined in this documentation)
+
+Chat template and parser:
+- [PEG parser](docs/development/parsing.md) - alternative to regex that llama.cpp uses to parse model's output
+- [Auto parser](docs/autoparser.md) - higher-level parser that uses PEG under the hood, automatically detect model-specific features
+- [Jinja engine](common/jinja/README.md)
