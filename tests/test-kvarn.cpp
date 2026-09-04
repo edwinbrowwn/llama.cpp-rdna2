@@ -3169,6 +3169,7 @@ static void test_native_flash_attention_gpu() {
         std::strncmp(actual_backend, "Vulkan", 6) == 0;
     const uint32_t route_stats_abi_version = expect_vulkan_route_stats ? 1u : 3u;
     bool hip_safe_first = false;
+    bool hip_vector_only = false;
     int hip_physical_wave_size = 0;
     require(!expect_vulkan_route_stats ||
             (route_stats_reset != nullptr && route_stats_get != nullptr),
@@ -3274,6 +3275,10 @@ static void test_native_flash_attention_gpu() {
                     "native KVarN backend capability record omitted its portable body-plus-tail contract");
             hip_safe_first = capabilities.specialized_generic_mma &&
                 !capabilities.original_v_domain;
+            hip_vector_only = capabilities.specialized_decode_vector &&
+                !capabilities.specialized_generic_mma &&
+                !capabilities.specialized_decode_split &&
+                !capabilities.original_v_domain;
             hip_physical_wave_size = capabilities.physical_warp_size;
             if (hip_safe_first) {
                 require(!capabilities.specialized_decode_split &&
@@ -3296,9 +3301,9 @@ static void test_native_flash_attention_gpu() {
     if (std::getenv("GGML_KVARN_TEST_AMD_ROUTE_BOUNDARIES_ONLY") != nullptr) {
         require(route_stats_reset != nullptr && route_stats_get != nullptr,
                 "AMD route-boundary validation requires KVarN route telemetry");
-        require(hip_safe_first &&
+        require((hip_safe_first || hip_vector_only) &&
                 (hip_physical_wave_size == 32 || hip_physical_wave_size == 64),
-                "AMD route-boundary validation did not find a safe-first HIP wave32/wave64 device");
+                "AMD route-boundary validation did not find a supported HIP wave32/wave64 device");
 
         const char * attestation = std::getenv("GGML_KVARN_AMD_RUNTIME_ATTESTATION");
         const bool attested_wave = attestation != nullptr &&
@@ -3317,7 +3322,7 @@ static void test_native_flash_attention_gpu() {
             route_stats_reset();
             const std::vector<float> actual = test_native_flash_attention_output(
                     gpu_backend, true, true, head_dim, 4, 3, n_q,
-                    gqa, 1, 513, 5, false, nullptr, true,
+                    gqa, 1, 513, 5, false, nullptr, !hip_vector_only,
                     tail_tokens, false, exact_type);
             test_kvarn_route_stats stats = make_test_kvarn_route_stats(route_stats_abi_version);
             route_stats_get(&stats);
@@ -3325,9 +3330,22 @@ static void test_native_flash_attention_gpu() {
             require_close_f32_rmse(actual, expected, 1e-2f, message);
             require(stats.materialize_fallback == 0,
                     "AMD route-boundary case materialized the KVarN body");
+            if (hip_vector_only) {
+                const bool expect_vector = head_dim == 256 && n_q == 1 && gqa >= 2;
+                if (expect_vector) {
+                    require(stats.decode_vector > 0 && stats.amd_decode_vector > 0 &&
+                                    stats.decode_split == 0 && stats.generic_mma == 0,
+                            "RDNA2 D256 decode did not enter its vector KVarN route");
+                } else {
+                    require(stats.portable_native > 0 && stats.decode_split == 0 &&
+                                    stats.decode_vector == 0 && stats.generic_mma == 0,
+                            "RDNA2 unsupported vector shape did not use portable KVarN attention");
+                }
+                return;
+            }
             require(stats.decode_split == 0 && stats.amd_decode_split == 0 &&
                     stats.decode_vector == 0 && stats.amd_decode_vector == 0,
-                    "AMD route-boundary case entered a CUDA-only specialized decode route");
+                    "safe-first AMD route entered an unsupported specialized decode route");
             const bool known_invalid_generic = hip_physical_wave_size == 32 ?
                 head_dim > 128 : head_dim > 256;
             if (known_invalid_generic) {
