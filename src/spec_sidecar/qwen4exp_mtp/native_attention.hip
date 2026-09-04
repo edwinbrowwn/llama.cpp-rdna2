@@ -85,7 +85,7 @@ __attribute__((visibility("hidden"))) int launch_native_sparse_attention(
             reinterpret_cast<const char *>(mask),
             static_cast<const char *>(nullptr),
             static_cast<const int *>(nullptr),
-            partial_output, partial_meta,
+            partial_output, partial_meta, nullptr,
             0.0625f, 0.0f, 1.0f, 1.0f, 16u, 0.0f,
             head_dim, ne01, heads, 1,
             head_dim * static_cast<int>(sizeof(float)),
@@ -107,7 +107,7 @@ __attribute__((visibility("hidden"))) int launch_native_sparse_attention(
     hipLaunchKernelGGL((flash_attn_combine_results<head_dim>),
             dim3(1, heads, 1), dim3(head_dim, 1, 1),
             parallel * sizeof(float2), stream,
-            partial_output, partial_meta, output, parallel);
+            partial_output, partial_meta, output, nullptr, parallel);
     if (hipGetLastError() != hipSuccess) return -1;
     if (parallel_used != nullptr) *parallel_used = parallel;
     return 0;
