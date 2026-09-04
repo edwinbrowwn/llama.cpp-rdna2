@@ -236,10 +236,16 @@ never be read by a later draft. Set
   With a single HIP target ubatch on the matching device, the host passes
   borrowed target device pointers and attaches the sidecar to the target HIP
   stream; the target context defers those host output copies until a host
-  getter is requested. A borrowed graph tensor cannot survive a later ubatch,
-  so multi-ubatch logical decodes materialize each ubatch in stream order before
-  its graph storage is reused. Otherwise the sidecar uses the synchronized
-  host-copy path.
+  getter is requested. Tensor-parallel `Meta()` outputs are exposed only when
+  their split state is mirrored; split or partial tensors fail closed to host
+  materialization. Compute-arena shard lookup remains tied to the active Meta
+  graph plan so a cached descriptor cannot outlive its graph storage. A
+  borrowed graph tensor cannot survive a later ubatch, so multi-ubatch logical
+  decodes materialize each ubatch in stream order before its graph storage is
+  reused. Otherwise the sidecar uses the synchronized host-copy path.
+  `LLAMA_SPEC_HIP_DFLASH_DEVICE_INPUT=0` is a diagnostic rollback to force the
+  synchronized DFlash host-input path; it does not alter DFlash's fixed draft
+  width.
 - The ABI exposes sequence-scoped `state_size`, `get_state`, `set_state`,
   `reset_state`, `truncate_state`, `commit_state`, and `rebase_state` for both
   sidecars. Snapshots contain only a position cursor plus an epoch; the large

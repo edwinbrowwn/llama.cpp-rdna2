@@ -3109,8 +3109,8 @@ static void ggml_backend_cuda_comm_init_nccl(ggml_backend_cuda_comm_context * re
                     const int p2p_mode = ggml_cuda_rdna2_p2p_host_allreduce_mode();
                     std::fprintf(stderr, "armed RDNA2 P2P %s host-snapshot AllReduce after installed-RCCL self-test (qwen4=%d n1=%d n5=%d n6=%d)\n",
                             p2p_mode == GGML_CUDA_RDNA2_P2P_HOST_FUSED ? "consumer-fused" :
-                            p2p_mode == GGML_CUDA_RDNA2_P2P_HOST_AUTO_EXPANDED ? "MTP-target-rows5-auto-expanded" :
-                            ggml_cuda_rdna2_p2p_host_allreduce_mtp_enabled() ? "MTP-target-rows5-auto" : "ordinary",
+                            p2p_mode == GGML_CUDA_RDNA2_P2P_HOST_AUTO_EXPANDED ? "spec-target-rows5-auto-expanded" :
+                            ggml_cuda_rdna2_p2p_host_allreduce_mtp_enabled() ? "spec-target-rows5-auto" : "ordinary",
                             ret->p2p_host_exact_2560 ? 1 : 0, ret->p2p_host_exact_5120 ? 1 : 0,
                             ret->p2p_host_exact_25600 ? 1 : 0, ret->p2p_host_exact_30720 ? 1 : 0);
                 }

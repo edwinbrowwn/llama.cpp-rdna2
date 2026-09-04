@@ -347,6 +347,11 @@ struct common_params_speculative_draft {
     common_speculative_type sidecar_type = COMMON_SPECULATIVE_TYPE_NONE;
     const common_spec_sidecar_profile * sidecar_profile = nullptr;
 
+    // Internal runtime qualification gate for positive content-aware width.
+    // A successful sidecar probe alone is insufficient: the caller must also
+    // certify the provider/topology/optimization envelope before enabling it.
+    bool content_width_eligible = false;
+
     // Resolved before target-model loading so the output-head placement probe,
     // post-load preflight, and runtime loader consume one atomic artifact set.
     bool sidecar_prepare_attempted = false;

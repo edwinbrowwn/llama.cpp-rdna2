@@ -146,6 +146,45 @@ int main() {
                 make_spec({COMMON_SPECULATIVE_TYPE_DRAFT_MTP}, 4)),
             "MTP does not select DFlash depth schedule");
 
+    require(server_spec_content_mtp_stack_profile(
+                make_spec({COMMON_SPECULATIVE_TYPE_DRAFT_MTP}, 4)),
+            "dense MTP width four is content-profile eligible");
+    require(server_spec_content_mtp_stack_profile(
+                make_spec({COMMON_SPECULATIVE_TYPE_DRAFT_MTP,
+                           COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V}, 4)),
+            "dense MTP plus K4V retains content-profile eligibility");
+    require(!server_spec_content_mtp_stack_profile(
+                make_spec({COMMON_SPECULATIVE_TYPE_DRAFT_MTP,
+                           COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V}, 3)),
+            "unqualified baseline width stays fixed");
+    require(!server_spec_content_mtp_stack_profile(
+                make_spec({COMMON_SPECULATIVE_TYPE_DRAFT_MTP,
+                           COMMON_SPECULATIVE_TYPE_NGRAM_MOD}, 4)),
+            "unqualified ngram composition stays fixed");
+    require(!server_spec_content_mtp_stack_profile(
+                make_spec({COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH,
+                           COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V}, 4)),
+            "DFlash cannot select the MTP content profile");
+    require(!server_spec_content_mtp_stack_profile(
+                make_spec({COMMON_SPECULATIVE_TYPE_DRAFT_MTP,
+                           COMMON_SPECULATIVE_TYPE_DRAFT_MTP}, 4)),
+            "duplicate neural providers cannot select content width");
+    require(!server_spec_content_mtp_stack_profile(
+                make_spec({COMMON_SPECULATIVE_TYPE_DRAFT_MTP,
+                           COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V,
+                           COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V}, 4)),
+            "duplicate K4V providers cannot select content width");
+
+    require(server_spec_mtp_deferred_setting_enabled(nullptr) &&
+            server_spec_mtp_deferred_setting_enabled("auto") &&
+            server_spec_mtp_deferred_setting_enabled("1"),
+            "qualified deferred MTP settings enable content composition");
+    require(!server_spec_mtp_deferred_setting_enabled("0") &&
+            !server_spec_mtp_deferred_setting_enabled("off") &&
+            !server_spec_mtp_deferred_setting_enabled("on") &&
+            !server_spec_mtp_deferred_setting_enabled("invalid"),
+            "non-operative deferred MTP settings fail content composition closed");
+
     require(server_spec_auto_backend_width_eligible(-1, false, -1, 4),
             "omitted request width preserves automatic backend sampling");
     require(server_spec_auto_backend_width_eligible(7, false, 4, 4),

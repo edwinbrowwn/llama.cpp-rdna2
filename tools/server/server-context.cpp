@@ -67,8 +67,7 @@ static bool server_env_enabled(const char * name) {
 // sidecar-only content POC may use that envelope as base+boost, while native
 // speculative paths and explicit request overrides retain the old behavior.
 static bool server_sidecar_content_boost_enabled(const common_params & params) {
-    return params.speculative.draft.sidecar_only &&
-            !params.speculative.has_synth() &&
+    return common_speculative_content_runtime_eligible(params.speculative) &&
             common_speculative_content_env_enabled();
 }
 
@@ -153,6 +152,21 @@ static bool server_gfx1030_sidecar_runtime_profile(const common_params & params)
         ++n_rocm_devices;
     }
     return n_rocm_devices == 4;
+}
+
+static bool server_mtp_deferred_catchup_enabled() {
+    return server_spec_mtp_deferred_setting_enabled(
+            std::getenv("GGML_MTP_DEFER_CATCHUP"));
+}
+
+static bool server_gfx1030_content_mtp_profile(const common_params & params) {
+    return server_gfx1030_sidecar_runtime_profile(params) &&
+            params.n_parallel == 1 &&
+            params.speculative.draft.sidecar_candidate_ready &&
+            params.speculative.draft.sidecar_profile_name == "qwen35-mtp" &&
+            server_spec_content_mtp_stack_profile(params.speculative) &&
+            !params.speculative.has_synth() &&
+            server_mtp_deferred_catchup_enabled();
 }
 
 static bool server_gfx1030_dflash_dynamic_depth_profile(const common_params & params) {
@@ -1308,6 +1322,15 @@ private:
         const bool sidecar_candidate = common_speculative_sidecar_candidate(
                 params_base.speculative, params_base.model.path,
                 (uint32_t) params_base.n_parallel);
+        params_base.speculative.draft.content_width_eligible = sidecar_candidate &&
+                server_gfx1030_content_mtp_profile(params_base);
+        if (sidecar_candidate && common_speculative_content_env_enabled() &&
+                std::find(params_base.speculative.types.begin(),
+                    params_base.speculative.types.end(),
+                    COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params_base.speculative.types.end() &&
+                !params_base.speculative.draft.content_width_eligible) {
+            SRV_WRN("%s", "content auto-extension disabled: requires the qwen35-mtp gfx1030 TP4 tensor-split profile, sharded output, --parallel 1, baseline width 4, deferred catch-up, and optional K4V only\n");
+        }
         const auto output_limits = server_output_limits(params_base);
         params_base.n_outputs_max = output_limits.total;
         params_base.n_outputs_max_per_seq = output_limits.per_seq;
@@ -1449,7 +1472,7 @@ private:
             const bool is_mtp = std::find(params_base.speculative.types.begin(),
                                           params_base.speculative.types.end(),
                                           COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params_base.speculative.types.end();
-            if (sidecar_candidate && !params_base.speculative.has_synth() &&
+            if (params_base.speculative.draft.content_width_eligible &&
                     common_speculative_content_env_enabled()) {
                 SRV_INF("capping automatic gfx1030 %s+K4V base cycle at %d draft tokens "
                         "(configured K4V m=%u); sidecar content boost envelope=%d, "

@@ -1767,8 +1767,7 @@ struct llama_context_params common_context_params_to_llama(const common_params &
     cparams.n_ctx             = params.n_ctx;
     cparams.n_seq_max         = params.n_parallel;
     cparams.n_rs_seq          = params.speculative.need_n_rs_seq();
-    if (params.speculative.draft.sidecar_candidate_ready &&
-            !params.speculative.has_synth() &&
+    if (common_speculative_content_candidate_eligible(params.speculative) &&
             common_speculative_content_env_enabled()) {
         const uint32_t content_n_max = (uint32_t) std::min<int64_t>(
                 UINT32_MAX,

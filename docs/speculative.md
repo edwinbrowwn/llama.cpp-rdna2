@@ -177,30 +177,61 @@ llama-server [...] --spec-type ngram-map-k4v --spec-ngram-map-k4v-size-n 8 --spe
 
 #### Sidecar content-aware nmax POC
 
-When an external sidecar is active, the opt-in content controller can grant a
-small relative nmax boost without changing the user's baseline:
+When an external sidecar is active, the opt-in experimental controller can
+grant a small relative nmax boost without changing the user's baseline:
 
 ```bash
-SPEC_SIDECAR=1 SPEC_CONTENT_BOOST=1 \
-  ./llama-server [...] --spec-draft-n-max 6
+# Experimental only; fixed width four remains the qualified setting.
+SPEC_SIDECAR=1 SPEC_CONTENT_BOOST=1 GGML_TP_SHARDED_OUTPUT=1 \
+  ./llama-server [...] --parallel 1 --spec-draft-n-max 4
 ```
 
 The controller uses one scalar structural-confidence level and permits only
-`base+0` through `base+3`. It is sidecar-only in this POC; host/native draft
-models are unchanged. The candidate configuration uses an 8-token window, +1
-maximum boost, and two-update upward hysteresis. The window accepts 4 through
-32 tokens and includes the current target-sampled token. Optional switches are
-`SPEC_CONTENT_MAX_BOOST`, `SPEC_CONTENT_WINDOW`, `SPEC_CONTENT_HYST`, `SPEC_CONTENT_TRACE`,
-`SPEC_CONTENT_PROVISIONAL`, and `SPEC_CONTENT_ADAPT`. A maximum boost of zero
-disables the controller entirely. Values +2 and +3 remain available for
-explicit experiments, but are not defaults until wider drafts prove profitable.
+`base+0` through `base+3`. It is restricted to sidecar MTP in this POC;
+host/native draft models are unchanged. DFlash remains fixed at its qualified
+width because its measured width-five path loses throughput and a positive-only
+controller cannot improve its width-four optimum. Runtime widening is limited
+to the dense `qwen35-mtp` gfx1030 TP4 tensor-split test envelope with
+vocabulary-sharded output, `--parallel 1`, baseline width four, deferred
+catch-up enabled, and no proposal stack beyond optional K4V. Other profiles
+remain fixed-width.
 
-The fixed classifier treats fenced blocks as a committed mode and inline
-backticks as a local mode. Fence state is synchronized only from committed
-prompt tokens plus the current target token; rejected draft tokens cannot
-change it. Braces and brackets contribute local evidence but are not immediate
-anchors, and URL/path pieces are not treated as comments or operators. Score
-levels begin at 4, 10, and 18 so a small inline data fragment cannot reach +3.
+The experimental configuration uses an 8-token window, +1 maximum boost, and
+two-update upward hysteresis. The window accepts 4 through 32 tokens and
+includes the current target-sampled token. Optional switches are
+`SPEC_CONTENT_MAX_BOOST`, `SPEC_CONTENT_WINDOW`, `SPEC_CONTENT_HYST`,
+`SPEC_CONTENT_TRACE`, `SPEC_CONTENT_PROVISIONAL`, and `SPEC_CONTENT_ADAPT`. A
+maximum boost of zero disables the controller entirely. Values +2 and +3 are
+reserved experiments and must not be tested until +1 is profitable.
+
+Matched qualification did not promote width five. Two 1,024-token mostly-prose
+runs stayed byte-for-byte at width four and measured within noise. Across three
+768-token C++, Python, and Rust generation tasks, equal-workload throughput
+fell 5.54% with content width enabled; the fifth-position acceptance was too
+low to repay its verification row. One separate 1,024-token code task was
+neutral. Therefore fixed width four remains selected and `SPEC_CONTENT_BOOST`
+must remain unset outside explicit experiments.
+
+The fixed classifier is conservative for the dominant workloads: mostly-prose
+xhigh thinking remains at the baseline, while sustained fenced or unfenced
+source code can select +1. Short inline identifiers, inline JSON, Markdown
+tables, and protocol/control tokens are not positive anchors; realistic
+reasoning math remains at the baseline. Parentheses and arithmetic operators
+receive positive weight only in a local source-code context. Single table
+pipes, Markdown emphasis/separator pieces, hyphenated prose, and punctuation
+such as `?`, `%`, and `~` are excluded from code evidence; `||` remains a code
+operator. Braces and brackets remain local evidence, while URL/path pieces are
+not treated as comments or operators.
+
+Backtick-fenced blocks are a committed mode and inline backticks are a local
+delimiter mode. Closing fences and inline spans are evidence barriers, so
+source tokens still present in the local window cannot re-boost trailing
+explanatory prose.
+Mode state is synchronized only from committed prompt tokens plus the current
+target token; rejected drafts cannot alter it. A replacement request starts
+with `common_speculative_begin()`, which rebuilds mode state even when the new
+prompt has the same length and terminal token. Score levels begin at 4, 10, and
+18.
 
 An explicit request-level `speculative.n_max` bypasses content selection and
 remains the authoritative cap. Runtime sidecar failure or a stale sidecar
@@ -210,8 +241,9 @@ costly host-staged automatic extension. A draft width of `N` produces `N + 1`
 target-verification rows because the sampled target token
 is verified with the draft. End-of-request summaries report cycles, drafted and
 accepted tokens, mean committed span, and last-position acceptance separately
-for each selected width. Target verification and proposal distributions are
-unchanged.
+for each selected width. Every emitted proposal still receives complete target
+verification, and stochastic neural proposals still carry one complete
+validated proposal-distribution row per token.
 
 Sidecar providers draft a block in one call, so BEFORE-context selection is the
 wall-clock path: `SPEC_CONTENT_PROVISIONAL=1` records the provisional score but
@@ -232,8 +264,9 @@ cmake --build build --target llama-content-classify
 
 It prints each real tokenizer piece, structural flags, score, raw/selected
 level, fenced/inline mode, draft width, and target-verification row count.
-Built-in samples compare prose, small embedded data, fenced and unfenced code,
-tables, URLs, paths, and inline code.
+Built-in samples prioritize chat-shaped xhigh thinking, technical reasoning,
+reasoning-to-code transitions, and fenced/unfenced code. Inline data, tables,
+formulas, URLs, paths, and short inline code remain adversarial controls.
 
 ### n-gram Mod (`ngram-mod`)
 

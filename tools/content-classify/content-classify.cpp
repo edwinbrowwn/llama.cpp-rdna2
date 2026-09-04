@@ -21,6 +21,26 @@ struct sample_case {
 static const std::vector<sample_case> & builtin_samples() {
     static const std::vector<sample_case> samples = {
         {
+            "thinking-planning-prose",
+            "mostly-prose reasoning should remain at +0",
+            "<think>\nWe need to examine the request carefully before changing anything. First, compare the current behavior with the known baseline. Second, identify which assumption could explain the difference. The evidence so far suggests that the configuration changed, not that the answer became less accurate. Therefore the safest next step is a matched comparison using the same prompt and settings.\n</think>"
+        },
+        {
+            "thinking-technical-prose",
+            "headings, bullets, identifiers, and paths should not widen surrounding reasoning",
+            "<think>\n### Analysis\nThe request asks whether the new controller bypasses an existing optimization.\n\n- The baseline stays at four draft tokens.\n- `n_max` is a ceiling rather than an acceptance target.\n- The file under /var/lib/example is only diagnostic evidence.\n\nThe direct device handoff remains important because host staging adds latency. We should verify the invariant before drawing a performance conclusion.\n</think>"
+        },
+        {
+            "thinking-math-prose",
+            "short equations inside reasoning should remain predominantly +0",
+            "<think>\nSuppose the accepted span is L = 1 + a. Increasing the proposal width helps only when the marginal acceptance offsets the additional verification cost. A result near 82 tokens per second versus 75 tokens per second is large enough that ordinary run-to-run noise is not a sufficient explanation.\n</think>"
+        },
+        {
+            "thinking-to-code",
+            "reasoning stays +0, fenced source becomes +1, and trailing prose returns to +0",
+            "<think>\nThe implementation only needs a small guard around the existing loop. Keep the explanation separate from the source so the behavior is easy to review.\n</think>\n\n```cpp\nint clamp(int value, int low, int high) {\n    if (value < low) return low;\n    if (value > high) return high;\n    return value;\n}\n```\n\nThis preserves the original behavior outside the guarded range."
+        },
+        {
             "plain-prose",
             "should remain at +0",
             "The old library was quiet in the afternoon. We reviewed the notes, discussed the tradeoffs, and agreed to revisit the decision tomorrow."
@@ -32,7 +52,7 @@ static const std::vector<sample_case> & builtin_samples() {
         },
         {
             "inline-json-in-prose",
-            "the tiny data fragment may spike briefly, then return to prose",
+            "small inline data in prose should remain at +0",
             "The service returned {\"status\":\"ok\",\"count\":3}, after which the report continued with an ordinary explanation of the result."
         },
         {
@@ -42,7 +62,7 @@ static const std::vector<sample_case> & builtin_samples() {
         },
         {
             "inline-code-in-prose",
-            "inline code should be localized rather than boost the whole paragraph",
+            "short inline code in prose should remain at +0",
             "Call `cache.clear()` before retrying, but keep the surrounding explanation concise and readable for operators."
         },
         {
@@ -62,7 +82,7 @@ static const std::vector<sample_case> & builtin_samples() {
         },
         {
             "markdown-table",
-            "tabular structure should receive moderate structural confidence",
+            "reasoning tables should remain at +0 until separately profitable",
             "The measurements were:\n\n| mode | tokens/s | accepted |\n| --- | ---: | ---: |\n| base | 95.2 | 6989 |\n| test | 72.8 | 5100 |\n\nThe table is followed by prose."
         },
         {

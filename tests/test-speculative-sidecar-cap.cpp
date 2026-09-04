@@ -22,6 +22,14 @@ static void test_cap_and_explicit_override() {
     dp.n_max_content = 5;
     require(common_speculative_sidecar_cap_limit(content_cap, dp) == 5,
             "content-selected width narrows the sidecar envelope");
+    dp.n_max_content = 4;
+    require(common_speculative_sidecar_cap_limit(content_cap, dp) == 4,
+            "runtime sidecar fallback narrows K4V to the configured baseline");
+    dp.n_max = 3;
+    dp.n_max_content = 5;
+    require(common_speculative_sidecar_cap_limit(content_cap, dp) == 3,
+            "remaining context is authoritative over content width");
+    dp.n_max = 8;
 
     dp.n_max_user_override = true;
     require(!common_speculative_sidecar_cap_request_enabled(cap, dp), "explicit request bypasses cap");
@@ -59,6 +67,35 @@ static void test_ngram_map_fixed_width() {
     llama_tokens complex_draft;
     common_ngram_map_draft(complex, prompt, 2, complex_draft);
     require(complex_draft.size() == 3, "complex map honors fixed sidecar cap");
+
+    capped.draft_limit = 4;
+    capped_draft.clear();
+    common_ngram_map_draft(capped, prompt, 2, capped_draft);
+    require(capped_draft.size() == 4,
+            "content-selected K4V width can return to the baseline");
+    capped.draft_limit = 5;
+    capped_draft.clear();
+    common_ngram_map_draft(capped, prompt, 2, capped_draft);
+    require(capped_draft.size() == 5,
+            "content-selected K4V width follows the wider cycle envelope");
+    capped.draft_limit = 4;
+    capped_draft.clear();
+    common_ngram_map_draft(capped, prompt, 2, capped_draft);
+    require(capped_draft.size() == 4,
+            "content-selected K4V width narrows without stale continuation");
+
+    common_ngram_map shifted(2, 6, true, 1);
+    common_ngram_map_begin(shifted, prompt);
+    llama_tokens shifted_draft;
+    common_ngram_map_draft(shifted, prompt, 2, shifted_draft);
+    const llama_tokens shorter(prompt.begin(), prompt.begin() + 12);
+    shifted.draft_limit = 3;
+    shifted_draft.clear();
+    common_ngram_map_draft(shifted, shorter, 3, shifted_draft);
+    require(shifted.idx_last_check == shorter.size() &&
+            shifted.size_last_begin == shorter.size() &&
+            shifted.draft_limit == 3,
+            "K4V reconciles an in-generation context shrink without losing the selected cap");
 
     common_ngram_map short_value(2, 1, true, 1);
     common_ngram_map_begin(short_value, prompt);

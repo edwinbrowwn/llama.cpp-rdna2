@@ -1,6 +1,9 @@
 #pragma once
 
 #include "common.h"
+#include "speculative-content.h"
+
+#include <cstring>
 
 enum class server_spec_target_backend_profile_kind {
     NONE,
@@ -188,6 +191,19 @@ inline bool server_spec_gfx1030_dflash_dynamic_depth_profile(
         }
     }
     return n_dflash == 1 && n_k4v <= 1 && params.draft.n_max == 4;
+}
+
+// Content width is currently qualified only for one dense-MTP provider plus
+// an optional K4V map at baseline width four. Other ngram/neural combinations
+// retain their fixed behavior until separately qualified.
+inline bool server_spec_content_mtp_stack_profile(
+        const common_params_speculative & params) {
+    return common_speculative_content_stack_eligible(params);
+}
+
+inline bool server_spec_mtp_deferred_setting_enabled(const char * value) {
+    return value == nullptr || std::strcmp(value, "auto") == 0 ||
+            std::strcmp(value, "1") == 0;
 }
 
 // An automatic K4V cycle cap is internal policy, not a request override.

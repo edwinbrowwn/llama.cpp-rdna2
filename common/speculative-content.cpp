@@ -1,5 +1,6 @@
 #include "speculative-content.h"
 
+#include "common.h"
 #include "log.h"
 
 #include <algorithm>
@@ -27,7 +28,7 @@ static int env_int(const char * name, int fallback, int low, int high) {
     if (end == value || *end != '\0') {
         return fallback;
     }
-    return std::clamp((int) parsed, low, high);
+    return (int) std::clamp(parsed, (long) low, (long) high);
 }
 
 static void warn_env_adjustment(const char * name, int effective,
@@ -96,7 +97,7 @@ static bool contains_text(const char * text, const char * needle) {
     return text != nullptr && needle != nullptr && std::strstr(text, needle) != nullptr;
 }
 
-static bool inline_backtick_parity(const char * text) {
+static bool content_inline_backtick_parity(const char * text) {
     if (text == nullptr || std::strstr(text, "```") != nullptr) {
         return false;
     }
@@ -123,7 +124,7 @@ static bool starts_with_hash_comment(const char * text) {
     return *p == '#';
 }
 
-static uint16_t classify_piece(const char * text) {
+static uint16_t content_piece_flags(const char * text) {
     uint16_t flags = STF_NONE;
     if (text == nullptr) {
         return flags;
@@ -136,13 +137,12 @@ static uint16_t classify_piece(const char * text) {
         if (c == ' ' || c == '\t' || c == '\f' || c == '\v') flags |= STF_WHITESPACE;
         if (c == '\n' || c == '\r') flags |= STF_NEWLINE;
         if (c == '\'' || c == '"' || c == '`') flags |= STF_QUOTE;
-        if (c == '`') flags |= STF_CODE_HINT;
         if (c == ':') flags |= STF_COLON;
         if (c == ',') flags |= STF_COMMA;
         if (c == '{' || c == '}') flags |= STF_BRACE;
         if (c == '[' || c == ']') flags |= STF_BRACKET;
         if (c == '(' || c == ')') flags |= STF_PAREN;
-        if (std::strchr("=+-*/^<>!&|%~?;", c) != nullptr) flags |= STF_OPERATOR;
+        if (std::strchr("=+-*/^<>&;", c) != nullptr) flags |= STF_OPERATOR;
     }
 
     static const char * const code_words[] = {
@@ -161,7 +161,40 @@ static uint16_t classify_piece(const char * text) {
             contains_text(text, "->") || contains_text(text, "=>") ||
             contains_text(text, "::") || contains_text(text, "&&") ||
             contains_text(text, "||")) {
-        flags |= STF_CODE_HINT;
+        flags |= STF_CODE_HINT | STF_OPERATOR;
+    }
+
+    // Markdown emphasis and tokenizer-split hyphenated words are common in
+    // prose reasoning. Do not let their punctuation masquerade as source
+    // operators; surrounding source syntax remains independently sufficient.
+    if (contains_text(text, "**") && !contains_text(text, "**=")) {
+        flags &= (uint16_t) ~STF_OPERATOR;
+    }
+    if ((flags & STF_ALPHA) != 0 && (flags & STF_OPERATOR) != 0) {
+        bool only_hyphen_operators = true;
+        for (const unsigned char * p = (const unsigned char *) text; *p != 0; ++p) {
+            if (std::strchr("=+-*/^<>&;", *p) != nullptr && *p != '-') {
+                only_hyphen_operators = false;
+                break;
+            }
+        }
+        if (only_hyphen_operators && !contains_text(text, "--")) {
+            flags &= (uint16_t) ~STF_OPERATOR;
+        }
+    }
+
+    if (contains_text(text, "---")) {
+        bool markdown_rule = true;
+        for (const unsigned char * p = (const unsigned char *) text; *p != 0; ++p) {
+            if (*p < 0x80 && *p != '-' && *p != ':' && *p != '|' &&
+                    *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n') {
+                markdown_rule = false;
+                break;
+            }
+        }
+        if (markdown_rule) {
+            flags &= (uint16_t) ~(STF_OPERATOR | STF_CODE_HINT);
+        }
     }
 
     if (contains_text(text, "\\frac") || contains_text(text, "\\sum") ||
@@ -169,7 +202,7 @@ static uint16_t classify_piece(const char * text) {
         flags |= STF_MATH_HINT;
     }
 
-    if (contains_text(text, "```") || contains_text(text, "~~~")) {
+    if (contains_text(text, "```")) {
         flags |= STF_FENCE;
     }
     const bool url_scheme = contains_text(text, "://");
@@ -220,6 +253,51 @@ static int clamp_score(int score) {
 
 } // namespace
 
+uint16_t common_speculative_content_piece_flags(const char * text) {
+    return content_piece_flags(text);
+}
+
+bool common_speculative_content_inline_backtick_parity(const char * text) {
+    return content_inline_backtick_parity(text);
+}
+
+bool common_speculative_content_token_attr_eligible(llama_token_attr attr) {
+    constexpr uint32_t excluded = LLAMA_TOKEN_ATTR_UNKNOWN |
+            LLAMA_TOKEN_ATTR_UNUSED | LLAMA_TOKEN_ATTR_CONTROL |
+            LLAMA_TOKEN_ATTR_USER_DEFINED | LLAMA_TOKEN_ATTR_BYTE;
+    return ((uint32_t) attr & LLAMA_TOKEN_ATTR_NORMAL) != 0 &&
+            ((uint32_t) attr & excluded) == 0;
+}
+
+bool common_speculative_content_stack_eligible(
+        const common_params_speculative & params) {
+    int n_mtp = 0;
+    int n_k4v = 0;
+    for (common_speculative_type type : params.types) {
+        switch (type) {
+            case COMMON_SPECULATIVE_TYPE_DRAFT_MTP:     ++n_mtp; break;
+            case COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V: ++n_k4v; break;
+            case COMMON_SPECULATIVE_TYPE_NONE:          break;
+            default: return false;
+        }
+    }
+    return n_mtp == 1 && n_k4v <= 1 && params.draft.n_max == 4;
+}
+
+bool common_speculative_content_candidate_eligible(
+        const common_params_speculative & params) {
+    return params.draft.content_width_eligible &&
+            params.draft.sidecar_candidate_ready && !params.has_synth() &&
+            common_speculative_content_stack_eligible(params);
+}
+
+bool common_speculative_content_runtime_eligible(
+        const common_params_speculative & params) {
+    return common_speculative_content_candidate_eligible(params) &&
+            params.draft.sidecar_only &&
+            params.draft.sidecar_type == COMMON_SPECULATIVE_TYPE_DRAFT_MTP;
+}
+
 bool common_speculative_content_env_enabled() {
     return env_switch_enabled("SPEC_CONTENT_BOOST") &&
             common_speculative_content_env_max_boost() > 0;
@@ -230,9 +308,9 @@ int common_speculative_content_env_max_boost() {
 }
 
 void common_speculative_content::init(
-        const llama_vocab * vocab, uint32_t n_seq, bool sidecar_only, int base_nmax) {
+        const llama_vocab * vocab, uint32_t n_seq, bool eligible, int base_nmax) {
     config_ = {};
-    config_.enabled = sidecar_only && common_speculative_content_env_enabled();
+    config_.enabled = eligible && common_speculative_content_env_enabled();
     config_.provisional = env_switch_enabled("SPEC_CONTENT_PROVISIONAL");
     config_.trace = env_switch_enabled("SPEC_CONTENT_TRACE");
     config_.adaptive = env_switch_enabled("SPEC_CONTENT_ADAPT");
@@ -269,9 +347,13 @@ void common_speculative_content::init(
     token_flags_.resize((size_t) n_vocab, STF_NONE);
     token_inline_backtick_.resize((size_t) n_vocab, 0);
     for (int32_t token = 0; token < n_vocab; ++token) {
+        const llama_token_attr attr = llama_vocab_get_attr(vocab, token);
+        if (!common_speculative_content_token_attr_eligible(attr)) {
+            continue;
+        }
         const char * text = llama_vocab_get_text(vocab, token);
-        token_flags_[(size_t) token] = classify_piece(text);
-        token_inline_backtick_[(size_t) token] = inline_backtick_parity(text);
+        token_flags_[(size_t) token] = content_piece_flags(text);
+        token_inline_backtick_[(size_t) token] = content_inline_backtick_parity(text);
     }
     states_.resize(n_seq);
     request_stats_.resize(n_seq);
@@ -280,7 +362,7 @@ void common_speculative_content::init(
     fence_prompt_open_.resize(n_seq, 0);
     inline_prompt_open_.resize(n_seq, 0);
 
-    LOG_INF("spec content boost POC enabled for sidecar: max=+%d window=%d hysteresis=%d provisional=%d adaptive=%d\n",
+    LOG_INF("spec content boost POC enabled for qualified MTP sidecar: max=+%d window=%d hysteresis=%d provisional=%d adaptive=%d\n",
             config_.max_boost, config_.window, config_.hysteresis,
             config_.provisional ? 1 : 0, config_.adaptive ? 1 : 0);
     if (config_.provisional) {
@@ -312,15 +394,23 @@ void common_speculative_content::begin(
     if (seq_id < request_stats_.size()) {
         request_stats_[seq_id] = {};
     }
-    if (seq_id < fence_prompt_open_.size()) {
-        uint8_t fence_open = 0;
-        uint8_t inline_open = 0;
-        if (tokens != nullptr) {
-            for (size_t i = 0; i < n_tokens; ++i) {
-                if ((token_flags(tokens[i]) & STF_FENCE) != 0) fence_open ^= 1;
-                if (token_inline_backtick(tokens[i])) inline_open ^= 1;
+
+    const size_t first = n_tokens > (size_t) config_.window
+            ? n_tokens - (size_t) config_.window : 0;
+    uint8_t fence_open = 0;
+    uint8_t inline_open = 0;
+    uint8_t fence_at_window_start = 0;
+    uint8_t inline_at_window_start = 0;
+    if (tokens != nullptr) {
+        for (size_t i = 0; i < n_tokens; ++i) {
+            if (i == first) {
+                fence_at_window_start = fence_open;
+                inline_at_window_start = inline_open;
             }
+            advance_modes(fence_open, inline_open, tokens[i]);
         }
+    }
+    if (seq_id < fence_prompt_open_.size()) {
         fence_prompt_open_[seq_id] = fence_open;
         inline_prompt_open_[seq_id] = inline_open;
         fence_prompt_size_[seq_id] = tokens != nullptr ? n_tokens : 0;
@@ -331,14 +421,8 @@ void common_speculative_content::begin(
         return;
     }
 
-    const size_t first = n_tokens > (size_t) config_.window
-            ? n_tokens - (size_t) config_.window : 0;
-    current->fence_open = fence_prompt_open_[seq_id];
-    current->inline_code_open = inline_prompt_open_[seq_id];
-    for (size_t i = first; i < n_tokens; ++i) {
-        if ((token_flags(tokens[i]) & STF_FENCE) != 0) current->fence_open ^= 1;
-        if (token_inline_backtick(tokens[i])) current->inline_code_open ^= 1;
-    }
+    current->fence_open = fence_at_window_start;
+    current->inline_code_open = inline_at_window_start;
     for (size_t i = first; i < n_tokens; ++i) {
         push(*current, tokens[i]);
     }
@@ -370,8 +454,7 @@ uint8_t common_speculative_content::prepare(
         }
         if (tokens != nullptr) {
             for (size_t i = first_new; i < n_tokens; ++i) {
-                if ((token_flags(tokens[i]) & STF_FENCE) != 0) fence_open ^= 1;
-                if (token_inline_backtick(tokens[i])) inline_open ^= 1;
+                advance_modes(fence_open, inline_open, tokens[i]);
             }
             tracked = n_tokens;
             tracked_last = n_tokens > 0 ? tokens[n_tokens - 1] : LLAMA_TOKEN_NULL;
@@ -383,7 +466,11 @@ uint8_t common_speculative_content::prepare(
         inline_before_last = inline_open != 0;
     }
     const bool id_last_is_fence = (token_flags(id_last) & STF_FENCE) != 0;
-    const bool fence_after_last = fence_before_last != id_last_is_fence;
+    uint8_t fence_after_last = fence_before_last ? 1 : 0;
+    uint8_t inline_after_last = inline_before_last ? 1 : 0;
+    if (id_last >= 0) {
+        advance_modes(fence_after_last, inline_after_last, id_last);
+    }
 
     // dp.prompt excludes id_last. Reserve one position for it so the
     // effective evidence window is exactly SPEC_CONTENT_WINDOW, not window+1.
@@ -392,13 +479,11 @@ uint8_t common_speculative_content::prepare(
             ? (size_t) config_.window - n_tail : 0;
     const size_t prompt_first = n_tokens > prompt_keep
             ? n_tokens - prompt_keep : 0;
-    bool fence_at_window_start = fence_before_last;
-    bool inline_at_window_start = inline_before_last;
+    uint8_t fence_at_window_start = fence_before_last ? 1 : 0;
+    uint8_t inline_at_window_start = inline_before_last ? 1 : 0;
     if (tokens != nullptr) {
-        for (size_t i = prompt_first; i < n_tokens; ++i) {
-            if ((token_flags(tokens[i]) & STF_FENCE) != 0) fence_at_window_start = !fence_at_window_start;
-            if (token_inline_backtick(tokens[i])) inline_at_window_start = !inline_at_window_start;
-        }
+        rewind_modes(fence_at_window_start, inline_at_window_start,
+                tokens + prompt_first, n_tokens - prompt_first);
     }
 
     const uint8_t previous_level = current->current_level;
@@ -418,21 +503,21 @@ uint8_t common_speculative_content::prepare(
         push(*current, id_last);
     }
 
-    current->fence_open = fence_after_last ? 1 : 0;
-    if (fence_after_last) {
+    current->fence_open = fence_after_last;
+    current->inline_code_open = inline_after_last;
+    if (fence_after_last != 0) {
         current->structure_score = std::max<int16_t>(current->structure_score, 8);
-        update_level(*current, SPEC_BOOST_2, true, false);
+        update_level(*current, SPEC_BOOST_2, true);
     } else if (fence_before_last && id_last_is_fence) {
         // A closing fence transitions immediately back to local evidence;
         // never treat it as a fresh opening anchor for trailing prose.
         current->structure_score = std::min<int16_t>(current->structure_score, 0);
-        update_level(*current, SPEC_BOOST_0, false, false);
+        update_level(*current, SPEC_BOOST_0, false);
     }
 
     current->level_before = level(*current);
     current->level_at_base = current->level_before;
     current->level_final = current->level_before;
-    current->level_after = current->level_before;
     current->cycle_valid = false;
     return current->level_before;
 }
@@ -449,6 +534,34 @@ bool common_speculative_content::token_inline_backtick(llama_token token) const 
             token_inline_backtick_[(size_t) token] != 0;
 }
 
+void common_speculative_content::advance_modes(
+        uint8_t & fence_open, uint8_t & inline_open, llama_token token) const {
+    if ((token_flags(token) & STF_FENCE) != 0) {
+        fence_open ^= 1;
+        inline_open = 0;
+    } else if (fence_open == 0 && token_inline_backtick(token)) {
+        inline_open ^= 1;
+    }
+}
+
+void common_speculative_content::rewind_modes(
+        uint8_t & fence_open, uint8_t & inline_open,
+        const llama_token * tokens, size_t n_tokens) const {
+    if (tokens == nullptr) return;
+    for (size_t i = n_tokens; i > 0; --i) {
+        const llama_token token = tokens[i - 1];
+        if ((token_flags(token) & STF_FENCE) != 0) {
+            fence_open ^= 1;
+            // A fence transition intentionally resets inline mode. Its earlier
+            // value is not invertible, so choose the conservative closed state;
+            // inline evidence before the delimiter cannot leak past it.
+            inline_open = 0;
+        } else if (fence_open == 0 && token_inline_backtick(token)) {
+            inline_open ^= 1;
+        }
+    }
+}
+
 void common_speculative_content::push(
         common_speculative_content_state & current, llama_token token) const {
     const uint16_t flags = token_flags(token);
@@ -456,21 +569,11 @@ void common_speculative_content::push(
     const bool inline_was_open = current.inline_code_open != 0;
     const bool fence_marker = (flags & STF_FENCE) != 0;
     const bool fence_was_open = current.fence_open != 0;
-    const spec_content_roll_entry * prev0 = history_back(current, 0, (uint8_t) config_.window);
-    const spec_content_roll_entry * prev1 = history_back(current, 1, (uint8_t) config_.window);
-    const spec_content_roll_entry * prev2 = history_back(current, 2, (uint8_t) config_.window);
-    const spec_content_roll_entry * prev3 = history_back(current, 3, (uint8_t) config_.window);
-    const spec_content_roll_entry * prev4 = history_back(current, 4, (uint8_t) config_.window);
-
-    const bool quote_colon =
-            ((flags & STF_COLON) != 0 && current.quote_recent != 0) ||
-            ((flags & STF_QUOTE) != 0 && current.colon_recent != 0);
-    const bool repeat2 = prev0 != nullptr && prev1 != nullptr && prev2 != nullptr &&
-            prev0->token == prev2->token && token == prev1->token;
-    const bool repeat3 = prev0 != nullptr && prev1 != nullptr && prev2 != nullptr &&
-            prev3 != nullptr && prev4 != nullptr &&
-            prev1->token == prev4->token && prev0->token == prev3->token &&
-            token == prev2->token;
+    const bool inline_marker = inline_tick && !fence_marker && !fence_was_open;
+    const bool closing_fence = fence_marker && fence_was_open;
+    const bool closing_inline = inline_marker && inline_was_open;
+    const spec_content_roll_entry * prev0 = history_back(
+            current, 0, (uint8_t) config_.window);
 
     const uint16_t structural = STF_BRACE | STF_BRACKET | STF_PAREN |
             STF_QUOTE | STF_COLON | STF_COMMA | STF_OPERATOR |
@@ -478,22 +581,33 @@ void common_speculative_content::push(
     const bool syntax_cluster = prev0 != nullptr &&
             ((prev0->flags & (STF_CODE_HINT | STF_OPERATOR | STF_BRACE | STF_BRACKET)) != 0) &&
             ((flags & (STF_CODE_HINT | STF_OPERATOR | STF_BRACE | STF_BRACKET)) != 0);
+    bool local_code_context = fence_was_open;
+    for (uint8_t i = 0; !local_code_context && i < current.history_size; ++i) {
+        const auto * entry = history_back(current, i, (uint8_t) config_.window);
+        if (entry != nullptr &&
+                (entry->flags & (STF_CODE_HINT | STF_COMMENT_HINT | STF_BRACE |
+                                 STF_BRACKET | STF_FENCE)) != 0 &&
+                !(entry->token >= 0 &&
+                  (size_t) entry->token < token_inline_backtick_.size() &&
+                  token_inline_backtick_[entry->token])) {
+            local_code_context = true;
+        }
+    }
 
     int delta = 0;
     if ((flags & STF_BRACE) != 0) delta += 3;
     if ((flags & STF_BRACKET) != 0) delta += 3;
-    if ((flags & STF_PAREN) != 0) delta += 2;
-    if ((flags & STF_CODE_HINT) != 0 && !inline_tick) delta += 3;
-    if ((flags & STF_MATH_HINT) != 0) delta += 2;
-    if ((flags & STF_OPERATOR) != 0) delta += 2;
+    if ((flags & STF_PAREN) != 0 && local_code_context) delta += 2;
+    if ((flags & STF_CODE_HINT) != 0 && !inline_marker) delta += 3;
+    if ((flags & STF_OPERATOR) != 0) delta += local_code_context ? 2 : 1;
     if ((flags & STF_NEWLINE) != 0) delta += 1;
     if ((flags & STF_COMMENT_HINT) != 0) delta += 3;
     if ((flags & STF_STRONG_ANCHOR) != 0 && !(fence_marker && fence_was_open)) delta += 3;
-    if (inline_tick) delta += inline_was_open ? -4 : 5;
-    if (inline_was_open && !inline_tick) delta += 2;
-    if (quote_colon) delta += 4;
+    // Short inline identifiers are common in prose reasoning. They are
+    // delimiters and closing barriers, but not positive width evidence by
+    // themselves; sustained syntax inside them can still accumulate normally.
+    if (inline_marker && inline_was_open) delta -= 4;
     if (syntax_cluster) delta += 2;
-    if (repeat2 || repeat3) delta += 4;
     if ((flags & STF_DIGIT) != 0 && prev0 != nullptr &&
             (prev0->flags & STF_DIGIT) != 0) delta += 1;
 
@@ -506,40 +620,18 @@ void common_speculative_content::push(
     }
 
     current.structure_score = (int16_t) clamp_score(current.structure_score + delta);
-    if (repeat3) {
-        current.repetition_score = std::min<uint8_t>(3, current.repetition_score + 2);
-    } else if (repeat2) {
-        current.repetition_score = std::min<uint8_t>(3, current.repetition_score + 1);
-    } else if (current.repetition_score > 0) {
-        --current.repetition_score;
-    }
-
-    const bool brace = (flags & STF_BRACE) != 0;
-    const bool bracket = (flags & STF_BRACKET) != 0;
-    const bool paren = (flags & STF_PAREN) != 0;
-    current.brace_depth = brace ? std::min<uint8_t>(8, current.brace_depth + 1)
-                                : (current.brace_depth > 0 ? current.brace_depth - 1 : 0);
-    current.bracket_depth = bracket ? std::min<uint8_t>(8, current.bracket_depth + 1)
-                                    : (current.bracket_depth > 0 ? current.bracket_depth - 1 : 0);
-    current.paren_depth = paren ? std::min<uint8_t>(8, current.paren_depth + 1)
-                                : (current.paren_depth > 0 ? current.paren_depth - 1 : 0);
-
-    current.quote_recent = (flags & STF_QUOTE) != 0 ? 2 : (current.quote_recent > 0 ? current.quote_recent - 1 : 0);
-    current.colon_recent = (flags & STF_COLON) != 0 ? 2 : (current.colon_recent > 0 ? current.colon_recent - 1 : 0);
-    current.newline_recent = (flags & STF_NEWLINE) != 0 ? 2 : (current.newline_recent > 0 ? current.newline_recent - 1 : 0);
-    current.operator_recent = (flags & STF_OPERATOR) != 0 ? 2 : (current.operator_recent > 0 ? current.operator_recent - 1 : 0);
 
     const bool strong_anchor =
-            ((flags & STF_STRONG_ANCHOR) != 0 && !(fence_marker && fence_was_open)) ||
-            (inline_tick && !inline_was_open);
-    update_level(current, score_level(current.structure_score), strong_anchor,
-            repeat2 || repeat3);
-    if (inline_tick) {
-        current.inline_code_open = inline_was_open ? 0 : 1;
+            (flags & STF_STRONG_ANCHOR) != 0 && !closing_fence;
+    if (closing_fence || closing_inline) {
+        // Closing delimiters are evidence barriers. Preceding code must not
+        // re-boost explanatory prose merely because it remains in the window.
+        current.structure_score = 0;
+        update_level(current, SPEC_BOOST_0, false);
+    } else {
+        update_level(current, score_level(current.structure_score), strong_anchor);
     }
-    if (fence_marker) {
-        current.fence_open = fence_was_open ? 0 : 1;
-    }
+    advance_modes(current.fence_open, current.inline_code_open, token);
 
     const spec_content_roll_entry entry = { token, flags };
     const uint8_t capacity = (uint8_t) config_.window;
@@ -550,8 +642,6 @@ void common_speculative_content::push(
         current.history[current.history_pos] = entry;
         current.history_pos = (current.history_pos + 1) % capacity;
     }
-    current.token_count = current.token_count == UINT32_MAX
-            ? UINT32_MAX : current.token_count + 1;
 }
 
 void common_speculative_content::extend_window(
@@ -580,15 +670,12 @@ void common_speculative_content::extend_window(
         merged[n_keep + i] = tokens[first_append + i];
     }
 
-    bool fence_at_window_start = current.fence_open != 0;
-    bool inline_at_window_start = current.inline_code_open != 0;
-    for (size_t i = 0; i < n_keep; ++i) {
-        if ((token_flags(merged[i]) & STF_FENCE) != 0) fence_at_window_start = !fence_at_window_start;
-        if (token_inline_backtick(merged[i])) inline_at_window_start = !inline_at_window_start;
-    }
+    uint8_t fence_at_window_start = current.fence_open;
+    uint8_t inline_at_window_start = current.inline_code_open;
+    rewind_modes(fence_at_window_start, inline_at_window_start,
+            merged, n_keep);
     for (size_t i = 0; i < first_append; ++i) {
-        if ((token_flags(tokens[i]) & STF_FENCE) != 0) fence_at_window_start = !fence_at_window_start;
-        if (token_inline_backtick(tokens[i])) inline_at_window_start = !inline_at_window_start;
+        advance_modes(fence_at_window_start, inline_at_window_start, tokens[i]);
     }
 
     const uint8_t previous_level = current.current_level;
@@ -612,7 +699,7 @@ uint8_t common_speculative_content::score_level(int score) const {
 
 void common_speculative_content::update_level(
         common_speculative_content_state & current, uint8_t desired,
-        bool strong_anchor, bool repeated) const {
+        bool strong_anchor) const {
     desired = std::min<uint8_t>(desired, (uint8_t) config_.max_boost);
     const uint8_t old = current.current_level;
 
@@ -626,11 +713,10 @@ void common_speculative_content::update_level(
         current.current_level = (spec_content_boost_level) desired;
         current.candidate_level = (spec_content_boost_level) desired;
         current.candidate_age = 0;
-        current.transition_cooldown = 0;
         return;
     }
 
-    if (strong_anchor || repeated) {
+    if (strong_anchor) {
         current.current_level = (spec_content_boost_level) std::min<uint8_t>(desired, old + 1);
         current.candidate_level = current.current_level;
         current.candidate_age = 0;
@@ -654,21 +740,6 @@ uint8_t common_speculative_content::level(
     return std::min<uint8_t>(current.current_level, (uint8_t) config_.max_boost);
 }
 
-int common_speculative_content::max_limit(
-        int base_nmax, int context_limit, bool user_override) const {
-    if (base_nmax <= 0) {
-        return 0;
-    }
-    const int context = context_limit > 0 ? context_limit : base_nmax;
-    if (user_override) {
-        return std::max(0, context_limit);
-    }
-    if (!config_.enabled) {
-        return std::min(base_nmax, context);
-    }
-    return std::min(base_nmax + config_.max_boost, context);
-}
-
 int common_speculative_content::selected_limit(
         int base_nmax, int context_limit, bool user_override,
         uint8_t level_before) const {
@@ -682,12 +753,14 @@ int common_speculative_content::selected_limit(
     if (!config_.enabled) {
         return std::min(base_nmax, context);
     }
-    return std::min(base_nmax + std::min<int>(level_before, config_.max_boost), context);
+    const int64_t selected = (int64_t) base_nmax +
+            std::min<int>(level_before, config_.max_boost);
+    return (int) std::min<int64_t>(selected, context);
 }
 
 void common_speculative_content::observe_draft(
         uint32_t seq_id, const llama_token * tokens, size_t n_tokens,
-        int base_nmax, int selected_nmax, int hard_nmax) {
+        int base_nmax, int selected_nmax) {
     auto * current = state(seq_id);
     if (current == nullptr) {
         return;
@@ -707,10 +780,11 @@ void common_speculative_content::observe_draft(
         current->level_final = level(provisional);
     }
     current->base_nmax = base_nmax;
-    current->final_nmax = std::min(selected_nmax, hard_nmax);
+    current->final_nmax = selected_nmax;
     current->boost_used = (uint8_t) std::clamp(current->final_nmax - base_nmax, 0, 3);
     current->drafted = (uint32_t) n_tokens;
     current->cycle_valid = true;
+    current->stats_valid = current->final_nmax >= base_nmax;
 }
 
 void common_speculative_content::accept(
@@ -743,24 +817,25 @@ void common_speculative_content::accept(
         const size_t n_pos = std::min<size_t>(accepted_draft, stats.accepted_per_pos.size());
         for (size_t i = 0; i < n_pos; ++i) ++stats.accepted_per_pos[i];
     };
-    record(stats_[bucket]);
-    if (seq_id < request_stats_.size()) {
-        record(request_stats_[seq_id][bucket]);
+    if (cycle.stats_valid) {
+        record(stats_[bucket]);
+        if (seq_id < request_stats_.size()) {
+            record(request_stats_[seq_id][bucket]);
+        }
     }
 
     if (config_.trace) {
-        LOG_INF("spec content cycle seq=%u level_before=%u level_provisional=%u level_after=%u base_nmax=%d selected_nmax=%d boost=%u drafted=%u accepted_draft=%zu committed=%zu\n",
-                seq_id, cycle.level_before, cycle.level_final,
-                level_after, cycle.base_nmax, cycle.final_nmax,
-                cycle.boost_used, cycle.drafted, accepted_draft, committed);
+        LOG_INF("spec content cycle seq=%u level_before=%u level_base=%u level_provisional=%u level_after=%u base_nmax=%d selected_nmax=%d boost=%u drafted=%u accepted_draft=%zu committed=%zu stats_valid=%d\n",
+                seq_id, cycle.level_before, cycle.level_at_base,
+                cycle.level_final, level_after, cycle.base_nmax, cycle.final_nmax,
+                cycle.boost_used, cycle.drafted, accepted_draft, committed,
+                cycle.stats_valid ? 1 : 0);
     }
 
     // Commit every verified context token (including a replayed target
     // replacement), but count only actual accepted draft tokens in telemetry.
     // Rejected/provisional tokens existed only in the local copy above.
     *current = after;
-    current->level_after = level_after;
-    current->accepted = (uint32_t) accepted_draft;
     current->cycle_valid = false;
 }
 

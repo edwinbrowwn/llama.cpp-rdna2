@@ -998,6 +998,42 @@ static bool llama_backend_get_hip_device_stream(
     return stream != nullptr && device >= 0;
 }
 
+static bool llama_backend_get_hip_device_tensor(
+        ggml_backend_t backend, const ggml_tensor * tensor,
+        ggml_backend_t & device_backend, const ggml_tensor * & device_tensor,
+        int32_t & device, void * & stream) {
+    device_backend = nullptr;
+    device_tensor  = nullptr;
+
+    if (tensor == nullptr) {
+        return false;
+    }
+    if (llama_backend_get_hip_device_stream(backend, device, stream)) {
+        device_backend = backend;
+        device_tensor  = tensor;
+        return tensor->data != nullptr;
+    }
+
+    // Tensor-parallel output uses a Meta backend. A mirrored hidden-state
+    // tensor has one complete physical copy per GPU; select the last copy to
+    // preserve the established sidecar placement on the final TP device.
+    for (size_t i = GGML_BACKEND_META_MAX_DEVICES; i-- > 0;) {
+        ggml_backend_t simple_backend = nullptr;
+        const ggml_tensor * simple_tensor = nullptr;
+        if (!ggml_backend_meta_get_mirrored_tensor(
+                    backend, tensor, i, &simple_backend, &simple_tensor)) {
+            continue;
+        }
+        if (llama_backend_get_hip_device_stream(simple_backend, device, stream) &&
+                simple_tensor->data != nullptr) {
+            device_backend = simple_backend;
+            device_tensor  = simple_tensor;
+            return true;
+        }
+    }
+    return false;
+}
+
 bool llama_context::get_embeddings_nextn_device(llama_device_view & view) const {
     view = {};
     if (!device_views_valid || !embd_nextn_device.valid || embd_nextn_device.tensor == nullptr ||
@@ -2023,10 +2059,13 @@ int llama_context::decode(const llama_batch & batch_inp) {
         }
         if (device_views_valid && one_ubatch && t_h_nextn) {
             ggml_backend_t backend_h = ggml_backend_sched_get_tensor_backend(sched.get(), t_h_nextn);
+            ggml_backend_t device_backend = nullptr;
+            const ggml_tensor * device_tensor = nullptr;
             int32_t device = -1;
             void * stream = nullptr;
-            if (llama_backend_get_hip_device_stream(backend_h, device, stream)) {
-                embd_nextn_device = { t_h_nextn, backend_h, ubatch.n_tokens, true };
+            if (llama_backend_get_hip_device_tensor(
+                        backend_h, t_h_nextn, device_backend, device_tensor, device, stream)) {
+                embd_nextn_device = { device_tensor, device_backend, ubatch.n_tokens, true };
             }
         }
 
@@ -2405,16 +2444,21 @@ void llama_context::extract_layer_inputs(const llm_graph_result * res, size_t to
 
         ggml_backend_t backend = ggml_backend_sched_get_tensor_backend(sched.get(), t);
         GGML_ASSERT(backend != nullptr);
-        if (device_views_valid && token_offset == 0) {
-            embd_layer_inp_device[il] = { t, backend, (uint32_t) n_tokens, true };
+        ggml_backend_t device_backend = nullptr;
+        const ggml_tensor * device_tensor = nullptr;
+        int32_t device = -1;
+        void * stream = nullptr;
+        const bool have_device_tensor = device_views_valid &&
+                llama_backend_get_hip_device_tensor(
+                        backend, t, device_backend, device_tensor, device, stream);
+        if (have_device_tensor && token_offset == 0) {
+            embd_layer_inp_device[il] = {
+                device_tensor, device_backend, (uint32_t) n_tokens, true };
         } else {
             embd_layer_inp_device[il] = {};
         }
-        int32_t device = -1;
-        void * stream = nullptr;
-        if (device_views_valid && il < embd_layer_inp_device_preferred.size() &&
-                embd_layer_inp_device_preferred[il] &&
-                llama_backend_get_hip_device_stream(backend, device, stream)) {
+        if (have_device_tensor && il < embd_layer_inp_device_preferred.size() &&
+                embd_layer_inp_device_preferred[il]) {
             pending_embd_layer_inp_copies[il].push_back({
                 t, backend, embd_layer_inp[il].data + dst_offset, nbytes });
         } else {

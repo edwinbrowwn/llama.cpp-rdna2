@@ -7,10 +7,24 @@
 #include <cstdint>
 #include <vector>
 
-// The content-aware controller is deliberately sidecar-only in this POC.
-// These helpers are also used by buffer-sizing and sidecar-cap policy code.
+struct common_params_speculative;
+
+// Content width is a separately qualified MTP optimization, not a property of
+// every sidecar. Candidate checks are usable before target loading; runtime
+// checks additionally require successful MTP sidecar preflight.
+bool common_speculative_content_stack_eligible(
+        const common_params_speculative & params);
+bool common_speculative_content_candidate_eligible(
+        const common_params_speculative & params);
+bool common_speculative_content_runtime_eligible(
+        const common_params_speculative & params);
 bool common_speculative_content_env_enabled();
 int common_speculative_content_env_max_boost();
+
+// Pure token-feature helpers used by startup precomputation and focused tests.
+uint16_t common_speculative_content_piece_flags(const char * text);
+bool common_speculative_content_inline_backtick_parity(const char * text);
+bool common_speculative_content_token_attr_eligible(llama_token_attr attr);
 
 enum spec_content_boost_level : uint8_t {
     SPEC_BOOST_0 = 0,
@@ -52,26 +66,14 @@ struct spec_content_roll_entry {
 // Fixed-size so a provisional copy is cheap and cannot allocate in the
 // generation hot path.  The state is never used to alter target verification.
 struct common_speculative_content_state {
-    uint32_t token_count = 0;
     int16_t structure_score = 0;
 
-    // These are bounded local-structure activity counters, not a parser stack.
-    uint8_t brace_depth = 0;
-    uint8_t bracket_depth = 0;
-    uint8_t paren_depth = 0;
-
-    uint8_t quote_recent = 0;
-    uint8_t colon_recent = 0;
-    uint8_t newline_recent = 0;
-    uint8_t operator_recent = 0;
-    uint8_t repetition_score = 0;
     uint8_t inline_code_open = 0;
     uint8_t fence_open = 0;
 
     spec_content_boost_level current_level = SPEC_BOOST_0;
     spec_content_boost_level candidate_level = SPEC_BOOST_0;
     uint8_t candidate_age = 0;
-    uint8_t transition_cooldown = 0;
 
     uint8_t history_size = 0;
     uint8_t history_pos = 0;
@@ -81,13 +83,12 @@ struct common_speculative_content_state {
     uint8_t level_before = 0;
     uint8_t level_at_base = 0;
     uint8_t level_final = 0;
-    uint8_t level_after = 0;
     uint8_t boost_used = 0;
     int32_t base_nmax = 0;
     int32_t final_nmax = 0;
     uint32_t drafted = 0;
-    uint32_t accepted = 0;
     bool cycle_valid = false;
+    bool stats_valid = false;
 };
 
 struct common_speculative_content_config {
@@ -111,7 +112,7 @@ struct common_speculative_content_stats {
 
 class common_speculative_content {
 public:
-    void init(const llama_vocab * vocab, uint32_t n_seq, bool sidecar_only,
+    void init(const llama_vocab * vocab, uint32_t n_seq, bool eligible,
               int base_nmax);
 
     bool enabled() const { return config_.enabled; }
@@ -131,12 +132,11 @@ public:
     void push(common_speculative_content_state & state, llama_token token) const;
     uint8_t level(const common_speculative_content_state & state) const;
 
-    int max_limit(int base_nmax, int context_limit, bool user_override) const;
     int selected_limit(int base_nmax, int context_limit, bool user_override,
                        uint8_t level_before) const;
 
     void observe_draft(uint32_t seq_id, const llama_token * tokens, size_t n_tokens,
-                       int base_nmax, int selected_nmax, int hard_nmax);
+                       int base_nmax, int selected_nmax);
     void accept(uint32_t seq_id, const llama_token * tokens, size_t n_tokens,
                 uint16_t n_committed);
     void accept(uint32_t seq_id, const llama_token * tokens, size_t n_tokens,
@@ -150,11 +150,15 @@ private:
 
     uint16_t token_flags(llama_token token) const;
     bool token_inline_backtick(llama_token token) const;
+    void advance_modes(uint8_t & fence_open, uint8_t & inline_open,
+                       llama_token token) const;
+    void rewind_modes(uint8_t & fence_open, uint8_t & inline_open,
+                      const llama_token * tokens, size_t n_tokens) const;
     uint8_t score_level(int score) const;
     void extend_window(common_speculative_content_state & state,
                        const llama_token * tokens, size_t n_tokens) const;
     void update_level(common_speculative_content_state & state,
-                      uint8_t desired, bool strong_anchor, bool repeated) const;
+                      uint8_t desired, bool strong_anchor) const;
 
     common_speculative_content_config config_;
     int base_nmax_ = 0;
