@@ -54,12 +54,13 @@ struct common_speculative_content_test_access {
         content.token_flags_[13] = STF_ALPHA | STF_CODE_HINT;
         content.token_flags_[14] = STF_NEWLINE;
         content.token_flags_[15] = STF_BRACE;
-        content.states_.assign(n_seq, {});
+        content.states_.assign(n_seq, common_speculative_content_state{});
         content.fence_prompt_size_.assign(n_seq, 0);
         content.fence_prompt_last_.assign(n_seq, LLAMA_TOKEN_NULL);
         content.fence_prompt_open_.assign(n_seq, 0);
         content.inline_prompt_open_.assign(n_seq, 0);
-        content.request_stats_.assign(n_seq, {});
+        content.request_stats_.assign(
+                n_seq, std::array<common_speculative_content_stats, 4>{});
     }
 
     static const common_speculative_content_stats & stats(
