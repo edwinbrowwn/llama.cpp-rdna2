@@ -213,12 +213,16 @@ throughput fell 5.54%, and fifth-position neural acceptance did not repay the
 extra neural step plus sixth target row. This POC tests a different economic
 boundary: the neural width never changes, and the extra target row is paid only
 when K4V already has a longer continuation. MTP improved on an intentionally
-repetitive K4V fixture, but the realistic prose/C++/Python/Rust set produced no
-K4V candidate longer than four. DFlash was negative even on the repetitive
-fixture (`106.052 -> 100.769 tok/s`, -4.981%) despite complete fifth-position
-acceptance, so it is explicitly excluded. The controller is not promoted;
-fixed neural/K4V width four remains selected and `SPEC_CONTENT_BOOST` must
-remain unset outside explicit experiments.
+repetitive K4V fixture (`120.820 -> 127.608 tok/s`, +5.618%): 31 width-five
+K4V cycles accepted all five proposals and avoided six target cycles. However,
+the realistic prose/C++/Python/Rust set produced no K4V candidate longer than
+four; matched xhigh prose and three-code aggregate results were -0.431% and
+-0.475%, respectively, with identical token hashes and draft counts. DFlash
+was negative even on the repetitive fixture (`106.052 -> 100.769 tok/s`,
+-4.981%) despite complete fifth-position acceptance, so it is explicitly
+excluded. The controller is not promoted; fixed neural/K4V width four remains
+selected and `SPEC_CONTENT_BOOST` must remain unset outside explicit
+experiments.
 
 The fixed classifier is conservative for the dominant workloads: mostly-prose
 xhigh thinking remains at the baseline, while sustained fenced or unfenced
