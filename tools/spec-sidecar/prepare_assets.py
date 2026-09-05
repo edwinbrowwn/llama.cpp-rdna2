@@ -395,7 +395,6 @@ def prepare_qwen35moe_mtp(args: argparse.Namespace) -> None:
         source,
         {
             "general.architecture": "qwen35moe",
-            "general.size_label": "35B-A3B",
             "qwen35moe.block_count": 41,
             "qwen35moe.embedding_length": 2048,
             "qwen35moe.attention.head_count": 16,
@@ -410,8 +409,6 @@ def prepare_qwen35moe_mtp(args: argparse.Namespace) -> None:
         },
         "Qwen3.6 35B-A3B target",
     )
-    if "Qwen3.6" not in str(metadata_value(source, "general.name")):
-        raise ValueError("target model identity is not Qwen3.6")
     tokens = metadata_value(source, "tokenizer.ggml.tokens")
     if len(tokens) != 248_320:
         raise ValueError(f"Qwen3.6 35B-A3B target must have 248,320 tokens, found {len(tokens):,}")
@@ -511,7 +508,6 @@ def prepare_qwen4exp_mtp(args: argparse.Namespace) -> None:
         target,
         {
             "general.architecture": "qwen4exp",
-            "general.size_label": "512x56B",
             "qwen4exp.block_count": 48,
             "qwen4exp.embedding_length": 2560,
             "qwen4exp.hyper_connection.count": 4,
@@ -530,9 +526,6 @@ def prepare_qwen4exp_mtp(args: argparse.Namespace) -> None:
         },
         "Qwen3.8 Flash Next target",
     )
-    target_name = str(metadata_value(target, "general.name"))
-    if "Qwen3.8 Flash Next" not in target_name:
-        raise ValueError(f"target model identity is not Qwen3.8 Flash Next: {target_name!r}")
     target_nextn = target.get_field("qwen4exp.nextn_predict_layers")
     if target_nextn is not None and target_nextn.contents() != 0:
         raise ValueError("Qwen3.8 Flash Next target must not contain an auxiliary layer")

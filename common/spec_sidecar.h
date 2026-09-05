@@ -25,11 +25,11 @@ struct common_spec_sidecar_profile {
     const char * name = nullptr;
     common_spec_sidecar_kind kind = COMMON_SPEC_SIDECAR_KIND_MTP;
 
-    // Strong target identity and shape contract. A negative nextn count means
-    // that the profile does not constrain the target auxiliary-layer count.
+    // Strong target architecture and shape contract. Human-readable GGUF
+    // labels are intentionally not part of compatibility: quantizers are free
+    // to rewrite or omit them. A negative nextn count means that the profile
+    // does not constrain the target auxiliary-layer count.
     const char * target_architecture = nullptr;
-    const char * target_name = nullptr;
-    const char * target_size_label = nullptr;
     int32_t target_n_embd = 0;
     int32_t target_n_embd_out = 0;
     int32_t target_n_layer = 0;
@@ -72,8 +72,6 @@ struct common_spec_sidecar_paths {
 
 size_t common_spec_sidecar_profile_count();
 const common_spec_sidecar_profile * common_spec_sidecar_profile_at(size_t index);
-bool common_spec_sidecar_profile_name_matches(
-        const common_spec_sidecar_profile & profile, const char * name);
 
 const common_spec_sidecar_profile * common_spec_sidecar_profile_for_model(
         common_spec_sidecar_kind kind, const llama_model * model, std::string & error);
