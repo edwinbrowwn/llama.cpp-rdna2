@@ -35,7 +35,7 @@ The first launch validates the target and draft, converts only the required tens
 
 The dense Qwen3.8 and Qwen3.6 MoE MTP profiles convert compatible target tensors to their fixed provider schemas. Qwen4Exp converts its `-md` GGUF and creates a full identity vocabulary map. DFlash accepts the exact 81-tensor model geometry from canonical Q4_K_M as well as Q4_0, Q8_0, F16, and BF16 sources, then writes the fixed F32/Q4_K/Q6_K runtime schema. DFlash does not use INT5; that format was an unretained experiment.
 
-The bundled draft-vocabulary map is integrity checked. Optional explicit ID and provider paths remain expert overrides, not normal setup requirements. Automatic preparation fails closed with a specific warning for unsupported model identities, shapes, tensor encodings, missing `-md`, unwritable caches, or missing provider libraries.
+The bundled draft-vocabulary map is integrity checked. Optional explicit ID and provider paths remain expert overrides, not normal setup requirements. Automatic preparation fails closed with a specific warning for unsupported architectures, shapes, tensor encodings, missing `-md`, unwritable caches, or missing provider libraries. Human-readable GGUF model labels are not required.
 
 ### Manual/offline preparation (optional)
 

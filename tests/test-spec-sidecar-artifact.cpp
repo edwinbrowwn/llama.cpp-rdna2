@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "artifact_manifest.h"
 #include "dflash/stochastic_distribution.h"
+#include "gguf.h"
 #include "mtp/catchup_alignment.h"
 #include "spec_sidecar.h"
 #include "spec_sidecar_assets.h"
@@ -8,10 +9,12 @@
 #include "../include/spec_sidecar/sidecar_abi.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -47,6 +50,56 @@ static void unset_environment(const char * name) {
 #else
     unsetenv(name);
 #endif
+}
+
+static bool write_structural_qwen35_target(const std::string & path, const char * name) {
+    gguf_context * context = gguf_init_empty();
+    if (context == nullptr) {
+        return false;
+    }
+    gguf_set_val_str(context, "general.architecture", "qwen35");
+    if (name != nullptr) {
+        gguf_set_val_str(context, "general.name", name);
+    }
+    gguf_set_val_u32(context, "qwen35.block_count", 65);
+    gguf_set_val_u32(context, "qwen35.embedding_length", 5120);
+    gguf_set_val_u32(context, "qwen35.nextn_predict_layers", 1);
+    std::vector<const char *> tokens(248320, "");
+    gguf_set_arr_str(context, "tokenizer.ggml.tokens", tokens.data(), tokens.size());
+    const bool written = gguf_write_to_file(context, path.c_str(), true);
+    gguf_free(context);
+    return written;
+}
+
+static int test_structural_profile_matching() {
+    int failures = 0;
+    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+    const std::string path =
+            (std::filesystem::temp_directory_path() /
+             ("llama-sidecar-structural-" + std::to_string(stamp) + ".gguf")).string();
+    const char * names[] = {"Qwen3.8-27B", "Qwen3.8 27B", "Src", nullptr};
+    for (const char * name : names) {
+        std::error_code cleanup_error;
+        std::filesystem::remove(path, cleanup_error);
+        if (!write_structural_qwen35_target(path, name)) {
+            std::fprintf(stderr, "FAILED: could not write structural target fixture for name '%s'\n",
+                    name != nullptr ? name : "<missing>");
+            ++failures;
+            continue;
+        }
+        for (const auto kind : {COMMON_SPEC_SIDECAR_KIND_MTP, COMMON_SPEC_SIDECAR_KIND_DFLASH}) {
+            std::string error;
+            const auto * profile = common_spec_sidecar_profile_for_target_file(kind, path, error);
+            if (profile == nullptr || profile->kind != kind) {
+                std::fprintf(stderr, "FAILED: structural target '%s' did not select kind %d: %s'\n",
+                        name != nullptr ? name : "<missing>", (int) kind, error.c_str());
+                ++failures;
+            }
+        }
+    }
+    std::error_code cleanup_error;
+    std::filesystem::remove(path, cleanup_error);
+    return failures;
 }
 
 static int test_auto_prepare_fixture() {
@@ -216,16 +269,8 @@ int main(int argc, char ** argv) {
                         "model-specific providers use distinct named profiles");
     failures += require(qwen35_mtp != nullptr && qwen35moe_mtp != nullptr &&
                         qwen35_dflash != nullptr && qwen4exp_mtp != nullptr &&
-                        common_spec_sidecar_profile_name_matches(*qwen35_mtp, "Qwen/Qwen3.8-27B") &&
-                        common_spec_sidecar_profile_name_matches(*qwen35_mtp, "..") &&
-                        common_spec_sidecar_profile_name_matches(*qwen35_dflash, "..") &&
-                        !common_spec_sidecar_profile_name_matches(*qwen35_mtp, ".") &&
-                        !common_spec_sidecar_profile_name_matches(*qwen35_mtp, "unrelated") &&
-                        !common_spec_sidecar_profile_name_matches(*qwen35moe_mtp, "..") &&
                         qwen35_mtp->mtp_embedding_width == 5120 && qwen35_mtp->mtp_head_rows == 40960 &&
                         std::strcmp(qwen35moe_mtp->target_architecture, "qwen35moe") == 0 &&
-                        std::strcmp(qwen35moe_mtp->target_name, "Qwen3.6") == 0 &&
-                        std::strcmp(qwen35moe_mtp->target_size_label, "35B-A3B") == 0 &&
                         qwen35moe_mtp->target_n_embd == 2048 &&
                         qwen35moe_mtp->target_n_embd_out == 2048 &&
                         qwen35moe_mtp->target_n_layer == 40 &&
@@ -246,7 +291,9 @@ int main(int argc, char ** argv) {
                         qwen4exp_mtp->target_n_vocab == 248320 &&
                         qwen4exp_mtp->mtp_embedding_width == 10240 &&
                         qwen4exp_mtp->mtp_head_rows == 248320,
-                        "providers retain narrow identity and independent capability contracts");
+                        "providers retain independent capability contracts");
+
+    failures += test_structural_profile_matching();
 
     if (qwen4exp_mtp != nullptr) {
         if (const char * target = std::getenv("LLAMA_TEST_QWEN4EXP_TARGET")) {
