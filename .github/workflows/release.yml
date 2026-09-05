@@ -800,6 +800,7 @@ jobs:
             -DGGML_NATIVE=OFF `
             -DGGML_CPU=OFF `
             -DGGML_HIP=ON `
+            -DGGML_CUDA_KVARN=ON `
             -DCMAKE_C_COMPILER="${env:HIP_PATH}\lib\llvm\bin\clang.exe" `
             -DCMAKE_CXX_COMPILER="${env:HIP_PATH}\lib\llvm\bin\clang++.exe" `
             -DCMAKE_C_FLAGS="-Wno-error=incompatible-pointer-types" `
@@ -1026,6 +1027,7 @@ jobs:
             -DGGML_NATIVE=OFF ^
             -DGGML_CPU=OFF ^
             -DGGML_CUDA=ON ^
+            -DGGML_CUDA_KVARN=ON ^
             -DLLAMA_BUILD_BORINGSSL=ON ${{ matrix.defines }}
           set /A NINJA_JOBS=%NUMBER_OF_PROCESSORS%-1
           cmake --build build --config Release -j %NINJA_JOBS% --target ggml-cuda
@@ -1366,6 +1368,7 @@ jobs:
             -DGGML_CPU_ALL_VARIANTS=ON \
             -DGPU_TARGETS="${{ matrix.gpu_targets }}" \
             -DGGML_HIP=ON \
+            -DGGML_CUDA_KVARN=ON \
             -DHIP_PLATFORM=amd \
             ${{ env.CMAKE_ARGS }}
           cmake --build build --config Release -j $(nproc)

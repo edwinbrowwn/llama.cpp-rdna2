@@ -756,7 +756,32 @@ static struct ggml_tensor * ggml_dup_tensor_layout(struct ggml_context * ctx, co
 }
 
 static bool ggml_is_view_op(enum ggml_op op) {
-    return op == GGML_OP_VIEW || op == GGML_OP_RESHAPE || op == GGML_OP_PERMUTE || op == GGML_OP_TRANSPOSE;
+    return op == GGML_OP_VIEW || op == GGML_OP_RESHAPE || op == GGML_OP_PERMUTE || op == GGML_OP_TRANSPOSE || op == GGML_OP_KVARN_VIEW;
+}
+
+static const struct ggml_tensor * ggml_backend_sched_kvarn_view_base(const struct ggml_tensor * t) {
+    while (t != NULL && (t->op == GGML_OP_RESHAPE || t->op == GGML_OP_PERMUTE)) {
+        t = t->src[0];
+    }
+
+    return t != NULL && t->op == GGML_OP_KVARN_VIEW ? t : NULL;
+}
+
+static struct ggml_tensor * ggml_backend_sched_kvarn_view_base_mut(struct ggml_tensor * t) {
+    while (t != NULL && (t->op == GGML_OP_RESHAPE || t->op == GGML_OP_PERMUTE)) {
+        t = t->src[0];
+    }
+
+    return t != NULL && t->op == GGML_OP_KVARN_VIEW ? t : NULL;
+}
+
+static bool ggml_backend_sched_allows_bufferless_kvarn_src(
+        const struct ggml_tensor * node,
+        int src_index,
+        const struct ggml_tensor * src) {
+    return node->op == GGML_OP_FLASH_ATTN_EXT &&
+        (src_index == 1 || src_index == 2) &&
+        ggml_backend_sched_kvarn_view_base(src) != NULL;
 }
 
 // scheduler
@@ -1327,30 +1352,51 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
             // check if we should start a new split based on the sources of the current node
             bool need_new_split = false;
             if (node_backend_id == cur_backend_id && split->n_inputs > 0) {
-                for (int j = 0; j < GGML_MAX_SRC; j++) {
-                    struct ggml_tensor * src = node->src[j];
-                    if (src == NULL) {
-                        continue;
-                    }
+                const auto check_new_split_src = [&](struct ggml_tensor * src) {
                     // check if a weight is on a different and incompatible backend
                     // by starting a new split, the memory of the previously offloaded weights can be reused
                     if (src->buffer != NULL && src->buffer->usage == GGML_BACKEND_BUFFER_USAGE_WEIGHTS) {
                         int src_backend_id = tensor_backend_id(src);
                         if (src_backend_id != cur_backend_id && !ggml_backend_sched_buffer_supported(sched, src, cur_backend_id)) {
-                            need_new_split = true;
-                            break;
+                            return true;
                         }
                     }
-                    // check if the split has too many inputs
-                    // FIXME: count the number of inputs instead of only checking when full
+                    // Start a new split when the current dynamically allocated input
+                    // block is full and this source would add another cross-backend copy.
+                    // This preserves upstream's weight-lifetime behavior without treating
+                    // the initial capacity as a hard limit.
                     if (split->n_inputs >= split->inputs_capacity) {
                         const size_t id = hash_id(src);
                         int src_backend_id = sched->hv_tensor_backend_ids[id];
                         bool supported = ggml_backend_sched_buffer_supported(sched, src, cur_backend_id);
                         if (src_backend_id != cur_backend_id && tensor_id_copy(id, cur_backend_id, 0) == NULL && !supported) {
-                            need_new_split = true;
+                            return true;
+                        }
+                    }
+                    return false;
+                };
+                for (int j = 0; j < GGML_MAX_SRC; j++) {
+                    struct ggml_tensor * src = node->src[j];
+                    if (src == NULL) {
+                        continue;
+                    }
+                    if (ggml_backend_sched_allows_bufferless_kvarn_src(node, j, src)) {
+                        struct ggml_tensor * kvarn_view = ggml_backend_sched_kvarn_view_base_mut(src);
+                        GGML_ASSERT(kvarn_view != NULL);
+                        for (int ks = 0; ks < 3; ++ks) {
+                            if (kvarn_view->src[ks] != NULL && check_new_split_src(kvarn_view->src[ks])) {
+                                need_new_split = true;
+                                break;
+                            }
+                        }
+                        if (need_new_split) {
                             break;
                         }
+                        continue;
+                    }
+                    if (check_new_split_src(src)) {
+                        need_new_split = true;
+                        break;
                     }
                 }
             }
@@ -1379,6 +1425,53 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
             for (int j = 0; j < GGML_MAX_SRC; j++) {
                 struct ggml_tensor * src = node->src[j];
                 if (src == NULL) {
+                    continue;
+                }
+
+                const auto move_src_to_split = [&](struct ggml_tensor ** src_ptr) {
+                    struct ggml_tensor * dep_src = *src_ptr;
+                    if (dep_src == NULL) {
+                        return;
+                    }
+
+                    const size_t dep_src_id = hash_id(dep_src);
+                    const int dep_src_backend_id = sched->hv_tensor_backend_ids[dep_src_id];
+                    GGML_ASSERT(dep_src_backend_id != -1); // all inputs should be assigned by now
+
+                    if (dep_src_backend_id != cur_backend_id &&
+                            !ggml_backend_sched_buffer_supported(sched, dep_src, cur_backend_id)) {
+                        // create a copy of the input in the split's backend
+                        if (tensor_id_copy(dep_src_id, cur_backend_id, 0) == NULL) {
+                            ggml_backend_t backend = sched->backends[cur_backend_id];
+                            for (int c = 0; c < sched->n_copies; c++) {
+                                struct ggml_tensor * tensor_copy = ggml_dup_tensor_layout(sched->ctx, dep_src);
+                                ggml_format_name(tensor_copy, "%s#%s#%d", ggml_backend_name(backend), dep_src->name, c);
+                                if (sched->n_copies > 1) {
+                                    ggml_set_input(tensor_copy);
+                                    ggml_set_output(tensor_copy); // prevent ggml-alloc from overwriting the tensor
+                                }
+                                tensor_id_copy(dep_src_id, cur_backend_id, c) = tensor_copy;
+                                SET_CAUSE(tensor_copy, "4.cpy");
+                            }
+                            int n_inputs = split->n_inputs++;
+                            if (n_inputs >= split->inputs_capacity) {
+                                ggml_backend_sched_split_inputs_grow(split);
+                            }
+                            split->inputs[n_inputs] = dep_src;
+                        }
+                        *src_ptr = tensor_id_copy(dep_src_id, cur_backend_id, sched->cur_copy);
+                    }
+                };
+
+                if (ggml_backend_sched_allows_bufferless_kvarn_src(node, j, src)) {
+                    // FLASH_ATTN_EXT consumes KVarN view descriptors directly; the view
+                    // output stays bufferless, but its hidden records/stage/indices sources
+                    // must still be visible from the CUDA split.
+                    struct ggml_tensor * kvarn_view = ggml_backend_sched_kvarn_view_base_mut(src);
+                    GGML_ASSERT(kvarn_view != NULL);
+                    for (int ks = 0; ks < 3; ++ks) {
+                        move_src_to_split(&kvarn_view->src[ks]);
+                    }
                     continue;
                 }
 
@@ -1786,7 +1879,8 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                 } else {
                     // try async copy, but if not possible, we can still use a sync copy without synchronizing the dst backend, since we handle the synchronization here with multiple copies and events
                     // TODO: add public function to facilitate this, since applications do not have direct access to the backend interface
-                    if (!split_backend->iface.cpy_tensor_async || !split_backend->iface.cpy_tensor_async(input_backend, split_backend, input, input_cpy)) {
+                    const bool async_ok = split_backend->iface.cpy_tensor_async && split_backend->iface.cpy_tensor_async(input_backend, split_backend, input, input_cpy);
+                    if (!async_ok) {
                         ggml_backend_synchronize(input_backend);
                         if (sched->events[split_backend_id][sched->cur_copy] != NULL) {
                             ggml_backend_event_synchronize(sched->events[split_backend_id][sched->cur_copy]);
@@ -1827,11 +1921,13 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                     return ec;
                 }
 
-                // TODO: pass backend to the callback, then the user can decide if they want to synchronize
-                ggml_backend_synchronize(split_backend);
+                if (need) {
+                    // TODO: pass backend to the callback, then the user can decide if they want to synchronize
+                    ggml_backend_synchronize(split_backend);
 
-                if (need && !sched->callback_eval(t, false, sched->callback_eval_user_data)) {
-                    break;
+                    if (!sched->callback_eval(t, false, sched->callback_eval_user_data)) {
+                        break;
+                    }
                 }
 
                 j0 = j1;

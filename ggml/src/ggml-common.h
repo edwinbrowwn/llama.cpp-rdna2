@@ -118,6 +118,24 @@ typedef sycl::half2 ggml_half2;
 #define QI5_1 (QK5_1 / (4 * QR5_1))
 #define QR5_1 2
 
+#define QI6_0 (QK6_0 / (4 * QR6_0))
+#define QR6_0 2
+
+#define QI6_1 (QK6_1 / (4 * QR6_1))
+#define QR6_1 2
+
+#define QI3_0 (QK3_0 / (4 * QR3_0))
+#define QR3_0 4
+
+#define QI3_1 (QK3_1 / (4 * QR3_1))
+#define QR3_1 4
+
+#define QI2_0S (QK2_0S / (4 * QR2_0S))
+#define QR2_0S 4
+
+#define QI2_1 (QK2_1 / (4 * QR2_1))
+#define QR2_1 4
+
 #define QI8_0 (QK8_0 / (4 * QR8_0))
 #define QR8_0 1
 
@@ -247,6 +265,72 @@ typedef struct {
     uint8_t qs[QK5_1 / 2]; // nibbles / quants
 } block_q5_1;
 static_assert(sizeof(block_q5_1) == 2 * sizeof(ggml_half) + sizeof(uint32_t) + QK5_1 / 2, "wrong q5_1 block size/padding");
+
+#define QK6_0 32
+typedef struct {
+    ggml_half d;              // delta
+    uint8_t   qh[QK6_0 / 4];  // upper two bits of quants
+    uint8_t   qs[QK6_0 / 2];  // lower four bits of quants
+} block_q6_0;
+static_assert(sizeof(block_q6_0) == sizeof(ggml_half) + QK6_0 / 2 + QK6_0 / 4, "wrong q6_0 block size/padding");
+
+#define QK6_1 32
+typedef struct {
+    GGML_EXTENSION union {
+        struct {
+            ggml_half d; // delta
+            ggml_half m; // min
+        } GGML_COMMON_AGGR_S;
+        ggml_half2 dm;
+    } GGML_COMMON_AGGR_U;
+    uint8_t qh[QK6_1 / 4];  // upper two bits of quants
+    uint8_t qs[QK6_1 / 2];  // lower four bits of quants
+} block_q6_1;
+static_assert(sizeof(block_q6_1) == 2 * sizeof(ggml_half) + QK6_1 / 2 + QK6_1 / 4, "wrong q6_1 block size/padding");
+
+// 3-bit: 2-bit planes in qs (byte j holds elements j, j+8, j+16, j+24), 3rd bit per element in qh
+#define QK3_0 32
+typedef struct {
+    ggml_half d;             // delta
+    uint8_t   qh[QK3_0 / 8]; // upper bit of quants
+    uint8_t   qs[QK3_0 / 4]; // lower two bits of quants
+} block_q3_0;
+static_assert(sizeof(block_q3_0) == sizeof(ggml_half) + QK3_0 / 8 + QK3_0 / 4, "wrong q3_0 block size/padding");
+
+#define QK3_1 32
+typedef struct {
+    GGML_EXTENSION union {
+        struct {
+            ggml_half d; // delta
+            ggml_half m; // min
+        } GGML_COMMON_AGGR_S;
+        ggml_half2 dm;
+    } GGML_COMMON_AGGR_U;
+    uint8_t qh[QK3_1 / 8]; // upper bit of quants
+    uint8_t qs[QK3_1 / 4]; // lower two bits of quants
+} block_q3_1;
+static_assert(sizeof(block_q3_1) == 2 * sizeof(ggml_half) + QK3_1 / 8 + QK3_1 / 4, "wrong q3_1 block size/padding");
+
+// 2-bit: 2-bit planes in qs (byte j holds elements j, j+8, j+16, j+24)
+#define QK2_0S 32
+typedef struct {
+    ggml_half d;             // delta
+    uint8_t   qs[QK2_0S / 4]; // quants, two bits each
+} block_q2_0s;
+static_assert(sizeof(block_q2_0s) == sizeof(ggml_half) + QK2_0S / 4, "wrong q2_0s block size/padding");
+
+#define QK2_1 32
+typedef struct {
+    GGML_EXTENSION union {
+        struct {
+            ggml_half d; // delta
+            ggml_half m; // min
+        } GGML_COMMON_AGGR_S;
+        ggml_half2 dm;
+    } GGML_COMMON_AGGR_U;
+    uint8_t qs[QK2_1 / 4]; // quants, two bits each
+} block_q2_1;
+static_assert(sizeof(block_q2_1) == 2 * sizeof(ggml_half) + QK2_1 / 4, "wrong q2_1 block size/padding");
 
 #define QK8_0 32
 typedef struct {

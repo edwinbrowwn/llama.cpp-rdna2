@@ -1,4 +1,6 @@
-# Install pre-built version of llama.cpp
+# Install pre-built binaries
+
+BeeLlama release binaries are published on the project's [releases page](https://github.com/Anbeeld/beellama.cpp/releases). The package-manager commands below install upstream `llama.cpp`, not BeeLlama, so they are not guaranteed to include Bee-specific features such as KVarN or adaptive DFlash control.
 
 | Install via | Windows | Mac  | Linux |
 |-------------|---------|------|-------|

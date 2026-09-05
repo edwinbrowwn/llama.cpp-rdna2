@@ -2,7 +2,26 @@
 
 #include "json-schema-to-grammar.h"
 
+#include <algorithm>
+#include <cctype>
+
 namespace server_schema {
+
+static llama_tokens tokenize_reasoning_marker(const llama_vocab * vocab, const std::string & marker) {
+    llama_tokens tokens = common_tokenize(vocab, marker, false, true);
+    if (marker.empty() || std::isspace((unsigned char) marker.front())) {
+        return tokens;
+    }
+
+    while (!tokens.empty()) {
+        const std::string piece = common_token_to_piece(vocab, tokens.front(), true);
+        if (piece.empty() || !std::all_of(piece.begin(), piece.end(), [](unsigned char ch) { return std::isspace(ch); })) {
+            break;
+        }
+        tokens.erase(tokens.begin());
+    }
+    return tokens;
+}
 
 //
 // llama.cpp-specific completion schema
@@ -385,6 +404,37 @@ std::vector<std::unique_ptr<field>> make_llama_cmpl_schema(const common_params &
     add((new field_bool("reasoning_control", params.sampling.reasoning_control))
         ->set_desc("Create the budget sampler on demand so reasoning can be ended at runtime"));
 
+    add((new field_str("reasoning_loop_guard"))
+        ->set_desc("Reasoning loop guard mode: off, force-close, or stop")
+        ->set_handler([&](field_eval_context & ctx, const json & data) {
+            ctx.params.reasoning_loop_guard.mode =
+                common_reasoning_loop_guard_mode_from_name(data.at("reasoning_loop_guard").get<std::string>());
+        }));
+
+    add((new field_num("reasoning_loop_min_tokens", params.reasoning_loop_guard.min_reasoning_tokens))
+        ->set_hard_limits(0, INT32_MAX)
+        ->set_desc("Minimum hidden reasoning tokens before loop checks"));
+
+    add((new field_num("reasoning_loop_window", params.reasoning_loop_guard.window_tokens))
+        ->set_hard_limits(1, INT32_MAX)
+        ->set_desc("Token tail window for reasoning loop checks"));
+
+    add((new field_num("reasoning_loop_max_period", params.reasoning_loop_guard.max_period))
+        ->set_hard_limits(1, INT32_MAX)
+        ->set_desc("Maximum periodic loop length to check"));
+
+    add((new field_num("reasoning_loop_min_coverage", params.reasoning_loop_guard.min_repeated_coverage))
+        ->set_hard_limits(1, INT32_MAX)
+        ->set_desc("Minimum repeated-token coverage before a loop trigger"));
+
+    add((new field_num("reasoning_loop_check_interval", params.reasoning_loop_guard.check_interval))
+        ->set_hard_limits(1, INT32_MAX)
+        ->set_desc("Accepted-token interval between loop checks"));
+
+    add((new field_num("reasoning_loop_interventions", params.reasoning_loop_guard.interventions_max))
+        ->set_hard_limits(0, INT32_MAX)
+        ->set_desc("Maximum force-close interventions before stopping"));
+
     add((new field_num("reasoning_budget_tokens", params.sampling.reasoning_budget_tokens))
         ->set_hard_limits(-1, INT32_MAX)
         ->set_desc("Number of tokens in the reasoning budget (-1 = disabled)"));
@@ -393,7 +443,8 @@ std::vector<std::unique_ptr<field>> make_llama_cmpl_schema(const common_params &
         ->set_desc("Token string marking the start of the reasoning budget section")
         ->set_handler([&](field_eval_context & ctx, const json & data) {
             GGML_ASSERT(ctx.vocab != nullptr);
-            ctx.params.sampling.reasoning_budget_start = common_tokenize(ctx.vocab, data.at("reasoning_budget_start_tag").get<std::string>(), false, true);
+            ctx.params.sampling.reasoning_budget_start = tokenize_reasoning_marker(
+                ctx.vocab, data.at("reasoning_budget_start_tag").get<std::string>());
         }));
 
     add((new field_json("reasoning_budget_end_tags"))
@@ -402,18 +453,22 @@ std::vector<std::unique_ptr<field>> make_llama_cmpl_schema(const common_params &
         ->set_handler([&](field_eval_context & ctx, const json & data) {
             GGML_ASSERT(ctx.vocab != nullptr);
             ctx.params.sampling.reasoning_budget_end.clear();
+            ctx.params.sampling.reasoning_budget_forced.clear();
             if (data.contains("reasoning_budget_end_tags")) {
                 for (const auto & t : data.at("reasoning_budget_end_tags")) {
                     std::string tag = t.get<std::string>();
                     if (!tag.empty()) {
-                        ctx.params.sampling.reasoning_budget_end.push_back(common_tokenize(ctx.vocab, tag, false, true));
+                        ctx.params.sampling.reasoning_budget_end.push_back(tokenize_reasoning_marker(ctx.vocab, tag));
                     }
                 }
             } else if (data.contains("reasoning_budget_end_tag")) {
                 std::string tag = data.at("reasoning_budget_end_tag").get<std::string>();
                 if (!tag.empty()) {
-                    ctx.params.sampling.reasoning_budget_end.push_back(common_tokenize(ctx.vocab, tag, false, true));
+                    ctx.params.sampling.reasoning_budget_end.push_back(tokenize_reasoning_marker(ctx.vocab, tag));
                 }
+            }
+            if (!ctx.params.sampling.reasoning_budget_end.empty()) {
+                ctx.params.sampling.reasoning_budget_forced = ctx.params.sampling.reasoning_budget_end.front();
             }
         }));
 
@@ -527,6 +582,7 @@ task_params eval_llama_cmpl_schema(
     // Sampling parameter defaults are loaded from the global server context (but individual requests can still override them)
     params.sampling      = params_base.sampling;
     params.speculative   = params_base.speculative;
+    params.reasoning_loop_guard = params_base.reasoning_loop_guard;
     params.n_keep        = params_base.n_keep;
     params.n_predict     = params_base.n_predict;
     params.n_cache_reuse = params_base.n_cache_reuse;
@@ -556,6 +612,10 @@ task_params eval_llama_cmpl_schema(
         // if "reasoning_format" is not provided, its handler will not be called, we will need to handle it here
         auto reasoning_format = params.chat_parser_params.reasoning_format;
         params.chat_parser_params.reasoning_in_content = params.stream && (reasoning_format == COMMON_REASONING_FORMAT_DEEPSEEK_LEGACY);
+
+        common_validate_reasoning_loop_guard_params(params.reasoning_loop_guard);
+        params.sampling.reasoning_budget_tracking =
+            params.reasoning_loop_guard.mode != COMMON_REASONING_LOOP_GUARD_OFF;
     }
 
     // debugging

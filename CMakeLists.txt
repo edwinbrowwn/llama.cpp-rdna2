@@ -4,8 +4,8 @@ include(CheckIncludeFileCXX)
 
 ### llama.cpp version
 set(LLAMA_VERSION_MAJOR 0)
-set(LLAMA_VERSION_MINOR 3)
-set(LLAMA_VERSION_PATCH 0)
+set(LLAMA_VERSION_MINOR 4)
+set(LLAMA_VERSION_PATCH 4)
 set(LLAMA_VERSION_BASE "${LLAMA_VERSION_MAJOR}.${LLAMA_VERSION_MINOR}.${LLAMA_VERSION_PATCH}")
 
 # whether this is a development/nightly build
@@ -26,6 +26,12 @@ message(STATUS "llama.cpp version: ${LLAMA_VERSION}")
 set(CMAKE_WARN_UNUSED_CLI YES)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+if(DEFINED GGML_CUDA_ARCH)
+    message(FATAL_ERROR
+        "GGML_CUDA_ARCH is not a supported CMake option. "
+        "Use CMAKE_CUDA_ARCHITECTURES=120, or a semicolon-separated list such as CMAKE_CUDA_ARCHITECTURES=\"86;89;120\".")
+endif()
 
 if (NOT XCODE AND NOT MSVC AND NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
@@ -83,6 +89,7 @@ if (WIN32)
 endif()
 
 if (MSVC)
+    add_compile_definitions(_USE_MATH_DEFINES)
     add_compile_options("$<$<COMPILE_LANGUAGE:C>:/utf-8>")
     add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/utf-8>")
     add_compile_options("$<$<COMPILE_LANGUAGE:C>:/bigobj>")
@@ -156,6 +163,9 @@ if (NOT DEFINED LLAMA_BUILD_NUMBER)
 endif()
 if (NOT DEFINED LLAMA_BUILD_COMMIT)
     set(LLAMA_BUILD_COMMIT        ${BUILD_COMMIT})
+endif()
+if (NOT DEFINED LLAMA_BUILD_DIRTY)
+    set(LLAMA_BUILD_DIRTY         ${BUILD_DIRTY})
 endif()
 
 # override ggml options

@@ -1,0 +1,106 @@
+name: Setup ccache
+description: Install ccache, restore cache, and configure it for the build.
+inputs:
+  key:
+    description: Primary cache key (used as-is, no automatic prefix).
+    required: true
+  restore-keys:
+    description: Additional restore key prefixes, one per line.
+    required: false
+    default: ""
+  max-size:
+    description: Maximum cache size (ccache max_size value, e.g. 500MB, 5G).
+    required: false
+    default: "3G"
+  sloppiness:
+    description: ccache sloppiness setting (e.g. time_macros, file_macro).
+    required: false
+    default: ""
+  path:
+    description: ccache directory path.
+    required: false
+    default: .ccache
+runs:
+  using: composite
+  steps:
+    - name: Install ccache (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        if ! command -v ccache >/dev/null 2>&1; then
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq ccache
+          elif command -v apk >/dev/null 2>&1; then
+            apk add ccache
+          elif command -v dnf >/dev/null 2>&1; then
+            sudo dnf install -y ccache
+          elif command -v pacman >/dev/null 2>&1; then
+            sudo pacman -S --noconfirm ccache
+          else
+            echo "Unsupported Linux package manager for ccache installation"
+            exit 1
+          fi
+        fi
+
+    - name: Install ccache (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        if ! command -v ccache >/dev/null 2>&1; then
+          brew install ccache
+        fi
+
+    - name: Install ccache (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        if (-not (Get-Command ccache -ErrorAction SilentlyContinue)) {
+          choco install ccache -y
+        }
+
+    - name: Normalize ccache path
+      id: ccache-path
+      shell: bash
+      env:
+        INPUT_PATH: ${{ inputs.path }}
+      run: |
+        case "${INPUT_PATH}" in
+          /*|[A-Za-z]:/*|[A-Za-z]:\\*) CCACHE_DIR_ABS="${INPUT_PATH}" ;;
+          *) CCACHE_DIR_ABS="${GITHUB_WORKSPACE}/${INPUT_PATH}" ;;
+        esac
+        echo "path=${CCACHE_DIR_ABS}" >> "$GITHUB_OUTPUT"
+        echo "Resolved ccache path: ${CCACHE_DIR_ABS}"
+        mkdir -p "${CCACHE_DIR_ABS}"
+
+    - name: Restore ccache
+      id: restore-cache
+      uses: actions/cache/restore@v5
+      with:
+        path: ${{ steps.ccache-path.outputs.path }}
+        key: ${{ inputs.key }}
+        restore-keys: ${{ inputs.restore-keys }}
+
+    - name: Configure ccache
+      shell: bash
+      env:
+        CCACHE_DIR: ${{ steps.ccache-path.outputs.path }}
+        CCACHE_MAXSIZE: ${{ inputs.max-size }}
+        CCACHE_SLOPPINESS: ${{ inputs.sloppiness }}
+      run: |
+        ccache --set-config=cache_dir="${CCACHE_DIR}"
+        ccache --set-config=max_size="${CCACHE_MAXSIZE}"
+        ccache --set-config=compression=true
+        if [ "${RUNNER_OS}" = "macOS" ] || [ "${RUNNER_OS}" = "Windows" ]; then
+          ccache --set-config=compiler_check=content
+        fi
+        ccache --set-config=sloppiness="${CCACHE_SLOPPINESS}"
+        ccache -z
+        ccache --show-config | grep -E 'cache_dir|max_size'
+        echo "CCACHE_DIR=${CCACHE_DIR}" >> "$GITHUB_ENV"
+        echo "CCACHE_MAXSIZE=${CCACHE_MAXSIZE}" >> "$GITHUB_ENV"
+
+outputs:
+  cache-hit:
+    description: Whether the cache was restored (exact key hit).
+    value: ${{ steps.restore-cache.outputs.cache-hit }}

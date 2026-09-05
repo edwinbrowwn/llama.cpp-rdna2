@@ -390,6 +390,53 @@ static void test_example_native(testing & t) {
             }
         });
     }
+
+    t.test("streaming bare reasoning close tag after generation_prompt", [&](testing & t) {
+        test_case tc = {
+            /* .name =                */ "streaming bare reasoning close tag after generation_prompt",
+            /* .tools =               */ {},
+            /* .tool_choice =         */ COMMON_CHAT_TOOL_CHOICE_NONE,
+            /* .reasoning_format =    */ COMMON_REASONING_FORMAT_AUTO,
+            /* .json_schema =         */ {},
+            /* .parallel_tool_calls = */ false,
+            /* .generation_prompt =   */ "<think>",
+            /* .input =               */ "</think>",
+            /* .expect_reasoning =    */ "",
+            /* .expect_content =      */ "",
+            /* .expect_tool_calls =   */ {},
+        };
+
+        auto parser = build_parser(tc);
+        common_chat_parser_params parser_params;
+        parser_params.reasoning_format = tc.reasoning_format;
+        parser_params.generation_prompt = tc.generation_prompt;
+
+        common_chat_msg prev;
+        common_chat_msg accumulated;
+        for (size_t i = 1; i <= tc.input.size(); ++i) {
+            const bool is_partial = i < tc.input.size();
+            common_chat_msg msg = common_chat_peg_parse(parser, tc.input.substr(0, i), is_partial, parser_params);
+
+            std::vector<common_chat_msg_diff> diffs;
+            try {
+                diffs = common_chat_msg_diff::compute_diffs(prev, msg);
+            } catch (const std::exception & e) {
+                t.assert_true(std::string("diff failed with ") + e.what(), false);
+                break;
+            }
+
+            for (const auto & diff : diffs) {
+                t.assert_equal("no visible close tag content delta", std::string(), diff.content_delta);
+                t.assert_equal("no close tag reasoning delta", std::string(), diff.reasoning_content_delta);
+            }
+
+            accumulated = msg;
+            prev = msg;
+        }
+
+        t.assert_equal("final content", tc.expect_content, accumulated.content);
+        t.assert_equal("final reasoning", tc.expect_reasoning, accumulated.reasoning_content);
+    });
 }
 
 static void test_example_qwen3_coder(testing & t) {

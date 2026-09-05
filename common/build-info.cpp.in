@@ -1,5 +1,7 @@
 #include "build-info.h"
 
+#include "ggml.h"
+
 #include <cstdio>
 #include <string>
 
@@ -7,6 +9,7 @@ int LLAMA_BUILD_NUMBER = @LLAMA_BUILD_NUMBER@;
 char const * LLAMA_COMMIT = "@LLAMA_BUILD_COMMIT@";
 char const * LLAMA_COMPILER = "@BUILD_COMPILER@";
 char const * LLAMA_BUILD_TARGET = "@BUILD_TARGET@";
+int LLAMA_BUILD_DIRTY = @LLAMA_BUILD_DIRTY@;
 
 int llama_build_number(void) {
     return LLAMA_BUILD_NUMBER;
@@ -25,11 +28,13 @@ const char * llama_build_target(void) {
 }
 
 const char * llama_build_info(void) {
-    static std::string s = "b" + std::to_string(LLAMA_BUILD_NUMBER) + "-" + LLAMA_COMMIT;
+    static std::string s = "b" + std::to_string(LLAMA_BUILD_NUMBER) + "-" + LLAMA_COMMIT + (LLAMA_BUILD_DIRTY ? "-dirty" : "");
     return s.c_str();
 }
 
 void llama_print_build_info(const char * llama_version) {
-    fprintf(stderr, "version: %s (build %d, commit %s)\n", llama_version, llama_build_number(), llama_commit());
+    fprintf(stderr, "version: %s (build %d, commit %s%s)\n",
+            llama_version, llama_build_number(), llama_commit(), LLAMA_BUILD_DIRTY ? "-dirty" : "");
     fprintf(stderr, "built with %s for %s\n", llama_compiler(), llama_build_target());
+    fprintf(stderr, "ggml op count: %d\n", GGML_OP_COUNT);
 }

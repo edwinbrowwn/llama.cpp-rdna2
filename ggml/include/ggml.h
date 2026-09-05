@@ -221,7 +221,7 @@
 
 #define GGML_MAX_DIMS           4
 #define GGML_MAX_PARAMS         2048
-#define GGML_MAX_SRC            10
+#define GGML_MAX_SRC            12
 #define GGML_MAX_N_THREADS      512
 #define GGML_MAX_OP_PARAMS      64
 
@@ -430,13 +430,37 @@ extern "C" {
         GGML_TYPE_NVFP4   = 40, // NVFP4 (4 blocks, E4M3 scale)
         GGML_TYPE_Q1_0    = 41,
         GGML_TYPE_Q2_0    = 42,
-        GGML_TYPE_COUNT   = 43,
+        // BeeLlama KV-only formats.  Q2_0S is deliberately distinct from
+        // upstream Q2_0: it has a 32-element block and different math.
+        GGML_TYPE_Q6_0    = 43,
+        GGML_TYPE_Q6_1    = 44,
+        GGML_TYPE_Q3_0    = 45,
+        GGML_TYPE_Q3_1    = 46,
+        GGML_TYPE_Q2_0S   = 47,
+        GGML_TYPE_Q2_1    = 48,
+        GGML_TYPE_COUNT   = 49,
     };
 
     // precision
     enum ggml_prec {
         GGML_PREC_DEFAULT =  0, // stored as ggml_tensor.op_params, 0 by default
         GGML_PREC_F32     = 10,
+    };
+
+    // FLASH_ATTN_EXT op_params shared by the generic precision hint and KVarN's
+    // descriptor-native domain contract.
+    enum ggml_flash_attn_ext_op_param {
+        GGML_FLASH_ATTN_EXT_OP_PARAM_PREC         = 3,
+        GGML_FLASH_ATTN_EXT_OP_PARAM_KVARN_DOMAIN = 4,
+        GGML_FLASH_ATTN_EXT_OP_PARAM_TAIL_BODYLESS = 5,
+        GGML_FLASH_ATTN_EXT_OP_PARAM_TAIL_HISTORY_SLOTS = 6,
+    };
+
+    enum ggml_flash_attn_ext_kvarn_domain {
+        GGML_FLASH_ATTN_EXT_KVARN_DOMAIN_AUTO                 = 0,
+        GGML_FLASH_ATTN_EXT_KVARN_DOMAIN_ROTATED              = 1,
+        GGML_FLASH_ATTN_EXT_KVARN_DOMAIN_ORIGINAL             = 2,
+        GGML_FLASH_ATTN_EXT_KVARN_DOMAIN_ROTATED_K_ORIGINAL_V = 3,
     };
 
     // op hint
@@ -574,6 +598,13 @@ extern "C" {
         GGML_OP_DSV4_HC_COMB,
         GGML_OP_DSV4_HC_PRE,
         GGML_OP_DSV4_HC_POST,
+
+        // KVarN record-oriented KV-cache operators.  They are not GGUF
+        // tensor types and are never serialized in model weights.
+        GGML_OP_KVARN_WHT,
+        GGML_OP_KVARN_STORE,
+        GGML_OP_KVARN_VIEW,
+        GGML_OP_KVARN_MATERIALIZE,
 
         GGML_OP_UNARY,
 
@@ -1676,6 +1707,12 @@ extern "C" {
             struct ggml_tensor  * a,  // data
             struct ggml_tensor  * b); // row indices
 
+    GGML_API struct ggml_tensor * ggml_get_rows_as(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            struct ggml_tensor  * b,
+            enum ggml_type        type);
+
     GGML_API struct ggml_tensor * ggml_get_rows_back(
             struct ggml_context * ctx,
             struct ggml_tensor  * a,  // gradients of ggml_get_rows result
@@ -1698,6 +1735,26 @@ extern "C" {
             struct ggml_tensor  * a,  // destination
             struct ggml_tensor  * b,  // source
             struct ggml_tensor  * c); // row indices
+
+    // As ggml_set_rows(), with an explicit graph dependency. Negative row
+    // indices are ignored, allowing ragged updates without persistent sink
+    // rows. The dependency affects ordering only and is not read by backends.
+    GGML_API struct ggml_tensor * ggml_set_rows_ordered(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            struct ggml_tensor  * b,
+            struct ggml_tensor  * c,
+            struct ggml_tensor  * dependency);
+
+    // Stores the same source rows into a body destination and an exact shadow
+    // destination in one backend operation. The result aliases shadow.
+    GGML_API struct ggml_tensor * ggml_set_rows_with_shadow(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * body,
+            struct ggml_tensor  * source,
+            struct ggml_tensor  * body_indices,
+            struct ggml_tensor  * shadow,
+            struct ggml_tensor  * shadow_indices);
 
     GGML_API struct ggml_tensor * ggml_diag(
         struct ggml_context     * ctx,
@@ -2453,6 +2510,53 @@ extern "C" {
             struct ggml_tensor * a,
             struct ggml_tensor * sinks);
 
+    // Attach per-sequence exact-KV arenas to an existing body FlashAttention
+    // operation. query_order packs caller queries in sequence-major order and
+    // run_desc records { arena, packed start, query count, consecutive run }.
+    // Backends compute both partials privately and publish one normalized dst.
+    GGML_API void ggml_flash_attn_ext_add_kv_tail(
+            struct ggml_tensor * a,
+            struct ggml_tensor * k_tail,
+            struct ggml_tensor * v_tail,
+            struct ggml_tensor * mask_tail,
+            struct ggml_tensor * query_order,
+            struct ggml_tensor * run_desc);
+
+    // Declare that the attached exact tail is the complete attention source.
+    // Backends may skip the masked dummy body and execute the packed exact
+    // source as one ordinary FlashAttention pass.
+    GGML_API void ggml_flash_attn_ext_set_kv_tail_bodyless(
+            struct ggml_tensor * a);
+
+    // Set the logical persistent-history boundary for segmented exact tails.
+    // The physical tensor may include backend execution padding beyond it.
+    GGML_API void ggml_flash_attn_ext_set_kv_tail_history_slots(
+            struct ggml_tensor * a,
+            int32_t              history_slots);
+
+    GGML_API struct ggml_tensor * ggml_kv_tail_attention_merge(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * body_attn,
+            struct ggml_tensor  * k_tail,
+            struct ggml_tensor  * v_tail,
+            struct ggml_tensor  * mask_tail,
+            struct ggml_tensor  * query_order,
+            struct ggml_tensor  * run_desc);
+
+    // Attach a compact exact source without materializing history and current
+    // rows into one tensor. Tail indices address history first and then the
+    // graph-local current rows.
+    GGML_API struct ggml_tensor * ggml_kv_tail_attention_merge_segmented(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * body_attn,
+            struct ggml_tensor  * k_history,
+            struct ggml_tensor  * v_history,
+            struct ggml_tensor  * k_current,
+            struct ggml_tensor  * v_current,
+            struct ggml_tensor  * mask_tail,
+            struct ggml_tensor  * query_order,
+            struct ggml_tensor  * run_desc);
+
     // TODO: needs to be adapted to ggml_flash_attn_ext
     GGML_API struct ggml_tensor * ggml_flash_attn_back(
            struct ggml_context * ctx,
@@ -2597,8 +2701,54 @@ extern "C" {
             struct ggml_tensor  * v,
             struct ggml_tensor  * g,
             struct ggml_tensor  * beta,
-            struct ggml_tensor  * state,
-            int64_t               K);
+             struct ggml_tensor  * state,
+             int64_t               K);
+
+    // KVarN normalized Sylvester Walsh-Hadamard transform for 128/256/512
+    // head widths.  The transform is self-inverse.
+    GGML_API struct ggml_tensor * ggml_kvarn_wht(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            int                   head_width);
+
+    // KVarN structured KV-cache operations.  Records span full 128-token
+    // tiles, so this deliberately remains separate from ggml_type.
+    GGML_API struct ggml_tensor * ggml_kvarn_store(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * current,
+            struct ggml_tensor  * indices,
+            struct ggml_tensor  * stage,
+            struct ggml_tensor  * records,
+            int                   bits,
+            int                   sinkhorn_iters,
+            bool                  value,
+            int                   stage_groups);
+
+    GGML_API struct ggml_tensor * ggml_kvarn_view(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * records,
+            struct ggml_tensor  * stage_after_store,
+            struct ggml_tensor  * indices,
+            int                   n_kv,
+            int                   stream_start,
+            int                   n_stream,
+            int                   bits,
+            bool                  value,
+            int                   stage_groups);
+
+    // Reconstructs a standard F16 tensor from KVarN records and staging. The
+    // result can be consumed by any ordinary attention implementation.
+    GGML_API struct ggml_tensor * ggml_kvarn_materialize(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * records,
+            struct ggml_tensor  * stage_after_store,
+            struct ggml_tensor  * indices,
+            int                   n_kv,
+            int                   stream_start,
+            int                   n_stream,
+            int                   bits,
+            bool                  value,
+            int                   stage_groups);
 
     // DSA lightning indexer
     //

@@ -793,6 +793,24 @@ void process_shaders() {
             string_to_spv("get_rows_" + tname, shader, merge_maps(base_dict, {{"TEMP_TYPE", "FLOAT_TYPE"}, {data_a_key, "1"}, {"B_TYPE", "int"}, {"D_TYPE", "float16_t"}}));
         }
         string_to_spv("get_rows_" + tname + "_f32", shader, merge_maps(base_dict, {{"TEMP_TYPE", "FLOAT_TYPE"}, {data_a_key, "1"}, {"B_TYPE", "int"}, {"D_TYPE", "float"}}));
+        string_to_spv("get_rows_" + tname + "_bf16", shader, merge_maps(base_dict, {{"TEMP_TYPE", "FLOAT_TYPE"}, {data_a_key, "1"}, {"B_TYPE", "int"}, {"D_TYPE", "uint16_t"}, {"DATA_D_BF16", "1"}}));
+    }
+
+    // Bee standard KV quants are cache-only types, so generate only the row
+    // movement kernels needed by the generic tail graph.  Adding them to
+    // type_names would incorrectly opt them into unrelated matmul kernels.
+    for (const std::string tname : {"q6_0", "q6_1", "q3_0", "q3_1", "q2_0s", "q2_1"}) {
+        const std::string data_a_key = "DATA_A_" + to_uppercase(tname);
+        const std::string shader = "get_rows_quant.comp";
+        string_to_spv("get_rows_" + tname, shader, merge_maps(base_dict, {{"TEMP_TYPE", "FLOAT_TYPE"}, {data_a_key, "1"}, {"B_TYPE", "int"}, {"D_TYPE", "float16_t"}}));
+        string_to_spv("get_rows_" + tname + "_f32", shader, merge_maps(base_dict, {{"TEMP_TYPE", "FLOAT_TYPE"}, {data_a_key, "1"}, {"B_TYPE", "int"}, {"D_TYPE", "float"}}));
+        string_to_spv("get_rows_" + tname + "_bf16", shader, merge_maps(base_dict, {{"TEMP_TYPE", "FLOAT_TYPE"}, {data_a_key, "1"}, {"B_TYPE", "int"}, {"D_TYPE", "uint16_t"}, {"DATA_D_BF16", "1"}}));
+    }
+
+    for (const std::string tname : {"q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1",
+                                     "q6_0", "q6_1", "q3_0", "q3_1", "q2_0s", "q2_1"}) {
+        string_to_spv("out_prod_" + tname + "_f32", "out_prod_quant.comp", merge_maps(base_dict, {
+                {"DATA_A_" + to_uppercase(tname), "1"}, {"B_TYPE", "float"}, {"D_TYPE", "float"}}));
     }
 
     string_to_spv("get_rows_i32", "get_rows.comp", {{"TEMP_TYPE", "uint"}, {"A_TYPE", "uint"}, {"B_TYPE", "int"}, {"D_TYPE", "uint"}});
@@ -839,7 +857,7 @@ void process_shaders() {
     }
 
     for (auto src : {std::pair{"f32", "float"}, std::pair{"f16", "float16_t"}}) {
-        for (std::string dst : {"f32", "f16", "bf16", "q1_0", "q2_0", "q4_0", "q4_1", "q5_0", "q5_1", "q8_0", "iq4_nl"}) {
+        for (std::string dst : {"f32", "f16", "bf16", "q1_0", "q2_0", "q4_0", "q4_1", "q5_0", "q5_1", "q6_0", "q6_1", "q3_0", "q3_1", "q2_0s", "q2_1", "q8_0", "iq4_nl"}) {
             string_to_spv("set_rows_" + std::string(src.first) + "_" + dst + "_i32", "copy_to_quant.comp", {{"SET_ROWS", "1"}, {"DATA_A_" + to_uppercase(dst), "1"}, {"B_TYPE", "uint"}, {"B_SIZE", "32"}, {"S_TYPE", src.second}, {"D_TYPE", "float"}, {"FLOAT_TYPE", "float"}});
             string_to_spv("set_rows_" + std::string(src.first) + "_" + dst + "_i64", "copy_to_quant.comp", {{"SET_ROWS", "1"}, {"DATA_A_" + to_uppercase(dst), "1"}, {"B_TYPE", "uvec2"}, {"B_SIZE", "64"}, {"S_TYPE", src.second}, {"D_TYPE", "float"}, {"FLOAT_TYPE", "float"}});
         }
@@ -1032,6 +1050,13 @@ void process_shaders() {
     string_to_spv("cross_entropy_loss_f32", "cross_entropy_loss.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"B_TYPE", "float"}, {"D_TYPE", "float"}}));
     string_to_spv("cross_entropy_loss_back_f32", "cross_entropy_loss_back.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"B_TYPE", "float"}, {"D_TYPE", "float"}}));
     string_to_spv("fwht_f32", "fwht.comp", {});
+    string_to_spv("kvarn_store", "kvarn_store.comp", {});
+    string_to_spv("kvarn_materialize", "kvarn_materialize.comp", {});
+    string_to_spv("kvarn_flash_attn", "kvarn_flash_attn.comp", {});
+    string_to_spv("flash_attn_tail", "flash_attn_tail.comp", {});
+    string_to_spv("kvarn_wht", "kvarn_wht.comp", {});
+    string_to_spv("kvarn_wht_d256", "kvarn_wht_parallel.comp", {{"HEAD_WIDTH", "256"}});
+    string_to_spv("kvarn_wht_d512", "kvarn_wht_parallel.comp", {{"HEAD_WIDTH", "512"}});
     string_to_spv("fwht_shmem_f32", "fwht.comp", {{"FWHT_SHMEM", "1"}});
     string_to_spv("count_equal_i32", "count_equal.comp", merge_maps(base_dict, {{"A_TYPE", "int"}, {"B_TYPE", "int"}, {"D_TYPE", "int"}}));
     string_to_spv("cumsum_f32", "cumsum.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"D_TYPE", "float"}}));

@@ -68,4 +68,3 @@ def test_mcp_proxy_no_content():
     finally:
         target.shutdown()
         target.server_close()
-

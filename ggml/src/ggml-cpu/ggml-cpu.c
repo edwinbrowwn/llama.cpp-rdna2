@@ -236,6 +236,42 @@ static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
         .vec_dot_type             = GGML_TYPE_Q8_0,
         .nrows                    = 1,
     },
+    [GGML_TYPE_Q6_0] = {
+        .from_float               = quantize_row_q6_0,
+        .vec_dot                  = ggml_vec_dot_q6_0_q8_0,
+        .vec_dot_type             = GGML_TYPE_Q8_0,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_Q6_1] = {
+        .from_float               = quantize_row_q6_1,
+        .vec_dot                  = ggml_vec_dot_q6_1_q8_1,
+        .vec_dot_type             = GGML_TYPE_Q8_1,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_Q3_0] = {
+        .from_float               = quantize_row_q3_0,
+        .vec_dot                  = ggml_vec_dot_q3_0_q8_0,
+        .vec_dot_type             = GGML_TYPE_Q8_0,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_Q3_1] = {
+        .from_float               = quantize_row_q3_1,
+        .vec_dot                  = ggml_vec_dot_q3_1_q8_1,
+        .vec_dot_type             = GGML_TYPE_Q8_1,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_Q2_0S] = {
+        .from_float               = quantize_row_q2_0s,
+        .vec_dot                  = ggml_vec_dot_q2_0s_q8_0,
+        .vec_dot_type             = GGML_TYPE_Q8_0,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_Q2_1] = {
+        .from_float               = quantize_row_q2_1,
+        .vec_dot                  = ggml_vec_dot_q2_1_q8_1,
+        .vec_dot_type             = GGML_TYPE_Q8_1,
+        .nrows                    = 1,
+    },
     [GGML_TYPE_Q4_0] = {
         .from_float               = quantize_row_q4_0,
         .vec_dot                  = ggml_vec_dot_q4_0_q8_0,
@@ -2076,6 +2112,23 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             {
                 ggml_compute_forward_dsv4_hc_post(params, tensor);
             } break;
+        case GGML_OP_KVARN_WHT:
+            {
+                ggml_compute_forward_kvarn_wht(params, tensor);
+            } break;
+        case GGML_OP_KVARN_STORE:
+            {
+                ggml_compute_forward_kvarn_store(params, tensor);
+            } break;
+        case GGML_OP_KVARN_VIEW:
+            {
+                // The CPU fallback materializes KVarN views while STORE owns
+                // the persistent record update; VIEW is a graph proxy here.
+            } break;
+        case GGML_OP_KVARN_MATERIALIZE:
+            {
+                ggml_compute_forward_kvarn_materialize(params, tensor);
+            } break;
         case GGML_OP_MAP_CUSTOM1:
             {
                 ggml_compute_forward_map_custom1(params, tensor);
@@ -2259,8 +2312,15 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_DSV4_HC_COMB:
         case GGML_OP_DSV4_HC_PRE:
         case GGML_OP_DSV4_HC_POST:
+        case GGML_OP_KVARN_WHT:
+        case GGML_OP_KVARN_MATERIALIZE:
             {
                 n_tasks = n_threads;
+            } break;
+        case GGML_OP_KVARN_STORE:
+        case GGML_OP_KVARN_VIEW:
+            {
+                n_tasks = 1;
             } break;
         case GGML_OP_REPEAT:
         case GGML_OP_REPEAT_BACK:
@@ -2836,7 +2896,7 @@ struct ggml_cplan ggml_graph_plan(
                 case GGML_OP_ADD_ID:
                 case GGML_OP_ADD1:
                     {
-                        if (ggml_is_quantized(node->src[0]->type)) {
+                        if (ggml_is_quantized(node->src[0]->type) || node->src[0]->type == GGML_TYPE_F16) {
                             cur = ggml_type_size(GGML_TYPE_F32) * node->src[0]->ne[0] * n_tasks;
                         }
                     } break;
@@ -2993,6 +3053,13 @@ struct ggml_cplan ggml_graph_plan(
                         const int64_t K   = ggml_get_op_params_i32(node, 0);
                         const int64_t per_thread = S_v + (K > 1 ? S_v * S_v : 0);
                         cur = per_thread * sizeof(float) * n_tasks;
+                    } break;
+                case GGML_OP_KVARN_WHT:
+                case GGML_OP_KVARN_STORE:
+                case GGML_OP_KVARN_VIEW:
+                case GGML_OP_KVARN_MATERIALIZE:
+                    {
+                        cur = 0;
                     } break;
                 case GGML_OP_COUNT:
                     {

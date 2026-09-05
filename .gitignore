@@ -1,11 +1,13 @@
 # Extensions
 
 *.a
+*.bak
 *.bat
 *.bin
 *.d
 *.dll
 *.dot
+*.env
 *.etag
 *.exe
 *.gcda
@@ -13,6 +15,7 @@
 *.gcov
 *.gguf
 *.gguf.json
+*.key
 *.lastModified
 *.log
 *.metallib
@@ -20,6 +23,7 @@
 *.so
 *.swp
 *.tmp
+*.zip
 *.DS_Store
 
 # IDE / OS
@@ -153,3 +157,9 @@ a.out.*
 
 AGENTS.local.md
 .pi/SYSTEM.md
+
+# BeeLlama local artifacts
+
+/artifacts/
+/release-packages/*/
+/servers

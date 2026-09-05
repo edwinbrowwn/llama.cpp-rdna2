@@ -34,6 +34,10 @@ int32_t common_speculative_n_max(const common_params_speculative * spec);
 // return the max number of draft tokens from the initialized implementations
 int32_t common_speculative_n_max(const common_speculative * spec);
 
+// Bee's variable-depth adaptive draft-max is limited to the original DFlash path.
+bool common_speculative_dflash_adaptive_dm_supported(int32_t selector_top_k);
+bool common_speculative_adaptive_dm_supported(const common_speculative * spec);
+
 // validate and resolve the unconditional synthetic acceptance rates
 std::vector<double> common_speculative_synth_rates_resolve(const common_params_speculative * spec, int32_t n_max);
 
@@ -107,6 +111,11 @@ struct common_speculative_draft_params {
 
 common_speculative_draft_params & common_speculative_get_draft_params(common_speculative * spec, llama_seq_id seq_id);
 
+// Disable all speculative provider processing for one sequence. This is used
+// by an explicit request-level speculative.n_max=0 so provider prompt catch-up
+// cannot run behind a request that selected target-only generation.
+void common_speculative_set_seq_enabled(common_speculative * spec, llama_seq_id seq_id, bool enabled);
+
 // optionally call once at the beginning of a new generation
 void common_speculative_begin(common_speculative * spec, llama_seq_id seq_id, const llama_tokens & prompt);
 
@@ -126,6 +135,7 @@ void common_speculative_accept(common_speculative * spec, llama_seq_id,
 // (optional) checkpoint and lifecycle state. State is keyed by implementation;
 // sidecars store only a small cursor/epoch while keeping device KV resident.
 bool common_speculative_get_state(common_speculative * spec, llama_seq_id seq_id, std::vector<uint8_t> & data);
+bool common_speculative_validate_state(common_speculative * spec, llama_seq_id seq_id, const std::vector<uint8_t> & data);
 bool common_speculative_set_state(common_speculative * spec, llama_seq_id seq_id, const std::vector<uint8_t> & data);
 void common_speculative_reset_state(common_speculative * spec, llama_seq_id seq_id);
 // Release per-request state while allowing implementations to retain state tied
@@ -141,6 +151,17 @@ bool common_speculative_truncate_state(common_speculative * spec, llama_seq_id s
 bool common_speculative_commit_state(common_speculative * spec, llama_seq_id seq_id, llama_pos pos_max);
 bool common_speculative_rebase_state(common_speculative * spec, llama_seq_id seq_id,
         llama_pos pos_min, llama_pos pos_max, llama_pos delta);
+
+// Prepare validates and owns the decoded implementation payload. Commit has no
+// remaining parsing or allocation and cannot fail.
+struct common_speculative_state_restore_plan;
+common_speculative_state_restore_plan * common_speculative_prepare_state(
+        common_speculative * spec,
+        llama_seq_id seq_id,
+        const uint8_t * data,
+        size_t size);
+void common_speculative_state_restore_plan_commit(common_speculative_state_restore_plan * plan);
+void common_speculative_state_restore_plan_free(common_speculative_state_restore_plan * plan);
 
 // print statistics about the speculative decoding
 void common_speculative_print_stats(const common_speculative * spec, llama_seq_id seq_id = -1);

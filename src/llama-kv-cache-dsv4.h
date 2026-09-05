@@ -101,7 +101,11 @@ public:
                      uint32_t   n_pad,
                      uint32_t   n_rs_seq,
         const layer_filter_cb & filter,
-        const  layer_reuse_cb & reuse);
+        const  layer_reuse_cb & reuse,
+                     uint32_t   tail_tokens = 0,
+                    ggml_type   tail_type = GGML_TYPE_F16,
+                     uint32_t   tail_tokens_requested = UINT32_MAX,
+                     uint32_t   tail_rollback_tokens = 0);
 
     ~llama_kv_cache_dsv4() = default;
 
@@ -119,10 +123,13 @@ public:
     llama_memory_context_ptr init_update(llama_context * lctx, bool optimize) override;
 
     bool get_can_shift() const override;
+    seq_rm_capability get_seq_rm_capability() const override;
 
     void clear(bool data) override;
 
     bool seq_rm  (llama_seq_id seq_id,                              llama_pos p0, llama_pos p1) override;
+    bool seq_rm_cell(llama_seq_id seq_id, uint32_t cell_idx) override;
+    int cells_at_pos(llama_seq_id seq_id, llama_pos pos, uint32_t * cell_indices, int n_max) override;
     void seq_cp  (llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) override;
     void seq_keep(llama_seq_id seq_id)                                                          override;
     void seq_add (llama_seq_id seq_id,                              llama_pos p0, llama_pos p1, llama_pos shift) override;
@@ -132,6 +139,12 @@ public:
     llama_pos seq_pos_max(llama_seq_id seq_id) const override;
 
     std::map<ggml_backend_buffer_type_t, size_t> memory_breakdown() const override;
+    ggml_type get_kv_tail_type() const override;
+    uint32_t get_kv_tail_group_count() const override;
+    bool get_kv_tail_coverage(uint32_t group_index, llama_seq_id seq_id,
+            llama_kv_tail_coverage_info & out) const override;
+    void reset_kv_tail_planner_timing() override;
+    uint64_t get_kv_tail_planner_timing_ns() const override;
 
     void state_write(llama_io_write_i & io, llama_seq_id seq_id = -1, llama_state_seq_flags flags = 0) const override;
     void state_read (llama_io_read_i  & io, llama_seq_id seq_id = -1, llama_state_seq_flags flags = 0) override;
@@ -197,21 +210,35 @@ public:
 
     bool next() override;
     bool apply() override;
+    void graph_compute_start() override;
+    void graph_compute_finish(ggml_status status) override;
 
     llama_memory_status get_status() const override;
     const llama_ubatch & get_ubatch() const override;
 
     uint32_t get_n_kv() const;
     uint32_t get_n_write() const;
+    uint32_t get_tail_tokens() const;
+    uint32_t get_tail_arena_stride() const;
+    uint32_t get_tail_attention_stride(uint32_t n_query_tokens = 0) const;
 
     ggml_tensor * get_k(ggml_context * ctx, int32_t il) const;
+    ggml_tensor * get_k_tail(ggml_context * ctx, int32_t il) const;
+    ggml_tensor * get_k_tail_fallback(ggml_context * ctx, int32_t il, ggml_tensor * body_idxs) const;
     ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il) const;
+    ggml_tensor * cpy_k_tail(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * tail_idxs, int32_t il) const;
 
     ggml_tensor * build_input_k_idxs(ggml_context * ctx, const llama_ubatch & ubatch) const;
+    ggml_tensor * build_input_tail_idxs(ggml_context * ctx, const llama_ubatch & ubatch) const;
     ggml_tensor * build_input_k_rot(ggml_context * ctx) const;
 
     void set_input_k_idxs(ggml_tensor * dst) const;
     void set_input_kq_mask(ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn) const;
+    void set_input_tail_idxs(ggml_tensor * dst, const llama_ubatch * ubatch) const;
+    void set_input_kq_mask_tail(
+            ggml_tensor * body, ggml_tensor * exact,
+            ggml_tensor * read_idxs, ggml_tensor * body_read_idxs, ggml_tensor * bias_read_idxs,
+            const llama_ubatch * ubatch, bool causal_attn) const;
     void set_input_k_rot(ggml_tensor * dst) const;
 
 private:
@@ -228,6 +255,7 @@ private:
     const llama_memory_context_ptr ctx_swa_mem;
 
     uint32_t n_kv = 0;
+    bool graph_started = false;
 
     const llama_memory_status status;
 };
@@ -347,6 +375,8 @@ public:
 
     bool next()  override;
     bool apply() override;
+    void graph_compute_start() override;
+    void graph_compute_finish(ggml_status status) override;
 
     llama_memory_status  get_status() const override;
     const llama_ubatch & get_ubatch() const override;

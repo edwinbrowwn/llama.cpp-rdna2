@@ -1,4 +1,4 @@
-# llama.cpp/tools/cli
+# BeeLlama.cpp command-line interface
 
 ## Usage
 

@@ -374,13 +374,14 @@ int main(int argc, char ** argv) {
 
     common_prompt_checkpoint ckpt_dirty;
     ckpt_dirty.update_tgt(ctx_dirty, 0, 0);
-    if (ckpt_dirty.data_tgt != ckpt.data_tgt) {
-        const size_t n = std::min(ckpt_dirty.data_tgt.size(), ckpt.data_tgt.size());
-        size_t first = 0;
-        while (first < n && ckpt_dirty.data_tgt[first] == ckpt.data_tgt[first]) {
-            ++first;
-        }
-        fprintf(stderr, "%s : dirty state bytes mismatch at %zu (%zu != %zu bytes)\n", __func__, first,
+    const size_t n_state_bytes = std::min(ckpt_dirty.data_tgt.size(), ckpt.data_tgt.size());
+    size_t first_state_mismatch = 0;
+    while (first_state_mismatch < n_state_bytes &&
+            ckpt_dirty.data_tgt.data()[first_state_mismatch] == ckpt.data_tgt.data()[first_state_mismatch]) {
+        ++first_state_mismatch;
+    }
+    if (first_state_mismatch != n_state_bytes || ckpt_dirty.data_tgt.size() != ckpt.data_tgt.size()) {
+        fprintf(stderr, "%s : dirty state bytes mismatch at %zu (%zu != %zu bytes)\n", __func__, first_state_mismatch,
                 ckpt_dirty.data_tgt.size(), ckpt.data_tgt.size());
         return 1;
     }

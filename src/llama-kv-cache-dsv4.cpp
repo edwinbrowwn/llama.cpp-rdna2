@@ -25,8 +25,27 @@ static constexpr uint32_t DSV4_STATE_MODE_PARTIAL  = 1;
 static constexpr uint32_t DSV4_K_CACHE_STATE_VER   = 2;
 static constexpr uint32_t DSV4_COMP_STATE_VER      = 1;
 
+// DSV4 builds its raw iSWA cache from plain llama_kv_cache instances.  KVarN
+// iSWA children use the same composite interface, so keep this boundary
+// explicit instead of assuming every iSWA child has the old concrete type.
+static llama_kv_cache * dsv4_require_standard_cache(llama_memory_i * memory) {
+    auto * cache = dynamic_cast<llama_kv_cache *>(memory);
+    if (cache == nullptr) {
+        throw std::runtime_error("DSV4 requires a standard KV cache child");
+    }
+    return cache;
+}
+
 static uint32_t dsv4_comp_size(uint32_t kv_size, uint32_t ratio) {
     return std::max<uint32_t>(1, (kv_size + ratio - 1)/ratio);
+}
+
+static uint32_t dsv4_physical_ubatch(uint32_t n_ubatch, uint32_t n_seq_max) {
+    const uint64_t expanded = uint64_t(n_ubatch)*std::max<uint32_t>(1, n_seq_max);
+    if (expanded > uint64_t(std::numeric_limits<uint32_t>::max())) {
+        throw std::overflow_error("DSV4 coupled physical ubatch overflows uint32_t");
+    }
+    return uint32_t(expanded);
 }
 
 static void dsv4_clear_tensor_stream(ggml_tensor * tensor, uint32_t stream) {
@@ -1221,7 +1240,11 @@ llama_kv_cache_dsv4::llama_kv_cache_dsv4(
                  uint32_t   n_pad,
                  uint32_t   n_rs_seq,
     const layer_filter_cb & filter,
-    const  layer_reuse_cb & reuse) :
+    const  layer_reuse_cb & reuse,
+                 uint32_t   tail_tokens,
+                ggml_type   tail_type,
+                 uint32_t   tail_tokens_requested,
+                 uint32_t   tail_rollback_tokens) :
     hparams_raw(model.hparams),
     hparams_csa(model.hparams),
     hparams_hca(model.hparams),
@@ -1254,8 +1277,12 @@ llama_kv_cache_dsv4::llama_kv_cache_dsv4(
 
     kv_raw = std::make_unique<llama_kv_cache_iswa>(
             model, hparams_raw, type_k, type_v,
-            v_trans, offload, swa_full, unified_raw, kv_size, n_seq_max, n_ubatch, n_pad,
-            nullptr, filter_raw, reuse, nullptr);
+            // Coupled tokens can fan out to one raw row per sequence. Size both
+            // the raw SWA write window and exact-tail reserve for that bound.
+            v_trans, offload, swa_full, unified_raw, kv_size, n_seq_max,
+            dsv4_physical_ubatch(n_ubatch, n_seq_max), dsv4_physical_ubatch(n_ubatch, n_seq_max), n_pad,
+            nullptr, filter_raw, reuse, nullptr, llama_kvarn_default_params(),
+            0, tail_tokens, tail_type, 0, tail_tokens_requested, tail_rollback_tokens);
 
     dsv4_make_k_only(hparams_csa);
     dsv4_make_k_only(hparams_hca);
@@ -1341,19 +1368,21 @@ llama_memory_context_ptr llama_kv_cache_dsv4::init_batch(
             bool embd_all) {
     GGML_UNUSED(embd_all);
 
-    const bool raw_per_seq  = kv_raw->get_base()->get_n_stream() != 1;
+    auto * const kv_raw_base = dsv4_require_standard_cache(kv_raw->get_base());
+    auto * const kv_raw_swa  = dsv4_require_standard_cache(kv_raw->get_swa());
+    const bool raw_per_seq  = kv_raw_base->get_n_stream() != 1;
     const bool comp_per_seq = csa_state->get_n_stream() > 1;
     const bool has_coupled = dsv4_batch_has_coupled(balloc.get_batch());
 
     const auto make_context = [&](std::vector<llama_ubatch> ubatches) -> llama_memory_context_ptr {
         auto ubatches_raw = dsv4_build_raw_write_ubatches(ubatches);
 
-        auto sinfos_raw_base_write = kv_raw->get_base()->prepare(ubatches_raw);
+        auto sinfos_raw_base_write = kv_raw_base->prepare(ubatches_raw);
         if (sinfos_raw_base_write.empty()) {
             return nullptr;
         }
 
-        auto sinfos_raw_swa_write = kv_raw->get_swa()->prepare(ubatches_raw);
+        auto sinfos_raw_swa_write = kv_raw_swa->prepare(ubatches_raw);
         if (sinfos_raw_swa_write.empty()) {
             return nullptr;
         }
@@ -1451,6 +1480,12 @@ bool llama_kv_cache_dsv4::get_can_shift() const {
     return false;
 }
 
+llama_memory_i::seq_rm_capability llama_kv_cache_dsv4::get_seq_rm_capability() const {
+    return llama_memory_seq_rm_capability_all({
+        kv_raw.get(), kv_csa.get(), kv_hca.get(), kv_lid.get()
+    });
+}
+
 void llama_kv_cache_dsv4::clear(bool data) {
     kv_raw->clear(data);
     clear_compressed(-1, true); // DSV4 compressed buffers must never expose stale/uninit rows
@@ -1507,6 +1542,22 @@ bool llama_kv_cache_dsv4::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1
     }
 
     return res;
+}
+
+bool llama_kv_cache_dsv4::seq_rm_cell(llama_seq_id seq_id, uint32_t cell_idx) {
+    GGML_UNUSED(seq_id);
+    GGML_UNUSED(cell_idx);
+    // DSV4 compressed rows are derived from the complete running state and
+    // cannot be safely repaired after a single-cell removal.
+    return false;
+}
+
+int llama_kv_cache_dsv4::cells_at_pos(
+        llama_seq_id seq_id,
+        llama_pos pos,
+        uint32_t * cell_indices,
+        int n_max) {
+    return kv_raw->cells_at_pos(seq_id, pos, cell_indices, n_max);
 }
 
 void llama_kv_cache_dsv4::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) {
@@ -1589,6 +1640,27 @@ std::map<ggml_backend_buffer_type_t, size_t> llama_kv_cache_dsv4::memory_breakdo
         mb[buft_size.first] += buft_size.second;
     }
     return mb;
+}
+
+ggml_type llama_kv_cache_dsv4::get_kv_tail_type() const {
+    return kv_raw->get_kv_tail_type();
+}
+
+uint32_t llama_kv_cache_dsv4::get_kv_tail_group_count() const {
+    return kv_raw->get_kv_tail_group_count();
+}
+
+bool llama_kv_cache_dsv4::get_kv_tail_coverage(
+        uint32_t group_index, llama_seq_id seq_id, llama_kv_tail_coverage_info & out) const {
+    return kv_raw->get_kv_tail_coverage(group_index, seq_id, out);
+}
+
+void llama_kv_cache_dsv4::reset_kv_tail_planner_timing() {
+    kv_raw->reset_kv_tail_planner_timing();
+}
+
+uint64_t llama_kv_cache_dsv4::get_kv_tail_planner_timing_ns() const {
+    return kv_raw->get_kv_tail_planner_timing_ns();
 }
 
 void llama_kv_cache_dsv4::state_write(llama_io_write_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) const {
@@ -1780,7 +1852,7 @@ static llama_kv_cache::slot_info dsv4_build_full_sinfo(const llama_kv_cache * kv
 }
 
 llama_kv_cache_dsv4_raw_context::llama_kv_cache_dsv4_raw_context(llama_kv_cache_iswa * kv) :
-    kv_swa(kv->get_swa()),
+    kv_swa(dsv4_require_standard_cache(kv->get_swa())),
     ctx_base_mem(nullptr),
     ctx_swa_mem(nullptr),
     n_kv(kv_swa->get_size()),
@@ -1793,7 +1865,7 @@ llama_kv_cache_dsv4_raw_context::llama_kv_cache_dsv4_raw_context(
         llama_kv_cache_iswa * kv,
         llama_context * lctx,
         bool optimize) :
-    kv_swa(kv->get_swa()),
+    kv_swa(dsv4_require_standard_cache(kv->get_swa())),
     ctx_base_mem(kv->get_base()->init_update(lctx, optimize)),
     ctx_swa_mem(kv->get_swa()->init_update(lctx, optimize)),
     n_kv(kv_swa->get_size()),
@@ -1807,13 +1879,13 @@ llama_kv_cache_dsv4_raw_context::llama_kv_cache_dsv4_raw_context(
         slot_info_vec_t sinfos_swa_read,
         std::vector<llama_ubatch> ubatches,
         std::vector<llama_ubatch> ubatches_write) :
-    kv_swa(kv->get_swa()),
+    kv_swa(dsv4_require_standard_cache(kv->get_swa())),
     sinfos_write(std::move(sinfos_swa_write)),
     sinfos_read(std::move(sinfos_swa_read)),
     ubatches(std::move(ubatches)),
     ubatches_write(std::move(ubatches_write)),
     ctx_base_mem(std::make_unique<llama_kv_cache_context>(
-                kv->get_base(), std::move(sinfos_base_write), this->ubatches_write)),
+                dsv4_require_standard_cache(kv->get_base()), std::move(sinfos_base_write), this->ubatches_write)),
     ctx_swa_mem(nullptr),
     n_kv(kv_swa->get_size()),
     status(LLAMA_MEMORY_STATUS_SUCCESS) {
@@ -1852,6 +1924,30 @@ bool llama_kv_cache_dsv4_raw_context::apply() {
     return res;
 }
 
+void llama_kv_cache_dsv4_raw_context::graph_compute_start() {
+    graph_started = true;
+    if (ctx_base_mem) {
+        ctx_base_mem->graph_compute_start();
+    }
+    if (ctx_swa_mem) {
+        ctx_swa_mem->graph_compute_start();
+    }
+}
+
+void llama_kv_cache_dsv4_raw_context::graph_compute_finish(ggml_status compute_status) {
+    if (ctx_base_mem) {
+        ctx_base_mem->graph_compute_finish(compute_status);
+    }
+    if (ctx_swa_mem) {
+        ctx_swa_mem->graph_compute_finish(compute_status);
+    }
+    if (!ubatches_write.empty()) {
+        kv_swa->finish_tail_batch(compute_status == GGML_STATUS_SUCCESS,
+                graph_started && compute_status != GGML_STATUS_SUCCESS);
+    }
+    graph_started = false;
+}
+
 llama_memory_status llama_kv_cache_dsv4_raw_context::get_status() const {
     return status;
 }
@@ -1874,8 +1970,29 @@ uint32_t llama_kv_cache_dsv4_raw_context::get_n_write() const {
     return ubatches_write[i_next].n_tokens;
 }
 
+uint32_t llama_kv_cache_dsv4_raw_context::get_tail_tokens() const {
+    return kv_swa->get_tail_tokens();
+}
+
+uint32_t llama_kv_cache_dsv4_raw_context::get_tail_arena_stride() const {
+    return kv_swa->get_tail_arena_stride();
+}
+
+uint32_t llama_kv_cache_dsv4_raw_context::get_tail_attention_stride(uint32_t n_query_tokens) const {
+    return kv_swa->get_tail_attention_stride(n_query_tokens);
+}
+
 ggml_tensor * llama_kv_cache_dsv4_raw_context::get_k(ggml_context * ctx, int32_t il) const {
     return kv_swa->get_k(ctx, il, n_kv, sinfos_read[i_next]);
+}
+
+ggml_tensor * llama_kv_cache_dsv4_raw_context::get_k_tail(ggml_context * ctx, int32_t il) const {
+    return kv_swa->get_k_tail(ctx, il);
+}
+
+ggml_tensor * llama_kv_cache_dsv4_raw_context::get_k_tail_fallback(
+        ggml_context * ctx, int32_t il, ggml_tensor * body_idxs) const {
+    return kv_swa->get_k_tail_fallback(ctx, il, body_idxs);
 }
 
 ggml_tensor * llama_kv_cache_dsv4_raw_context::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il) const {
@@ -1907,6 +2024,29 @@ ggml_tensor * llama_kv_cache_dsv4_raw_context::cpy_k(ggml_context * ctx, ggml_te
     return res;
 }
 
+ggml_tensor * llama_kv_cache_dsv4_raw_context::cpy_k_tail(
+        ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * tail_idxs, int32_t il) const {
+    if (tail_idxs == nullptr || k_cur->ne[2] == tail_idxs->ne[0]) {
+        return kv_swa->cpy_k_tail(ctx, k_cur, tail_idxs, il);
+    }
+
+    GGML_ASSERT(tail_idxs->ne[0] % k_cur->ne[2] == 0);
+    const int64_t n_fanout = tail_idxs->ne[0] / k_cur->ne[2];
+    ggml_tensor * res = nullptr;
+    for (int64_t s = 0; s < n_fanout; ++s) {
+        ggml_tensor * tail_idxs_s = ggml_view_1d(
+                ctx, tail_idxs, k_cur->ne[2], s*k_cur->ne[2]*ggml_element_size(tail_idxs));
+        ggml_tensor * cur = kv_swa->cpy_k_tail(ctx, k_cur, tail_idxs_s, il);
+        if (res == nullptr) {
+            res = cur;
+        } else {
+            res = ggml_add(ctx, res, ggml_sub(ctx, cur, cur));
+        }
+    }
+
+    return res;
+}
+
 ggml_tensor * llama_kv_cache_dsv4_raw_context::build_input_k_idxs(ggml_context * ctx, const llama_ubatch & ubatch) const {
     const uint32_t n_tokens = ubatches_write.empty() ? ubatch.n_tokens : ubatches_write[i_next].n_tokens;
 
@@ -1914,6 +2054,11 @@ ggml_tensor * llama_kv_cache_dsv4_raw_context::build_input_k_idxs(ggml_context *
     ggml_set_input(k_idxs);
 
     return k_idxs;
+}
+
+ggml_tensor * llama_kv_cache_dsv4_raw_context::build_input_tail_idxs(
+        ggml_context * ctx, const llama_ubatch & ubatch) const {
+    return kv_swa->build_input_tail_idxs(ctx, ubatches_write.empty() ? ubatch : ubatches_write[i_next]);
 }
 
 ggml_tensor * llama_kv_cache_dsv4_raw_context::build_input_k_rot(ggml_context * ctx) const {
@@ -1924,8 +2069,21 @@ void llama_kv_cache_dsv4_raw_context::set_input_k_idxs(ggml_tensor * dst) const 
     kv_swa->set_input_k_idxs(dst, &ubatches_write[i_next], sinfos_write[i_next]);
 }
 
+void llama_kv_cache_dsv4_raw_context::set_input_tail_idxs(
+        ggml_tensor * dst, const llama_ubatch * ubatch) const {
+    kv_swa->set_input_tail_idxs(dst, ubatches_write.empty() ? ubatch : &ubatches_write[i_next]);
+}
+
 void llama_kv_cache_dsv4_raw_context::set_input_kq_mask(ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn) const {
     kv_swa->set_input_kq_mask(dst, ubatch, causal_attn);
+}
+
+void llama_kv_cache_dsv4_raw_context::set_input_kq_mask_tail(
+        ggml_tensor * body, ggml_tensor * exact,
+        ggml_tensor * read_idxs, ggml_tensor * body_read_idxs, ggml_tensor * bias_read_idxs,
+        const llama_ubatch * ubatch, bool causal_attn) const {
+    kv_swa->set_input_kq_mask_tail(
+            body, exact, read_idxs, body_read_idxs, bias_read_idxs, ubatch, causal_attn);
 }
 
 void llama_kv_cache_dsv4_raw_context::set_input_k_rot(ggml_tensor * dst) const {
@@ -2123,6 +2281,24 @@ bool llama_kv_cache_dsv4_context::apply() {
     }
 
     return res;
+}
+
+void llama_kv_cache_dsv4_context::graph_compute_start() {
+    ctx_raw->graph_compute_start();
+    if (ctx_csa_mem) {
+        ctx_csa_mem->graph_compute_start();
+        ctx_hca_mem->graph_compute_start();
+        ctx_lid_mem->graph_compute_start();
+    }
+}
+
+void llama_kv_cache_dsv4_context::graph_compute_finish(ggml_status compute_status) {
+    ctx_raw->graph_compute_finish(compute_status);
+    if (ctx_csa_mem) {
+        ctx_csa_mem->graph_compute_finish(compute_status);
+        ctx_hca_mem->graph_compute_finish(compute_status);
+        ctx_lid_mem->graph_compute_finish(compute_status);
+    }
 }
 
 llama_memory_status llama_kv_cache_dsv4_context::get_status() const {

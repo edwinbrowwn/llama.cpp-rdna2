@@ -11,7 +11,7 @@ from typing import Type
 __all__ = [
     "ModelBase", "TextModel", "MmprojModel", "ModelType", "SentencePieceTokenTypes",
     "get_model_architecture", "LazyTorchTensor", "logger",
-    "_mistral_common_installed", "_mistral_import_error_msg",
+    "_mistral_common_installed", "_mistral_import_error_msg", "supports_mmproj_model",
     "get_model_class", "print_registered_models", "load_all_models",
 ]
 
@@ -386,6 +386,10 @@ def get_model_class(name: str, mmproj: bool = False) -> Type[ModelBase]:
     __import__(f"conversion.{module_name}")
     model_type = ModelType.MMPROJ if mmproj else ModelType.TEXT
     return ModelBase._model_classes[model_type][name]
+
+
+def supports_mmproj_model(name: str) -> bool:
+    return name in MMPROJ_MODEL_MAP
 
 
 def print_registered_models() -> None:

@@ -31,6 +31,7 @@ struct common_arg {
     bool is_sampling = false; // is current arg a sampling param?
     bool is_spec = false; // is current arg a speculative decoding param?
     bool is_preset_only = false; // is current arg preset-only (not treated as CLI arg)
+    bool is_sensitive = false; // option value must never be serialized or rendered into argv
     void (*handler_void)   (common_params & params) = nullptr;
     void (*handler_string) (common_params & params, const std::string &) = nullptr;
     void (*handler_str_str)(common_params & params, const std::string &, const std::string &) = nullptr;
@@ -81,6 +82,7 @@ struct common_arg {
     common_arg & set_sampling();
     common_arg & set_spec();
     common_arg & set_preset_only();
+    common_arg & set_sensitive();
     bool in_example(enum llama_example ex);
     bool is_exclude(enum llama_example ex);
     bool get_value_from_env(std::string & output) const;
@@ -111,6 +113,10 @@ namespace common_arg_utils {
     bool is_falsey(const std::string & value);
     bool is_autoy(const std::string & value);
 }
+
+// Canonical cache-type registry shared by CLI validation and backend coverage
+// tests. Callers should filter this list by the operation contract they need.
+const std::vector<ggml_type> & common_kv_cache_types();
 
 struct common_params_context {
     enum llama_example ex = LLAMA_EXAMPLE_COMMON;

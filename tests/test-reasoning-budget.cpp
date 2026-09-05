@@ -9,6 +9,7 @@
 #endif
 
 #include <cmath>
+#include <climits>
 #include <cstddef>
 #include <cstdio>
 #include <string>
@@ -130,25 +131,21 @@ static void test_reasoning_budget(
 
 static llama_token get_forced_token(struct llama_sampler * sampler, llama_token max_token) {
     std::vector<llama_token_data> cur;
-    const size_t n_vocab = (size_t) max_token + 1;
-    for (size_t i = 0; i < n_vocab; i++) {
-        cur.emplace_back(llama_token_data{(llama_token) i, logf((float) (i + 1)), 0.0f});
+    for (llama_token i = 0; i <= max_token; ++i) {
+        cur.emplace_back(llama_token_data{i, logf((float) (i + 1)), 0.0f});
     }
-
     llama_token_data_array cur_p = { cur.data(), cur.size(), -1, false };
     llama_sampler_apply(sampler, &cur_p);
 
+    llama_token forced = LLAMA_TOKEN_NULL;
     size_t finite_count = 0;
-    llama_token finite_token = LLAMA_TOKEN_NULL;
-    for (size_t i = 0; i < cur.size(); i++) {
-        if (std::isfinite(cur[i].logit)) {
+    for (const auto & candidate : cur) {
+        if (std::isfinite(candidate.logit)) {
             finite_count++;
-            finite_token = cur[i].id;
+            forced = candidate.id;
         }
     }
-
-    GGML_ASSERT(finite_count == 1 && "sampler is not forcing exactly one token");
-    return finite_token;
+    return finite_count == 1 ? forced : LLAMA_TOKEN_NULL;
 }
 
 static void test_reasoning_budget_clone_mid_counting() {
@@ -358,6 +355,61 @@ static void test_utf8_boundary_detection() {
     GGML_ASSERT(common_utf8_is_complete(std::string("hello\xC3\xA9", 7)));    // ASCII + complete 2-byte
 }
 
+static void test_reasoning_budget_force_end_api() {
+    {
+        const std::vector<llama_token> start = {100};
+        const std::vector<llama_token> end = {101};
+        const std::vector<llama_token> forced = {102, 101};
+        auto * sampler = common_reasoning_budget_init(nullptr, {start}, {end}, forced, 64);
+
+        GGML_ASSERT(common_reasoning_budget_forced_token_count(sampler) == forced.size());
+        GGML_ASSERT(common_reasoning_budget_get_state(sampler) == REASONING_BUDGET_IDLE);
+        GGML_ASSERT(common_reasoning_budget_force_end(sampler));
+        GGML_ASSERT(common_reasoning_budget_get_state(sampler) == REASONING_BUDGET_FORCING);
+
+        GGML_ASSERT(get_forced_token(sampler, 102) == 102);
+        llama_sampler_accept(sampler, 102);
+        GGML_ASSERT(common_reasoning_budget_get_state(sampler) == REASONING_BUDGET_FORCING);
+
+        GGML_ASSERT(get_forced_token(sampler, 102) == 101);
+        llama_sampler_accept(sampler, 101);
+        GGML_ASSERT(common_reasoning_budget_get_state(sampler) == REASONING_BUDGET_DONE);
+
+        llama_sampler_free(sampler);
+    }
+
+    {
+        const std::vector<llama_token> start = {100};
+        const std::vector<llama_token> end = {101};
+        const std::vector<llama_token> forced = {102, 101};
+        auto * sampler = common_reasoning_budget_init(nullptr, {start}, {end}, forced, INT_MAX);
+
+        llama_sampler_accept(sampler, 100);
+        for (int i = 0; i < 4096; ++i) {
+            llama_sampler_accept(sampler, 50 + (i % 10));
+        }
+        GGML_ASSERT(common_reasoning_budget_get_state(sampler) == REASONING_BUDGET_COUNTING);
+        GGML_ASSERT(get_forced_token(sampler, 102) == LLAMA_TOKEN_NULL);
+        GGML_ASSERT(common_reasoning_budget_force_end(sampler));
+        GGML_ASSERT(get_forced_token(sampler, 102) == 102);
+
+        llama_sampler_free(sampler);
+    }
+
+    {
+        const std::vector<llama_token> start = {100};
+        const std::vector<llama_token> end = {101};
+        const std::vector<llama_token> forced = {};
+        auto * sampler = common_reasoning_budget_init(nullptr, {start}, {end}, forced, 64);
+
+        GGML_ASSERT(common_reasoning_budget_forced_token_count(sampler) == 0);
+        GGML_ASSERT(!common_reasoning_budget_force_end(sampler));
+        GGML_ASSERT(common_reasoning_budget_get_state(sampler) == REASONING_BUDGET_IDLE);
+
+        llama_sampler_free(sampler);
+    }
+}
+
 int main(void) {
     // Reasoning budget sampler tests
     printf("Testing reasoning budget sampler... ");
@@ -499,6 +551,10 @@ int main(void) {
 
     printf("Testing UTF-8 boundary detection... ");
     test_utf8_boundary_detection();
+    printf("OK\n");
+
+    printf("Testing reasoning budget force-end API... ");
+    test_reasoning_budget_force_end_api();
     printf("OK\n");
 
     return 0;

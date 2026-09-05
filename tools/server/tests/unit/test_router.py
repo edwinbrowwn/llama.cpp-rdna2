@@ -2,6 +2,8 @@ import threading
 import pytest
 from utils import *
 
+NO_PRELOAD_SERVER_PRESETS = True
+
 server: ServerProcess
 
 @pytest.fixture(autouse=True)
@@ -63,7 +65,7 @@ def test_router_chat_completion_stream(model: str, success: bool):
         assert content == ""
 
 
-def _get_model_ids(is_reload: bool, headers: dict | None = None) -> set[str]:
+def _get_model_ids(is_reload: bool = False, headers: dict | None = None) -> set[str]:
     res = server.make_request(
         "GET", "/models" + ("?reload=1" if is_reload else ""), headers=headers
     )
@@ -367,7 +369,7 @@ def test_router_api_key_required():
 
 
 def test_router_reload_models():
-    """POST /models/reload re-reads the INI preset and updates the model list."""
+    """GET is read-only and authenticated POST reloads the preset exactly once."""
     global server
 
     preset_path = os.path.join(TMP_DIR, "test_reload.ini")
@@ -383,9 +385,12 @@ def test_router_reload_models():
         )
 
     server.models_preset = preset_path
+    server.api_key = "sk-router-reload-secret"
     server.start()
 
-    ids = _get_model_ids(is_reload=False)
+    auth_headers = {"Authorization": f"Bearer {server.api_key}"}
+
+    ids = _get_model_ids()
     assert "model-reload-a" in ids
     assert "model-reload-b" in ids
 
@@ -400,12 +405,73 @@ def test_router_reload_models():
         )
 
     try:
-        ids = _get_model_ids(is_reload=True)
+        get_res = server.make_request("GET", "/models?reload=1")
+        assert get_res.status_code == 200
+        ids = {item["id"] for item in get_res.body.get("data", [])}
+        assert "model-reload-a" in ids, "GET must not mutate the model registry"
+        assert "model-reload-c" not in ids, "GET must not reload the preset"
+
+        unauth = server.make_request("POST", "/models/reload", data={})
+        assert unauth.status_code == 401
+        wrong = server.make_request(
+            "POST", "/models/reload", data={}, headers={"Authorization": "Bearer wrong"}
+        )
+        assert wrong.status_code == 401
+
+        reload_res = server.make_request("POST", "/models/reload", data={}, headers=auth_headers)
+        assert reload_res.status_code == 200
+        assert reload_res.body.get("success") is True
+
+        ids = _get_model_ids()
         assert "model-reload-a" not in ids, "removed model should no longer appear"
         assert "model-reload-b" in ids, "unchanged model should still appear"
         assert "model-reload-c" in ids, "newly added model should appear"
     finally:
         os.remove(preset_path)
+
+
+def test_router_models_status_args_preset():
+    """GET /models exposes status.args and status.preset per model (upstream parity).
+
+    Clients such as pi-llama-cpp parse status.args to learn e.g. --ctx-size of
+    unloaded router models; dropping these fields breaks them (issue #117).
+    """
+    global server
+
+    preset_path = os.path.join(TMP_DIR, "test_args_preset.ini")
+    with open(preset_path, "w") as f:
+        f.write(
+            "[model-args-a]\n"
+            "hf-repo = ggml-org/test-model-stories260K\n"
+            # note: the fork overlays router CLI args on top of every preset, so
+            # use an option the test fixture does not pass on the command line
+            "top-k = 17\n"
+        )
+
+    server.models_preset = preset_path
+    server.start()
+
+    try:
+        res = server.make_request("GET", "/models")
+        assert res.status_code == 200
+        data = {item["id"]: item for item in res.body.get("data", [])}
+        assert "model-args-a" in data
+
+        status = data["model-args-a"].get("status", {})
+
+        args = status.get("args")
+        assert isinstance(args, list) and args, "status.args must be exposed (upstream parity)"
+        assert "ggml-org/test-model-stories260K" in args
+        assert "--top-k" in args
+        assert args[args.index("--top-k") + 1] == "17"
+
+        preset_ini = status.get("preset")
+        assert preset_ini is not None, "status.preset must be exposed (upstream parity)"
+        assert "[model-args-a]" in preset_ini
+        assert "top-k = 17" in preset_ini
+    finally:
+        os.remove(preset_path)
+
 
 
 def test_router_dedup_cache_models():
@@ -459,8 +525,6 @@ def test_router_dedup_cache_models():
         assert cache_id not in ids, "cache model should be hidden by global dedup"
     finally:
         os.remove(preset_path)
-
-
 def test_router_remote_preset():
     global server
     server.model_hf_repo = "ggml-org/test-preset-ci"
@@ -558,7 +622,7 @@ def test_router_download_model():
     ), "No download_progress events received"
 
     # Model should now appear in GET /models
-    ids = _get_model_ids(is_reload=False)
+    ids = _get_model_ids()
     assert MODEL_DOWNLOAD_ID in ids, f"{MODEL_DOWNLOAD_ID} not found in /models after download"
 
 
@@ -568,7 +632,7 @@ def test_router_delete_model():
     server.start()
 
     # Ensure the model exists (download it if needed)
-    if MODEL_DOWNLOAD_ID not in _get_model_ids(is_reload=False):
+    if MODEL_DOWNLOAD_ID not in _get_model_ids():
         sse_events: list = []
         stop = threading.Event()
         sse_ready = threading.Event()
@@ -592,5 +656,5 @@ def test_router_delete_model():
     assert del_res.body.get("success") is True
 
     # Model should no longer appear in GET /models
-    ids = _get_model_ids(is_reload=False)
+    ids = _get_model_ids()
     assert MODEL_DOWNLOAD_ID not in ids, f"{MODEL_DOWNLOAD_ID} still present after deletion"

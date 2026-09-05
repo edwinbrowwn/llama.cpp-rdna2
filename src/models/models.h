@@ -1129,6 +1129,7 @@ struct llama_model_deepseek2 : public llama_model_base {
     llama_model_deepseek2(const struct llama_model_params & params) : llama_model_base(params) {}
     void load_arch_hparams(llama_model_loader & ml) override;
     void load_arch_tensors(llama_model_loader & ml) override;
+    bool graph_consumes_exact_kv_tail() const override;
 
     struct graph : public llm_graph_context {
         graph(const llama_model & model, const llm_graph_params & params);
@@ -1175,6 +1176,7 @@ struct llama_model_deepseek4 : public llama_model_base {
     llama_model_deepseek4(const struct llama_model_params & params) : llama_model_base(params) {}
     void load_arch_hparams(llama_model_loader & ml) override;
     void load_arch_tensors(llama_model_loader & ml) override;
+    bool graph_consumes_exact_kv_tail() const override;
 
     struct graph : public llm_graph_context {
         graph(const llm_graph_params & params) : llm_graph_context(params) {}
@@ -1270,6 +1272,10 @@ struct llama_model_deepseek4 : public llama_model_base {
                 ggml_tensor * inp_pos,
                 ggml_tensor * sinks,
                 float kq_scale,
+                int il) const;
+
+        ggml_tensor * build_raw_tail(
+                llm_graph_input_dsv4_raw * inp_attn,
                 int il) const;
 
         ggml_tensor * build_hca_attention(

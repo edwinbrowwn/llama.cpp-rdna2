@@ -39,7 +39,17 @@ public:
                      bool   unified,
                             /* layer filters */
     const layer_filter_cb & filter_attn = nullptr,
-    const layer_filter_cb & filter_recr = nullptr);
+    const layer_filter_cb & filter_recr = nullptr,
+                 uint32_t   n_ubatch = 0,
+                 uint32_t   tail_tokens = 0,
+                ggml_type   tail_type = GGML_TYPE_F16,
+                 uint32_t   tail_tokens_requested = UINT32_MAX,
+                 uint32_t   tail_rollback_tokens = 0);
+
+    llama_memory_hybrid(
+        const llama_model & model,
+        std::unique_ptr<llama_memory_i> mem_attn,
+        std::unique_ptr<llama_memory_recurrent> mem_recr);
 
     ~llama_memory_hybrid() = default;
 
@@ -57,10 +67,19 @@ public:
     llama_memory_context_ptr init_update(llama_context * lctx, bool optimize) override;
 
     bool get_can_shift() const override;
+    seq_rm_capability get_seq_rm_capability() const override;
 
     void clear(bool data) override;
 
+    bool can_seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) const override;
+    bool seq_rm_plan(
+            llama_seq_id seq_id, llama_pos p0, llama_pos p1,
+            llama_pos & planned_p0, llama_pos & planned_p1) const override;
     bool seq_rm  (llama_seq_id seq_id,                              llama_pos p0, llama_pos p1) override;
+    bool seq_rm_cell(llama_seq_id seq_id, uint32_t cell_idx) override;
+
+    int cells_at_pos(llama_seq_id seq_id, llama_pos pos, uint32_t * cell_indices, int n_max) override;
+
     void seq_cp  (llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) override;
     void seq_keep(llama_seq_id seq_id)                                                          override;
     void seq_add (llama_seq_id seq_id,                              llama_pos p0, llama_pos p1, llama_pos shift) override;
@@ -70,9 +89,21 @@ public:
     llama_pos seq_pos_max(llama_seq_id seq_id) const override;
 
     std::map<ggml_backend_buffer_type_t, size_t> memory_breakdown() const override;
+    llama_kv_memory_stats kv_memory_stats() const override;
+    ggml_type get_kv_tail_type() const override;
+    uint32_t get_kv_tail_group_count() const override;
+    bool get_kv_tail_coverage(uint32_t group_index, llama_seq_id seq_id,
+            llama_kv_tail_coverage_info & out) const override;
+    void reset_kv_tail_planner_timing() override;
+    uint64_t get_kv_tail_planner_timing_ns() const override;
 
     // state write/load
 
+    bool requires_state_for_partial_restore() const override;
+    bool state_seq_can_save(llama_seq_id seq_id) const override;
+    bool state_seq_can_restore(llama_seq_id seq_id) const override;
+    bool state_seq_can_save(llama_seq_id seq_id, llama_state_seq_flags flags) const override;
+    bool state_seq_can_restore(llama_seq_id seq_id, llama_state_seq_flags flags) const override;
     void state_write(llama_io_write_i & io, llama_seq_id seq_id = -1, llama_state_seq_flags flags = 0) const override;
     void state_read (llama_io_read_i  & io, llama_seq_id seq_id = -1, llama_state_seq_flags flags = 0)       override;
 
@@ -80,14 +111,15 @@ public:
     // llama_memory_hybrid specific API
     //
 
-    llama_kv_cache * get_mem_attn() const;
+    llama_memory_i * get_mem_attn() const;
     llama_memory_recurrent * get_mem_recr() const;
 
 private:
     const llama_hparams & hparams;
 
-    const std::unique_ptr<llama_kv_cache> mem_attn;
+    const std::unique_ptr<llama_memory_i> mem_attn;
     const std::unique_ptr<llama_memory_recurrent> mem_recr;
+
 };
 
 class llama_memory_hybrid_context : public llama_memory_context_i {
@@ -109,13 +141,15 @@ public:
     // init success
     llama_memory_hybrid_context(
               llama_memory_hybrid * mem,
-                  slot_info_vec_t   sinfos_attn,
+        llama_memory_context_ptr   ctx_attn_in,
         std::vector<llama_ubatch>   ubatches);
 
     ~llama_memory_hybrid_context() = default;
 
     bool next()  override;
     bool apply() override;
+    void graph_compute_start() override;
+    void graph_compute_finish(ggml_status status) override;
 
     llama_memory_status  get_status() const override;
     const llama_ubatch & get_ubatch() const override;
