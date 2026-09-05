@@ -3737,6 +3737,11 @@ struct common_speculative_impl_ngram_cache : public common_speculative_impl {
 struct common_speculative {
     common_speculative_draft_params_vec dparams;
 
+    // Per-request sequence gate. Explicit speculative.n_max=0 must suppress
+    // provider process hooks as well as draft generation, otherwise a loaded
+    // sidecar can perform a full prompt catch-up for a target-only request.
+    std::vector<uint8_t> seq_enabled;
+
     // list of implementations to use and their states
     std::vector<std::unique_ptr<common_speculative_impl>> impls;
 
@@ -4593,6 +4598,7 @@ common_speculative * common_speculative_init(common_params_speculative & params,
 
     common_speculative_ptr result(new common_speculative {
         /* .dparams     = */ common_speculative_draft_params_vec(n_seq),
+        /* .seq_enabled = */ std::vector<uint8_t>(n_seq, 1),
         /* .impls       = */ std::move(impls),
         /* .impl_last   = */ std::vector<common_speculative_impl *>(n_seq, nullptr),
         /* .synth_probs = */ {},
@@ -4639,13 +4645,40 @@ common_speculative_draft_params & common_speculative_get_draft_params(
         common_speculative * spec,
         llama_seq_id seq_id) {
     GGML_ASSERT(spec);
-    GGML_ASSERT(seq_id < (llama_seq_id) spec->dparams.size());
+    GGML_ASSERT(seq_id >= 0 && seq_id < (llama_seq_id) spec->dparams.size());
 
     return spec->dparams[seq_id];
 }
 
+void common_speculative_set_seq_enabled(
+        common_speculative * spec, llama_seq_id seq_id, bool enabled) {
+    if (spec == nullptr) {
+        return;
+    }
+    GGML_ASSERT(seq_id >= 0 && seq_id < (llama_seq_id) spec->seq_enabled.size());
+    const bool was_enabled = spec->seq_enabled[(size_t) seq_id] != 0;
+    if (was_enabled == enabled) {
+        return;
+    }
+
+    spec->seq_enabled[(size_t) seq_id] = enabled ? 1 : 0;
+    spec->dparams[(size_t) seq_id].drafting = false;
+    spec->impl_last[(size_t) seq_id] = nullptr;
+    for (auto & impl : spec->impls) {
+        // Stateful providers disable themselves on reset failure. Preserve that
+        // fail-closed path instead of turning a recoverable provider error into
+        // a process-wide assertion.
+        (void) impl->reset_state(seq_id);
+    }
+    spec->content.reset((uint32_t) seq_id);
+}
+
 void common_speculative_begin(common_speculative * spec, llama_seq_id seq_id, const llama_tokens & prompt) {
     if (spec == nullptr) {
+        return;
+    }
+    GGML_ASSERT(seq_id >= 0 && seq_id < (llama_seq_id) spec->seq_enabled.size());
+    if (!spec->seq_enabled[(size_t) seq_id]) {
         return;
     }
 
@@ -4665,6 +4698,26 @@ bool common_speculative_process(common_speculative * spec, const llama_batch & b
     bool result = true;
 
     if (spec == nullptr) {
+        return result;
+    }
+
+    bool any_enabled = false;
+    if (batch.seq_id != nullptr && batch.n_seq_id != nullptr) {
+        for (int32_t i = 0; i < batch.n_tokens && !any_enabled; ++i) {
+            for (int32_t j = 0; j < batch.n_seq_id[i]; ++j) {
+                const llama_seq_id seq_id = batch.seq_id[i][j];
+                if (seq_id >= 0 && seq_id < (llama_seq_id) spec->seq_enabled.size() &&
+                        spec->seq_enabled[(size_t) seq_id]) {
+                    any_enabled = true;
+                    break;
+                }
+            }
+        }
+    } else {
+        any_enabled = std::any_of(spec->seq_enabled.begin(), spec->seq_enabled.end(),
+                [](uint8_t enabled) { return enabled != 0; });
+    }
+    if (!any_enabled) {
         return result;
     }
 
@@ -5222,6 +5275,10 @@ bool common_speculative_prepare_prompt_state(
     if (spec == nullptr) {
         return true;
     }
+    GGML_ASSERT(seq_id >= 0 && seq_id < (llama_seq_id) spec->seq_enabled.size());
+    if (!spec->seq_enabled[(size_t) seq_id]) {
+        return true;
+    }
     bool result = true;
     for (auto & impl : spec->impls) {
         result = impl->prepare_prompt_state(seq_id, pos_next, can_reuse_resident) && result;
@@ -5231,6 +5288,10 @@ bool common_speculative_prepare_prompt_state(
 
 bool common_speculative_truncate_state(common_speculative * spec, llama_seq_id seq_id, llama_pos pos_max) {
     if (spec == nullptr) {
+        return true;
+    }
+    GGML_ASSERT(seq_id >= 0 && seq_id < (llama_seq_id) spec->seq_enabled.size());
+    if (!spec->seq_enabled[(size_t) seq_id]) {
         return true;
     }
     bool result = true;
@@ -5244,6 +5305,10 @@ bool common_speculative_commit_state(common_speculative * spec, llama_seq_id seq
     if (spec == nullptr) {
         return true;
     }
+    GGML_ASSERT(seq_id >= 0 && seq_id < (llama_seq_id) spec->seq_enabled.size());
+    if (!spec->seq_enabled[(size_t) seq_id]) {
+        return true;
+    }
     bool result = true;
     for (auto & impl : spec->impls) {
         result = impl->commit_state(seq_id, pos_max) && result;
@@ -5254,6 +5319,10 @@ bool common_speculative_commit_state(common_speculative * spec, llama_seq_id seq
 bool common_speculative_rebase_state(common_speculative * spec, llama_seq_id seq_id,
         llama_pos pos_min, llama_pos pos_max, llama_pos delta) {
     if (spec == nullptr) {
+        return true;
+    }
+    GGML_ASSERT(seq_id >= 0 && seq_id < (llama_seq_id) spec->seq_enabled.size());
+    if (!spec->seq_enabled[(size_t) seq_id]) {
         return true;
     }
     bool result = true;

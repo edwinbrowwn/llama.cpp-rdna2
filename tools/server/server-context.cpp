@@ -723,6 +723,8 @@ struct server_slot {
 
         return task->type == other_slot.task->type
             && inp_embd.size() == other_slot.inp_embd.size()
+            && (task->params.speculative_n_max == 0) ==
+               (other_slot.task->params.speculative_n_max == 0)
             && are_lora_equal(lora, other_slot.lora);
     }
 
@@ -2402,6 +2404,11 @@ private:
         slot.n_predict_max = task.params.n_predict != -1 ? task.params.n_predict : params_base.n_predict;
 
         slot.task = std::make_unique<const server_task>(std::move(task));
+
+        if (spec) {
+            common_speculative_set_seq_enabled(
+                    spec.get(), slot.id, slot.task->params.speculative_n_max != 0);
+        }
 
         slot.state = slot.task->is_child()
             ? SLOT_STATE_WAIT_OTHER // wait for the parent to process prompt

@@ -111,6 +111,11 @@ struct common_speculative_draft_params {
 
 common_speculative_draft_params & common_speculative_get_draft_params(common_speculative * spec, llama_seq_id seq_id);
 
+// Disable all speculative provider processing for one sequence. This is used
+// by an explicit request-level speculative.n_max=0 so provider prompt catch-up
+// cannot run behind a request that selected target-only generation.
+void common_speculative_set_seq_enabled(common_speculative * spec, llama_seq_id seq_id, bool enabled);
+
 // optionally call once at the beginning of a new generation
 void common_speculative_begin(common_speculative * spec, llama_seq_id seq_id, const llama_tokens & prompt);
 
