@@ -168,7 +168,8 @@ correctness, memory behavior, or performance on that GPU.
 |---|---:|---|
 | RDNA3, RDNA3.5, RDNA4 | 32 | WMMA generic/prefill and occupancy-selected split decode |
 | CDNA1-CDNA4 | 64 | MFMA generic/prefill and physical-wave split decode |
-| Older GCN, RDNA1, RDNA2 | device default | Portable direct-record attention |
+| gfx1030-class RDNA2 | 32 | D256 vector decode for 1–16 query rows; portable direct-record fallback for prompt-sized or unsupported shapes |
+| Older GCN, RDNA1, other RDNA2 | device default | Portable direct-record attention |
 
 CDNA fast routing is compiled and selected by capability but remains
 experimental until hardware parity and performance results are published.

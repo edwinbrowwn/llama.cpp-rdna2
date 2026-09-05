@@ -97,9 +97,12 @@ int main(int argc, char ** argv) {
         GGML_CUDA_FATTN_KVARN_ROUTE_DECODE_VECTOR,
         "Gemma-like D256 SWA decode did not select vector decode");
     for (int n_q = 2; n_q <= GGML_CUDA_FATTN_KVARN_SPECIALIZED_DECODE_MAX_Q; ++n_q) {
+        expect_route({256, n_q, 6, 4, 4, false, false, true, false, false},
+            GGML_CUDA_FATTN_KVARN_ROUTE_DECODE_VECTOR,
+            "eligible D256 multi-token verification did not select vector decode");
         expect_route({256, n_q, 6, 4, 4, false, false, false, true, false},
             GGML_CUDA_FATTN_KVARN_ROUTE_GENERIC_MMA,
-            "supported multi-token verification shape did not select tiled native MMA");
+            "multi-token verification without vector support did not select tiled native MMA");
     }
     expect_route({384, 1, 6, 4, 4, false, false, false, false, false},
         GGML_CUDA_FATTN_KVARN_ROUTE_GENERIC_MMA,

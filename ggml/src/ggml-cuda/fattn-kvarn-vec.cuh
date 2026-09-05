@@ -109,6 +109,7 @@ static __global__ void ggml_cuda_fattn_kvarn_vec_kernel(
         float2 * partial_meta,
         float scale,
         float logit_softcap,
+        int64_t nb01,
         int64_t nb02,
         int64_t nb03,
         int64_t nb30,
@@ -116,6 +117,7 @@ static __global__ void ggml_cuda_fattn_kvarn_vec_kernel(
         int64_t nb33,
         int ne33,
         int n_kv,
+        int n_q,
         int n_q_heads,
         int n_kv_heads,
         int gqa_ratio,
@@ -140,8 +142,9 @@ static __global__ void ggml_cuda_fattn_kvarn_vec_kernel(
         "KVarN vec needs each dim group to be a warp-aligned slab");
 
     const int split = blockIdx.x;
-    const int gqa_block = blockIdx.y % n_gqa_blocks;
-    const int kv_head = blockIdx.y / n_gqa_blocks;
+    const int q_index = blockIdx.y % n_q;
+    const int gqa_block = (blockIdx.y / n_q) % n_gqa_blocks;
+    const int kv_head = blockIdx.y / (n_q * n_gqa_blocks);
     const int stream = blockIdx.z;
     const int lane = threadIdx.x;
     const int slice = threadIdx.y;
@@ -171,7 +174,8 @@ static __global__ void ggml_cuda_fattn_kvarn_vec_kernel(
         const int dim = i % D;
         float value = 0.0f;
         if (h < gqa_head_count && q_head0 + h < n_q_heads) {
-            const float * q = (const float *) (Q + nb03 * stream + nb02 * (q_head0 + h));
+            const float * q = (const float *) (
+                Q + nb03 * stream + nb02 * (q_head0 + h) + nb01 * q_index);
             value = q[dim] * scale;
         }
         q_sh[h][dim] = __float2half(value);
@@ -237,7 +241,7 @@ static __global__ void ggml_cuda_fattn_kvarn_vec_kernel(
                 }
                 if (mask_h != nullptr) {
                     score += __half2float(*(const half *) (
-                        (const char *) mask_h + nb30 * token + nb31 * 0));
+                        (const char *) mask_h + nb30 * token + nb31 * q_index));
                 }
             }
 
@@ -290,7 +294,7 @@ static __global__ void ggml_cuda_fattn_kvarn_vec_kernel(
             const int q_head = q_head0 + h;
             if (h < gqa_head_count && q_head < n_q_heads) {
                 const size_t base =
-                    ((size_t) stream * n_q_heads + q_head) * n_splits + split;
+                    (((size_t) stream * n_q + q_index) * n_q_heads + q_head) * n_splits + split;
                 partial[base * D + global_dim] = out[h];
             }
         }
@@ -298,7 +302,7 @@ static __global__ void ggml_cuda_fattn_kvarn_vec_kernel(
 
     if (warp_id == 0 && lane < gqa_head_count && q_head0 + lane < n_q_heads) {
         const int q_head = q_head0 + lane;
-        const size_t base = ((size_t) stream * n_q_heads + q_head) * n_splits + split;
+        const size_t base = (((size_t) stream * n_q + q_index) * n_q_heads + q_head) * n_splits + split;
         partial_meta[base] = make_float2(max_score[lane], denominator[lane]);
     }
 }
@@ -311,13 +315,13 @@ static void ggml_cuda_fattn_kvarn_vec_launch_tps(
     constexpr int dim_groups = 4 / slices; // 128 threads / 4 warps, matching std fattn-vec
     const dim3 blocks_split(
         (uint32_t) args.n_splits,
-        (uint32_t) (args.n_kv_heads * args.n_gqa_blocks),
+        (uint32_t) (args.n_kv_heads * args.n_gqa_blocks * args.n_q),
         (uint32_t) args.n_stream);
     ggml_cuda_fattn_kvarn_vec_kernel<D, TOKENS_PER_SPLIT, max_gqa, K_BITS, V_BITS>
         <<<blocks_split, dim3(WARP_SIZE, slices, dim_groups), 0, args.stream>>>(
             args.Q, args.k_descs, args.v_descs, args.mask, args.partial, args.partial_meta,
-            args.scale, args.logit_softcap, args.nb02, args.nb03,
-            args.nb30, args.nb31, args.nb33, args.ne33, args.n_kv,
+            args.scale, args.logit_softcap, args.nb01, args.nb02, args.nb03,
+            args.nb30, args.nb31, args.nb33, args.ne33, args.n_kv, args.n_q,
             args.n_q_heads, args.n_kv_heads, args.gqa_ratio, args.n_gqa_blocks,
             args.n_splits);
     CUDA_CHECK(cudaGetLastError());
@@ -340,7 +344,7 @@ void ggml_cuda_fattn_kvarn_vec_launch(const ggml_cuda_fattn_kvarn_decode_args & 
     }
 
     const dim3 blocks_combine(
-        (uint32_t) args.n_q_heads, 1, (uint32_t) args.n_stream);
+        (uint32_t) args.n_q_heads, (uint32_t) args.n_q, (uint32_t) args.n_stream);
     const int nbytes_shared_combine = args.n_splits * (int) sizeof(float);
     // Same combine kernel as the MMA decode path: raise the dynamic-shared-mem
     // limit to the device opt-in max so larger n_splits launches succeed.
@@ -349,6 +353,6 @@ void ggml_cuda_fattn_kvarn_vec_launch(const ggml_cuda_fattn_kvarn_decode_args & 
         <<<blocks_combine, GGML_CUDA_FATTN_KVARN_DECODE_THREADS,
             nbytes_shared_combine, args.stream>>>(
             args.partial, args.partial_meta, args.dst, args.dst_meta,
-            args.n_splits, 1, args.n_q_heads);
+            args.n_splits, args.n_q, args.n_q_heads);
     CUDA_CHECK(cudaGetLastError());
 }

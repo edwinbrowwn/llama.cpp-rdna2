@@ -3331,7 +3331,7 @@ static void test_native_flash_attention_gpu() {
             require(stats.materialize_fallback == 0,
                     "AMD route-boundary case materialized the KVarN body");
             if (hip_vector_only) {
-                const bool expect_vector = head_dim == 256 && n_q == 1 && gqa >= 2;
+                const bool expect_vector = head_dim == 256 && n_q >= 1 && n_q <= 16 && gqa >= 2;
                 if (expect_vector) {
                     require(stats.decode_vector > 0 && stats.amd_decode_vector > 0 &&
                                     stats.decode_split == 0 && stats.generic_mma == 0,
@@ -3475,7 +3475,7 @@ static void test_native_flash_attention_gpu() {
             require(generic_stats.portable_native > 0 && generic_stats.generic_mma == 0 &&
                             generic_stats.decode_split == 0 && generic_stats.decode_vector == 0,
                     "neutral-sink metadata reference did not use the portable KVarN route");
-            if (head_dim == 256 && n_q == 1) {
+            if (head_dim == 256 && n_q >= 1 && n_q <= 16) {
                 require(stats.decode_vector > 0 && stats.decode_split == 0 && stats.generic_mma == 0,
                         "vector-only KVarN device did not use D256 vector decode");
             } else {
@@ -3544,7 +3544,7 @@ static void test_native_flash_attention_gpu() {
             require(generic_stats.portable_native > 0 && generic_stats.generic_mma == 0 &&
                             generic_stats.decode_split == 0 && generic_stats.decode_vector == 0,
                     "exact-tail reference did not use the portable KVarN route");
-            if (head_dim == 256 && n_q == 1) {
+            if (head_dim == 256 && n_q >= 1 && n_q <= 16) {
                 require(stats.decode_vector > 0 && stats.decode_split == 0 && stats.generic_mma == 0,
                         "vector-only KVarN device did not use D256 vector decode with an exact tail");
             } else {

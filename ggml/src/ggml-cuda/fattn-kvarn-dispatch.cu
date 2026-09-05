@@ -576,7 +576,8 @@ static bool ggml_cuda_flash_attn_ext_kvarn_vec_supported(
 
     const int head_dim = (int) Q->ne[0];
     if (head_dim != 256 || K->ne[0] != head_dim || V->ne[0] != head_dim ||
-            Q->ne[1] != 1 || Q->ne[3] != plan.n_stream || plan.n_stream <= 0) {
+            Q->ne[1] <= 0 || Q->ne[1] > GGML_CUDA_FATTN_KVARN_SPECIALIZED_DECODE_MAX_Q ||
+            Q->ne[3] != plan.n_stream || plan.n_stream <= 0) {
         return false;
     }
     if (!ggml_cuda_fattn_kvarn_rotated_decode_domain(dst)) {
@@ -614,6 +615,7 @@ static bool ggml_cuda_flash_attn_ext_kvarn_vec_d(
         const ggml_cuda_fattn_kvarn_plan & plan) {
     const ggml_tensor * Q = dst->src[0];
     const ggml_tensor * mask = dst->src[3];
+    const int n_q = (int) Q->ne[1];
     const int n_q_heads = (int) Q->ne[2];
     const int gqa_ratio = n_q_heads / plan.n_kv_heads;
     constexpr int gqa_per_block = ggml_cuda_fattn_kvarn_vec_max_gqa<D>();
@@ -637,8 +639,8 @@ static bool ggml_cuda_flash_attn_ext_kvarn_vec_d(
     ggml_cuda_pool_alloc<ggml_cuda_fattn_kvarn_desc> v_desc(pool, n_desc);
     ggml_cuda_fattn_kvarn_init_descs(plan, k_desc.get(), v_desc.get(), 0, 0, stream);
 
-    const size_t partial_count = (size_t) plan.n_stream * n_q_heads * n_splits * D;
-    const size_t meta_count = (size_t) plan.n_stream * n_q_heads * n_splits;
+    const size_t partial_count = (size_t) plan.n_stream * n_q * n_q_heads * n_splits * D;
+    const size_t meta_count = (size_t) plan.n_stream * n_q * n_q_heads * n_splits;
     ggml_cuda_pool_alloc<float> partial(pool, partial_count);
     ggml_cuda_pool_alloc<float2> partial_meta(pool, meta_count);
     ggml_cuda_kv_memory_transient_stats_record_kvarn(
@@ -678,7 +680,7 @@ static bool ggml_cuda_flash_attn_ext_kvarn_vec_d(
     args.nb33 = mask ? mask->nb[3] : 0;
     args.ne33 = mask ? (int) mask->ne[3] : 1;
     args.n_kv = plan.n_kv;
-    args.n_q = 1;
+    args.n_q = n_q;
     args.n_q_heads = n_q_heads;
     args.n_kv_heads = plan.n_kv_heads;
     args.n_stream = plan.n_stream;
