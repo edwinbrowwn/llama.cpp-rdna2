@@ -497,6 +497,85 @@ DF_API int spec_dflash_commit_state(int32_t seq_id, int32_t pos_max) {
     return 0;
 }
 
+static int spec_dflash_kv_snap_range(DSeqState * q, int32_t * lo, int32_t * hi) {
+    if (q->pending_pos_max != q->state_pos_max) return -1;
+    int32_t lo_v = q->state_pos_min;
+    int32_t hi_v = q->state_pos_max;
+    if (hi_v < lo_v) return -1;
+    // Only the decoder attention window is portable; older rows may be absent.
+    if (hi_v - lo_v > DF_WINDOW) lo_v = hi_v - DF_WINDOW;
+    *lo = lo_v;
+    *hi = hi_v;
+    return 0;
+}
+
+DF_API int spec_dflash_kv_state_size(int32_t seq_id) {
+    DSeqState * q = get_seq(seq_id);
+    if (!S.ok || q == nullptr) return -1;
+    int32_t lo, hi;
+    if (spec_dflash_kv_snap_range(q, &lo, &hi) != 0) return -1;
+    const size_t bytes = sizeof(spec_sidecar_state) +
+            (size_t) (hi - lo) * DF_LAYERS * 2 * DF_KV * DF_HDIM * sizeof(__half);
+    return bytes > (size_t) INT32_MAX ? -1 : (int) bytes;
+}
+
+DF_API int spec_dflash_get_kv_state(int32_t seq_id, void * data, int size) {
+    DSeqState * q = get_seq(seq_id);
+    if (!S.ok || q == nullptr || data == nullptr) return -1;
+    int32_t lo, hi;
+    if (spec_dflash_kv_snap_range(q, &lo, &hi) != 0) return -1;
+    const size_t block_bytes = (size_t) (hi - lo) * DF_KV * DF_HDIM * sizeof(__half);
+    if (size != (int) (sizeof(spec_sidecar_state) + (size_t) DF_LAYERS * 2 * block_bytes)) return -1;
+    DFlashDeviceGuard device_guard(S.device);
+    if (!device_guard.valid) return -1;
+    spec_sidecar_state header;
+    header.magic = SPEC_SIDECAR_STATE_MAGIC;
+    header.version = SPEC_SIDECAR_STATE_VERSION;
+    header.kind = SPEC_SIDECAR_STATE_KIND_DFLASH;
+    header.pos_min = lo;
+    header.pos_max = hi;
+    header.epoch = q->state_epoch;
+    std::memcpy(data, &header, sizeof(header));
+    char * out = (char *) data + sizeof(header);
+    for (int il = 0; il < DF_LAYERS; ++il) {
+        if (q->Kc[il] == nullptr || q->Vc[il] == nullptr) return -1;
+        DFC(hipMemcpy(out, q->Kc[il] + (size_t) lo * DF_KV * DF_HDIM, block_bytes, hipMemcpyDeviceToHost));
+        DFC(hipMemcpy(out + block_bytes, q->Vc[il] + (size_t) lo * DF_KV * DF_HDIM, block_bytes, hipMemcpyDeviceToHost));
+        out += (size_t) 2 * block_bytes;
+    }
+    return 0;
+}
+
+DF_API int spec_dflash_set_kv_state(int32_t seq_id, const void * data, int size) {
+    DSeqState * q = get_seq(seq_id);
+    // Reject truncated payloads before reading the header.
+    if (!S.ok || q == nullptr || data == nullptr || size < (int) sizeof(spec_sidecar_state)) return -1;
+    spec_sidecar_state header;
+    std::memcpy(&header, data, sizeof(header));
+    if (header.magic != SPEC_SIDECAR_STATE_MAGIC || header.version != SPEC_SIDECAR_STATE_VERSION ||
+            header.kind != SPEC_SIDECAR_STATE_KIND_DFLASH) return -1;
+    if (header.pos_min < 0 || header.pos_min > header.pos_max || header.pos_max > S.max_pos) return -1;
+    if (header.pos_max - header.pos_min > DF_WINDOW) return -1;
+    if (q->pending_pos_max != q->state_pos_max) return -1;
+    const size_t block_bytes = (size_t) (header.pos_max - header.pos_min) * DF_KV * DF_HDIM * sizeof(__half);
+    if (size != (int) (sizeof(spec_sidecar_state) + (size_t) DF_LAYERS * 2 * block_bytes)) return -1;
+    if (ensure_seq_storage(*q, header.pos_max) != 0) return -1;
+    DFlashDeviceGuard device_guard(S.device);
+    if (!device_guard.valid) return -1;
+    const char * in = (const char *) data + sizeof(header);
+    for (int il = 0; il < DF_LAYERS; ++il) {
+        DFC(hipMemcpyAsync(q->Kc[il] + (size_t) header.pos_min * DF_KV * DF_HDIM, in, block_bytes, hipMemcpyHostToDevice, S.st));
+        DFC(hipMemcpyAsync(q->Vc[il] + (size_t) header.pos_min * DF_KV * DF_HDIM, in + block_bytes, block_bytes, hipMemcpyHostToDevice, S.st));
+        in += (size_t) 2 * block_bytes;
+    }
+    DFC(hipStreamSynchronize(S.st));
+    q->state_pos_min = header.pos_min;
+    q->state_pos_max = header.pos_max;
+    if (++q->state_epoch == 0) q->state_epoch = 1;
+    discard_pending(*q);
+    return 0;
+}
+
 DF_API int spec_dflash_rebase_state(int32_t seq_id, int32_t pos_min, int32_t pos_max, int32_t delta) {
     DSeqState * q = get_seq(seq_id);
     if (!S.ok || q == nullptr || pos_min < 0 || pos_min > pos_max || pos_max > S.max_pos ||

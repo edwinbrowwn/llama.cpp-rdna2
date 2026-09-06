@@ -183,6 +183,11 @@ public:
     bool rebase_state(int32_t seq_id, int32_t pos_min, int32_t pos_max, int32_t delta) const;
     bool attach_target_stream(void * stream, int32_t device) const;
 
+    // Optional attention-window KV snapshot; negative size means unsupported.
+    int32_t kv_state_size(int32_t seq_id) const;
+    bool get_kv_state(int32_t seq_id, std::vector<uint8_t> & data) const;
+    bool set_kv_state(int32_t seq_id, const std::vector<uint8_t> & data) const;
+
     int chunk(int32_t seq_id, const int32_t * positions,
               const float * target_features, int count) const;
     int chunk_device(int32_t seq_id, const int32_t * positions,

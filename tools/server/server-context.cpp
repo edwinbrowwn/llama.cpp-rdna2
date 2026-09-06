@@ -529,12 +529,22 @@ struct server_slot {
         const size_t cur_size_tgt =           llama_state_seq_get_size_ext(ctx_tgt, id, LLAMA_STATE_SEQ_FLAGS_NONE);
         const size_t cur_size_dft = ctx_dft ? llama_state_seq_get_size_ext(ctx_dft, id, LLAMA_STATE_SEQ_FLAGS_NONE) : 0;
 
-        const size_t cur_size = cur_size_tgt + cur_size_dft;
+        // The optional sidecar attention-window snapshot keeps cache switching
+        // from replaying the whole prompt to reseed the drafter KV.
+        size_t cur_size_spec = 0;
+        if (spec) {
+            const int32_t spec_size = common_speculative_kv_state_size(spec, id);
+            if (spec_size >= 0) {
+                cur_size_spec = (size_t) spec_size;
+            }
+        }
 
-        SRV_TRC(" - saving prompt with length %d, total state size = %.3f MiB (draft: %.3f MiB)\n",
-                (int) prompt.tokens.size(), cur_size / (1024.0 * 1024.0), cur_size_dft / (1024.0 * 1024.0));
+        const size_t cur_size = cur_size_tgt + cur_size_dft + cur_size_spec;
 
-        auto * cur = prompt_cache.alloc(prompt, cur_size_tgt, cur_size_dft);
+        SRV_TRC(" - saving prompt with length %d, total state size = %.3f MiB (draft: %.3f MiB, spec: %.3f MiB)\n",
+                (int) prompt.tokens.size(), cur_size / (1024.0 * 1024.0), cur_size_dft / (1024.0 * 1024.0), cur_size_spec / (1024.0 * 1024.0));
+
+        auto * cur = prompt_cache.alloc(prompt, cur_size_tgt, cur_size_dft, cur_size_spec);
         if (cur == nullptr) {
             return false;
         }
@@ -563,14 +573,39 @@ struct server_slot {
             }
         }
 
+        if (cur_size_spec > 0) {
+            if (!common_speculative_get_kv_state(spec, id, cur->data.spec)) {
+                SLT_WRN(*this, "%s", "failed to save speculative sidecar KV snapshot; dropping cache entry\n");
+                if (!prompt_cache.discard(cur)) {
+                    SLT_ERR(*this, "%s", "failed to discard incomplete prompt state\n");
+                }
+                return false;
+            }
+        }
+
         return true;
     }
 
     bool prompt_load(server_prompt_cache & prompt_cache, const server_tokens & tokens) {
         const bool replaces_resident_state = prompt_cache.has_better_match(prompt, tokens);
+        std::vector<uint8_t> spec_data;
+        if (spec) {
+            const auto * best = prompt_cache.find_better_match(prompt, tokens);
+            if (best != nullptr) {
+                spec_data = best->data.spec;
+            }
+        }
         bool res = prompt_cache.load(prompt, tokens, ctx_tgt, ctx_dft, id);
         if (replaces_resident_state) {
             spec_prompt_state_valid = false;
+        }
+        if (res && spec != nullptr && !spec_data.empty()) {
+            if (common_speculative_set_kv_state(spec, id, spec_data)) {
+                // The restored sidecar window pairs with the restored target KV.
+                spec_prompt_state_valid = true;
+            } else {
+                SLT_WRN(*this, "%s", "failed to restore speculative sidecar KV; replaying prompt\n");
+            }
         }
         if (!res) {
             SLT_WRN(*this, "%s", "failed to load prompt from cache\n");

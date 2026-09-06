@@ -173,6 +173,12 @@ SPEC_SIDECAR_API int spec_dflash_draft_stochastic(
         int32_t * output_ids,
         int32_t * dist_ids,
         float * dist_probs);
+// KV window snapshots are optional so older libraries keep loading. A snapshot
+// holds the spec_sidecar_state header followed by [pos_min, pos_max) committed
+// rows, laid out per layer as K block then V block in FP16.
+SPEC_SIDECAR_API int spec_dflash_kv_state_size(int32_t seq_id);
+SPEC_SIDECAR_API int spec_dflash_get_kv_state(int32_t seq_id, void * data, int size);
+SPEC_SIDECAR_API int spec_dflash_set_kv_state(int32_t seq_id, const void * data, int size);
 
 #ifdef __cplusplus
 }
