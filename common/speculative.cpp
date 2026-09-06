@@ -345,6 +345,10 @@ struct common_speculative_impl {
     virtual bool truncate_state(llama_seq_id /*seq_id*/, llama_pos /*pos_max*/) { return true; }
     virtual bool commit_state(llama_seq_id /*seq_id*/, llama_pos /*pos_max*/) { return true; }
     virtual bool rebase_state(llama_seq_id /*seq_id*/, llama_pos /*pos_min*/, llama_pos /*pos_max*/, llama_pos /*delta*/) { return true; }
+    // Optional attention-window KV snapshot for host prompt-cache entries.
+    virtual int32_t kv_state_size(llama_seq_id /*seq_id*/) const { return -1; }
+    virtual bool get_kv_state(llama_seq_id /*seq_id*/, std::vector<uint8_t> & /*data*/) const { return false; }
+    virtual bool set_kv_state(llama_seq_id /*seq_id*/, const std::vector<uint8_t> & /*data*/) { return false; }
 };
 
 struct common_speculative_impl_draft_simple : public common_speculative_impl {
@@ -2062,6 +2066,43 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         return true;
     }
 
+    void release_state(llama_seq_id seq_id) override {
+        if (seq_id < 0 || seq_id >= (llama_seq_id) n_seq) return;
+        verify_rows[seq_id] = 0;
+        verify_pos_first[seq_id] = -1;
+        // Keep committed device KV with the slot's resident target prefix.
+        if (sidecar_stale[seq_id]) {
+            reset_state(seq_id);
+        }
+    }
+
+    bool prepare_prompt_state(
+            llama_seq_id seq_id, llama_pos pos_next, bool can_reuse_resident) override {
+        if (!sidecar.active()) return true;
+        if (seq_id < 0 || seq_id >= (llama_seq_id) n_seq) return false;
+
+        std::vector<uint8_t> data;
+        spec_sidecar_state state = {};
+        if (sidecar.get_state(seq_id, data) && data.size() == sizeof(state)) {
+            std::memcpy(&state, data.data(), sizeof(state));
+            if (state.magic == SPEC_SIDECAR_STATE_MAGIC &&
+                    state.version == SPEC_SIDECAR_STATE_VERSION &&
+                    state.kind == SPEC_SIDECAR_STATE_KIND_DFLASH &&
+                    common_speculative_dflash_can_reuse_prompt(
+                        can_reuse_resident, sidecar_stale[seq_id], pos_next, state.pos_min, state.pos_max) &&
+                    sidecar.truncate_state(seq_id, pos_next)) {
+                // A truncate at the committed tip discards cancelled pending rows without copying KV.
+                SPC_DBG("reusing DFlash sidecar state: seq=%d, pos=%d\n", (int) seq_id, (int) pos_next);
+                return true;
+            }
+        }
+
+        reset_state(seq_id);
+        SPC_DBG("reset DFlash sidecar state for prompt replay: seq=%d, target_pos=%d, resident=%d\n",
+                (int) seq_id, (int) pos_next, (int) can_reuse_resident);
+        return false;
+    }
+
     bool reset_state(llama_seq_id seq_id) override {
         if (!sidecar.active()) return true;
         if (seq_id >= 0 && seq_id < (llama_seq_id) n_seq && sidecar_stale[seq_id]) {
@@ -2087,6 +2128,24 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
             return false;
         }
         return true;
+    }
+
+    int32_t kv_state_size(llama_seq_id seq_id) const override {
+        if (!sidecar.active() || seq_id < 0 || seq_id >= (llama_seq_id) n_seq) return -1;
+        if (sidecar_stale[seq_id]) return -1;
+        return sidecar.kv_state_size((int32_t) seq_id);
+    }
+
+    bool get_kv_state(llama_seq_id seq_id, std::vector<uint8_t> & data) const override {
+        if (kv_state_size(seq_id) < 0) return false;
+        return sidecar.get_kv_state((int32_t) seq_id, data);
+    }
+
+    bool set_kv_state(llama_seq_id seq_id, const std::vector<uint8_t> & data) override {
+        if (data.empty()) return true;
+        if (!sidecar.active() || seq_id < 0 || seq_id >= (llama_seq_id) n_seq) return false;
+        if (sidecar_stale[seq_id] && !reset_state(seq_id)) return false;
+        return sidecar.set_kv_state((int32_t) seq_id, data);
     }
 
     bool commit_state(llama_seq_id seq_id, llama_pos pos_max) override {
@@ -5013,6 +5072,55 @@ bool common_speculative_rebase_state(common_speculative * spec, llama_seq_id seq
         result = impl->rebase_state(seq_id, pos_min, pos_max, delta) && result;
     }
     return result;
+}
+
+int32_t common_speculative_kv_state_size(common_speculative * spec, llama_seq_id seq_id) {
+    if (spec == nullptr) {
+        return -1;
+    }
+    int32_t result = -1;
+    for (auto & impl : spec->impls) {
+        result = std::max(result, impl->kv_state_size(seq_id));
+    }
+    return result;
+}
+
+bool common_speculative_get_kv_state(common_speculative * spec, llama_seq_id seq_id, std::vector<uint8_t> & data) {
+    if (spec == nullptr) {
+        return false;
+    }
+    size_t chosen = 0;
+    int32_t chosen_size = -1;
+    for (size_t i = 0; i < spec->impls.size(); ++i) {
+        const int32_t size = spec->impls[i]->kv_state_size(seq_id);
+        if (size > chosen_size) {
+            chosen_size = size;
+            chosen = i;
+        }
+    }
+    if (chosen_size < 0) {
+        return false;
+    }
+    return spec->impls[chosen]->get_kv_state(seq_id, data);
+}
+
+bool common_speculative_set_kv_state(common_speculative * spec, llama_seq_id seq_id, const std::vector<uint8_t> & data) {
+    if (data.empty()) {
+        return true;
+    }
+    if (spec == nullptr) {
+        return false;
+    }
+    // Restore eligibility must not depend on whether the current sequence can
+    // be saved: a stale sequence may still accept a valid cached snapshot.
+    // Unsupported implementations return false; the snapshot owner validates
+    // the payload and reports success only after applying it.
+    for (auto & impl : spec->impls) {
+        if (impl->set_kv_state(seq_id, data)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void common_speculative_print_stats(const common_speculative * spec, llama_seq_id seq_id) {

@@ -3,6 +3,12 @@
 #include <algorithm>
 #include <cstdint>
 
+inline bool common_speculative_dflash_can_reuse_prompt(
+        bool can_reuse_resident, bool stale, int32_t pos_next, int32_t pos_min, int32_t pos_max) {
+    // Rewinding can expose rows omitted by windowed catch-up. Reuse only the committed tip.
+    return can_reuse_resident && !stale && pos_min >= 0 && pos_min <= pos_max && pos_next == pos_max;
+}
+
 enum class common_speculative_dflash_controller_mode {
     OFF,
     TRACE,

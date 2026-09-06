@@ -141,6 +141,12 @@ bool common_speculative_truncate_state(common_speculative * spec, llama_seq_id s
 bool common_speculative_commit_state(common_speculative * spec, llama_seq_id seq_id, llama_pos pos_max);
 bool common_speculative_rebase_state(common_speculative * spec, llama_seq_id seq_id,
         llama_pos pos_min, llama_pos pos_max, llama_pos delta);
+// Attention-window KV snapshot for host prompt-cache entries. A negative size
+// means the active implementation has no portable snapshot; set returns false
+// when data is non-empty and no implementation can apply it.
+int32_t common_speculative_kv_state_size(common_speculative * spec, llama_seq_id seq_id);
+bool common_speculative_get_kv_state(common_speculative * spec, llama_seq_id seq_id, std::vector<uint8_t> & data);
+bool common_speculative_set_kv_state(common_speculative * spec, llama_seq_id seq_id, const std::vector<uint8_t> & data);
 
 // print statistics about the speculative decoding
 void common_speculative_print_stats(const common_speculative * spec, llama_seq_id seq_id = -1);

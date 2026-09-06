@@ -46,5 +46,24 @@ int main() {
                     config, 2, 4, false) == 4,
             "off mode retains fixed width");
 
+    failures += require(common_speculative_dflash_can_reuse_prompt(true, false, 17228, 15180, 17228),
+            "cached continuation retains committed state");
+    failures += require(common_speculative_dflash_can_reuse_prompt(true, false, 0, 0, 0),
+            "empty resident state permits cold prefill");
+    failures += require(!common_speculative_dflash_can_reuse_prompt(false, false, 17228, 15180, 17228),
+            "host restore or branch requires replay despite matching cursor");
+    failures += require(!common_speculative_dflash_can_reuse_prompt(true, true, 17228, 15180, 17228),
+            "stale state cannot be reused");
+    failures += require(!common_speculative_dflash_can_reuse_prompt(true, false, 17228, 0, 0),
+            "reset sidecar cannot reuse cached target prefix");
+    failures += require(!common_speculative_dflash_can_reuse_prompt(true, false, 17227, 15180, 17228),
+            "rewind requires replay even when truncate would accept it");
+    failures += require(!common_speculative_dflash_can_reuse_prompt(true, false, 17229, 15180, 17228),
+            "missing committed row requires replay");
+    failures += require(!common_speculative_dflash_can_reuse_prompt(true, false, 10, -1, 10),
+            "negative retained boundary is invalid");
+    failures += require(!common_speculative_dflash_can_reuse_prompt(true, false, 10, 11, 10),
+            "inverted retained range is invalid");
+
     return failures == 0 ? 0 : 1;
 }

@@ -1083,6 +1083,9 @@ struct common_spec_sidecar_dflash::impl {
     dflash_draft_fn draft_fn = nullptr;
     dflash_stochastic_top_k_fn stochastic_top_k_fn = nullptr;
     dflash_draft_stochastic_fn draft_stochastic_fn = nullptr;
+    int (* kv_state_size_fn)(int32_t) = nullptr;
+    int (* kv_state_get_fn)(int32_t, void *, int) = nullptr;
+    int (* kv_state_set_fn)(int32_t, const void *, int) = nullptr;
 };
 
 common_spec_sidecar_dflash::common_spec_sidecar_dflash() : pimpl(new impl) {}
@@ -1144,6 +1147,13 @@ bool common_spec_sidecar_dflash::load(const std::string & library_path,
                 std::to_string(SPEC_SIDECAR_DFLASH_RELEASE_ABI) + ")";
         close_library(handle);
         return false;
+    }
+    {
+        // KV window snapshots are optional for older sidecar binaries.
+        std::string opt_error;
+        resolve_symbol(handle, "spec_dflash_kv_state_size", pimpl->kv_state_size_fn, opt_error);
+        resolve_symbol(handle, "spec_dflash_get_kv_state", pimpl->kv_state_get_fn, opt_error);
+        resolve_symbol(handle, "spec_dflash_set_kv_state", pimpl->kv_state_set_fn, opt_error);
     }
     if (check(encoded_width, block_size, n_seq) != 0) {
         error = "DFlash sidecar model shape check failed";
@@ -1243,6 +1253,25 @@ bool common_spec_sidecar_dflash::rebase_state(int32_t seq_id, int32_t pos_min, i
 bool common_spec_sidecar_dflash::attach_target_stream(void * stream, int32_t device) const {
     return active() && pimpl->attach_stream_fn != nullptr &&
            pimpl->attach_stream_fn(stream, device) == 0;
+}
+
+int32_t common_spec_sidecar_dflash::kv_state_size(int32_t seq_id) const {
+    if (!active() || pimpl->kv_state_size_fn == nullptr) return -1;
+    return pimpl->kv_state_size_fn(seq_id);
+}
+
+bool common_spec_sidecar_dflash::get_kv_state(int32_t seq_id, std::vector<uint8_t> & data) const {
+    if (!active() || pimpl->kv_state_get_fn == nullptr) return false;
+    const int size = kv_state_size(seq_id);
+    if (size < (int) sizeof(spec_sidecar_state)) return false;
+    data.resize((size_t) size);
+    return pimpl->kv_state_get_fn(seq_id, data.data(), size) == 0;
+}
+
+bool common_spec_sidecar_dflash::set_kv_state(int32_t seq_id, const std::vector<uint8_t> & data) const {
+    if (data.empty() || data.size() > static_cast<size_t>(std::numeric_limits<int>::max())) return false;
+    if (!active() || pimpl->kv_state_set_fn == nullptr) return false;
+    return pimpl->kv_state_set_fn(seq_id, data.data(), (int) data.size()) == 0;
 }
 
 int common_spec_sidecar_dflash::chunk(int32_t seq_id, const int32_t * positions,
